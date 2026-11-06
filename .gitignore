@@ -1,0 +1,11 @@
+# Pipeline state and sensitive material never live here (charter P15, P23).
+# They live under %USERPROFILE%\.keel\ . Nothing in this repo should ever need
+# to be gitignored for privacy reasons - if it does, it is in the wrong place.
+
+*.log
+Thumbs.db
+.DS_Store
+
+# A code-search tool's local configuration. It configures one person's editor tooling
+# and does nothing for anyone else, so it is not tracked.
+.serena/

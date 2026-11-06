@@ -1,0 +1,11 @@
+#!/bin/sh
+# keel pre-commit: docs move with the change (charter P11, P10).
+# Bypass only with --no-verify, and only when you mean it.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/check-suite-docs.ps1" -CommitGate
+status=$?
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "pre-commit: check-suite-docs failed. Fix the above, or re-run with --no-verify if you truly mean to."
+  exit $status
+fi
+exit 0

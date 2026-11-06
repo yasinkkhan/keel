@@ -1,0 +1,6 @@
+{
+  "name": "keel-surfaces",
+  "version": "0.3.2",
+  "description": "Tracker projection and external document grounding for keel projects. The only external-write surface. Windows only.",
+  "author": { "name": "Yasin Khan" }
+}

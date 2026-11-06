@@ -1,0 +1,392 @@
+﻿<title>Keel Architecture</title>
+<style>
+:root{
+  --ground:#EBEFF1; --surface:#F7F9FA; --surface-2:#E2E9EC;
+  --ink:#10222C; --ink-soft:#4A6068; --ink-faint:#7C919A;
+  --line:#C8D3D8; --line-strong:#9FB2BA;
+  --accent:#0E6B72; --accent-soft:#DBEAEB;
+  --bronze:#8F5320; --bronze-soft:#F0E3D5;
+  --good:#2F6B45; --crit:#9E2F2F;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif;
+  --sans:"Segoe UI",system-ui,-apple-system,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"Cascadia Mono","Cascadia Code",Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0C161C; --surface:#12222A; --surface-2:#183039;
+    --ink:#DEE9ED; --ink-soft:#94AAB3; --ink-faint:#6B848E;
+    --line:#26414C; --line-strong:#3A5B68;
+    --accent:#4FC2C9; --accent-soft:#0F323A;
+    --bronze:#D08B48; --bronze-soft:#2E2118;
+    --good:#6FBF8E; --crit:#E27272;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0C161C; --surface:#12222A; --surface-2:#183039;
+  --ink:#DEE9ED; --ink-soft:#94AAB3; --ink-faint:#6B848E;
+  --line:#26414C; --line-strong:#3A5B68;
+  --accent:#4FC2C9; --accent-soft:#0F323A;
+  --bronze:#D08B48; --bronze-soft:#2E2118;
+  --good:#6FBF8E; --crit:#E27272;
+}
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:var(--serif); font-size:16.5px; line-height:1.6;
+  margin:0; padding:0; -webkit-font-smoothing:antialiased;
+}
+.sheet{max-width:960px;margin:0 auto;padding:44px 26px 96px;display:flex;flex-direction:column;gap:40px}
+p,li{max-width:70ch}
+p{margin:0}
+a{color:var(--accent)}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+ul,ol{margin:0;padding-left:1.2em;display:flex;flex-direction:column;gap:6px}
+
+/* header */
+.masthead{border:1px solid var(--line-strong);background:var(--surface);padding:24px 26px}
+.eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin:0 0 9px}
+h1{font-family:var(--serif);font-size:clamp(2rem,4.6vw,2.7rem);line-height:1.05;margin:0;letter-spacing:-.015em}
+.lede{font-family:var(--sans);font-size:.98rem;color:var(--ink-soft);margin:12px 0 0;max-width:64ch}
+.rule{height:0;border-top:2px solid var(--accent);border-bottom:1px solid var(--line);padding-bottom:3px}
+
+/* sections keyed by subsystem, not sequence - so no numbers */
+section{display:flex;flex-direction:column;gap:16px}
+h2{
+  font-family:var(--mono);font-size:.72rem;font-weight:400;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--accent);margin:0;padding-bottom:8px;border-bottom:1px solid var(--line-strong);
+}
+h3{font-family:var(--serif);font-size:1.2rem;margin:10px 0 0;line-height:1.25}
+
+code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);padding:.1em .34em;border-radius:2px}
+strong{font-weight:700}
+
+.scroll{overflow-x:auto;border:1px solid var(--line);background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:.86rem;font-variant-numeric:tabular-nums}
+th{text-align:left;font-size:10px;letter-spacing:.13em;text-transform:uppercase;font-family:var(--mono);font-weight:400;
+   color:var(--ink-faint);padding:9px 13px;border-bottom:1px solid var(--line-strong);white-space:nowrap;background:var(--surface-2)}
+td{padding:10px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:0}
+td code{background:transparent;padding:0;color:var(--accent)}
+td.k{font-family:var(--mono);font-size:.8rem;color:var(--accent);white-space:nowrap}
+td.b{font-family:var(--mono);font-size:.8rem;color:var(--bronze);white-space:nowrap}
+
+pre{font-family:var(--mono);font-size:.79rem;line-height:1.5;margin:0;
+    background:var(--surface);border:1px solid var(--line);padding:17px 19px;overflow-x:auto;color:var(--ink)}
+pre b{color:var(--accent);font-weight:600}
+pre i{color:var(--bronze);font-style:normal}
+pre u{color:var(--ink-faint);text-decoration:none}
+
+.note,.warn{border-left:3px solid var(--accent);background:var(--accent-soft);padding:13px 17px;
+            font-family:var(--sans);font-size:.9rem;line-height:1.5}
+.warn{border-left-color:var(--bronze);background:var(--bronze-soft)}
+.note p,.warn p{max-width:64ch}
+.lbl{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--accent);display:block;margin-bottom:5px}
+.warn .lbl{color:var(--bronze)}
+
+/* enforcement ladder */
+.ladder{display:flex;flex-direction:column;gap:0;border:1px solid var(--line);background:var(--surface)}
+.rung{display:grid;grid-template-columns:auto 1fr;gap:16px;padding:13px 16px;border-bottom:1px solid var(--line);align-items:start}
+.rung:last-child{border-bottom:0}
+.rung .step{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;
+            color:var(--accent);white-space:nowrap;padding-top:2px;min-width:9.5em}
+.rung.hard .step{color:var(--bronze)}
+.rung .what{font-family:var(--sans);font-size:.88rem;line-height:1.5}
+
+.foot{font-family:var(--sans);font-size:.82rem;color:var(--ink-soft);border-top:1px solid var(--line);padding-top:18px;max-width:none}
+@media (max-width:640px){ body{font-size:16px} .sheet{padding:26px 15px 60px;gap:32px} .rung{grid-template-columns:1fr;gap:4px} }
+</style>
+
+<div class="sheet">
+
+<div class="masthead">
+  <p class="eyebrow">Keel &middot; architecture reference</p>
+  <h1>How keel works</h1>
+  <p class="lede">The shape of the system, the control flow, and where each rule is actually enforced. <code>DESIGN-CHARTER.md</code> records why each rule exists; this page records how it fits together.</p>
+</div>
+<div class="rule"></div>
+
+<section>
+  <h2>Orientation</h2>
+  <p>Keel is a Claude Code plugin marketplace, cloned wherever you keep it. Every real project is a <strong>sibling folder</strong> with its own <code>keel.json</code>. Keel is the tooling; it is never the work.</p>
+  <p>It exists because a plan held only in a conversation does not survive compaction, a new session, or three months. So the plan lives in files, the record lives in a state file the wrapper alone writes, and every claim about live state is re-measured rather than recalled.</p>
+  <div class="note">
+    <span class="lbl">The one sentence that predicts most of the design</span>
+    <p><strong>A gate is three facts: the artifact exists, the artifact conforms, and the verdict was recorded — and when the state file and the conversation disagree, the state file is right.</strong> Almost every structure below follows from taking that seriously.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Control flow</h2>
+  <p>One entry point, one dispatcher. A stage reached directly is a stage reached without its gates.</p>
+  <pre>                        <b>using-keel</b>          <u>the ONLY entry point</u>
+                             &#9474;
+                             &#9660;
+                     <b>keel-orchestrator</b>      <u>the ONLY dispatcher</u>
+                             &#9474;
+        &#9484;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9524;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9516;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+        &#9660;     &#9660;     &#9660;          &#9660;      &#9660;          &#9660;           &#9660;
+   plan-project plan-epic plan-workstream run-phase close-workstream  project-context  surfaces
+   <u>(creates the</u>  <u>(ledger)</u>  <u>(spec +</u>       <u>(1 phase,</u>  <u>(routes</u>      <u>(read-only</u>    <u>(tracker,</u>
+    <u>folder)</u>                <u>prompts)</u>      <u>8 gates)</u>   <u>friction)</u>     <u>grounding)</u>   <u>documents)</u>
+                                         &#9474;
+                              &#9484;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9524;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9488;
+                              &#9660;                   &#9660;
+                     <i>FRESH advisor</i>        <i>FRESH verifier</i>
+                     <i>(facts only)</i>         <i>(never saw the work)</i></pre>
+  <p><strong>Only <code>keel-plan-project</code> may run outside a project folder</strong>, because it is the one that creates the folder. Everything else refuses without a <code>keel.json</code>.</p>
+  <p>The active project is resolved by walking up from the working directory. It is never stored, so opening a folder <em>is</em> selecting the project, and two windows on two projects cannot confuse each other.</p>
+</section>
+
+<section>
+  <h2>The tree</h2>
+  <p>Four roles, a closed set. <strong>Depth is free; roles are not.</strong> Containment nests as deep as a project needs; what is constrained is what each role may contain.</p>
+  <pre><b>GOALS</b>  flat, many-to-many, project-scoped
+  G1  Ship a self-custody wallet real users trust with real money
+  G2  Never depend on a counterparty that can freeze us
+   &#9650;
+   &#9474; claimed by (a workstream declares at least one)
+   &#9474;
+project
+ &#9500;&#9472; <b>E1</b> epic           &#8594;G1,G2   <i>must state in one line what it GROUPS</i>
+ &#9474;   &#9492;&#9472; <b>E2</b> epic       &#8594;G1      <i>epics nest, at any depth</i>
+ &#9474;       &#9492;&#9472; <b>W4</b> workstream  &#8594;G1   <i>contains ONLY phases; ships independently</i>
+ &#9474;           &#9500;&#9472; <b>W4.1</b> phase   actor:agent      <i>always a leaf; one sitting</i>
+ &#9474;           &#9492;&#9472; <b>W4.2</b> phase   actor:external   <i>carries the 8 gates</i>
+ &#9492;&#9472; <b>E3</b> epic           &#8594;G2</pre>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Thing</th><th>Id</th><th>May contain</th><th>Refused with</th></tr></thead>
+    <tbody>
+      <tr><td>Goal</td><td class="k">G1</td><td>nothing — it is a link, not a container</td><td class="k">98</td></tr>
+      <tr><td>Epic</td><td class="k">E1</td><td>epics and workstreams, any depth</td><td class="k">93</td></tr>
+      <tr><td>Workstream</td><td class="k">W4</td><td>phases only</td><td class="k">93</td></tr>
+      <tr><td>Phase</td><td class="k">W4.2</td><td>nothing — always a leaf</td><td class="k">93</td></tr>
+      <tr><td>Check</td><td class="k">W4.2-C1</td><td>—</td><td class="k">96</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Checks take <code>C</code>, not <code>G</code>, because <code>G</code> is a goal here. Status tokens are greppable on purpose: <code>PLANNED RUNNING WAITING DELIVERED EXCLUDED NOT-DECOMPOSED UNADDRESSED</code>.</p>
+</section>
+
+<section>
+  <h2>The pipeline</h2>
+  <p>Eight stages, in order, for every phase in every project — whoever the actor is.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Gate</th><th>Artifact and the contract the wrapper checks</th><th>Verdicts</th></tr></thead>
+    <tbody>
+      <tr><td class="k">ground</td><td><code>grounding.md</code> — must carry <code>Measured:</code> and <code>Not read:</code></td><td>DONE</td></tr>
+      <tr><td class="k">investigate</td><td><code>investigation.md</code> — must carry <code>Positive control:</code></td><td>DONE · BLOCKED</td></tr>
+      <tr><td class="k">plan</td><td><code>plan.md</code> — must carry <code>Changes:</code>; approved by the human in chat</td><td>APPROVED · REJECTED</td></tr>
+      <tr><td class="k">implement</td><td><strong>actor-dependent.</strong> <code>agent</code>: one <code>changes-&lt;repo&gt;.patch</code> per declared repo. <code>self</code>/<code>external</code>: <code>act-log.md</code> with <code>Done by:</code> and <code>Done on:</code></td><td>DONE</td></tr>
+      <tr><td class="k">verify</td><td><code>verify-report.md</code> — a row per check, each with <code>run-by:</code>, plus <code>Positive control:</code></td><td>PASS · FAIL · INCONCLUSIVE</td></tr>
+      <tr><td class="k">human</td><td>chat approval, shown the change set <strong>and the advisor question ledger</strong></td><td>APPROVED · REJECTED</td></tr>
+      <tr><td class="b">enact</td><td><code>enact-record.md</code> — <code>-Reversible</code> and <code>-Observable</code> required <em>before</em> the act</td><td>DONE · N/A · DEFERRED</td></tr>
+      <tr><td class="k">record</td><td><code>delivery-record.md</code> — the phase id in uppercase, one evidence reference per declared repo</td><td>DONE</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="warn">
+    <span class="lbl">enact is the gate that carries the weight</span>
+    <p>It is the irreversible outward act: filing a return, signing, sending funds, publishing, broadcasting, deploying. An act that is <strong>irreversible and currently unobservable cannot be recorded DONE</strong> — the wrapper exits 95 and tells you to record <code>DEFERRED</code> and hold until the outcome can be read. Answer for the act in front of you, never from what a similar act was last time.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Actors</h2>
+  <p>A phase declares who acts. <strong>The actor selects what evidence a check accepts — never which gates run.</strong> The moment human work gets a lighter pipeline there are three pipelines, and the rarely-run ones are the ones handling irreversible real-world acts.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Actor</th><th>Who</th><th>Evidence a check accepts</th><th>Verify means</th></tr></thead>
+    <tbody>
+      <tr><td class="k">agent</td><td>Claude</td><td>command output, a patch, a headless render, a live query</td><td>re-run it in a fresh context</td></tr>
+      <tr><td class="k">self</td><td>you</td><td>an artifact you point at: a confirmation number, a filed document, a dated screenshot, a transaction hash</td><td>inspect the evidence; uninspectable is <code>INCONCLUSIVE</code>, never <code>PASS</code></td></tr>
+      <tr><td class="k">external</td><td>accountant, auditor, counsel, exchange</td><td>the received deliverable, plus who sent it and when</td><td>inspect the deliverable — "they confirmed it" is not evidence</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>An <code>external</code> phase spends most of its life <code>waiting</code>, which is a first-class state: it must name <strong>who</strong> and <strong>a review date</strong>, or the wrapper refuses it. A wait with no review date is an abandoned phase wearing a status.</p>
+</section>
+
+<section>
+  <h2>Where each rule is enforced</h2>
+  <p>Four rungs. A rule climbs one rung only after it has actually failed at its current one, with the failure cited. Hardening a gate that has never leaked is how a solo system acquires ceremony, and ceremony gets routed around at 11pm.</p>
+  <div class="ladder">
+    <div class="rung"><div class="step">1 &middot; nudge</div><div class="what"><code>keel-session-start.ps1</code> surfaces overdue phases, waits due for review, escalations, unclaimed goals and unpushed signals. <strong>Silent when clean.</strong> It never blocks.</div></div>
+    <div class="rung"><div class="step">2 &middot; skill prose</div><div class="what">The judgement that cannot be mechanised: when something is an epic, whether a check can fail, whether this is debt repayment or over-engineering. Prose is where taste lives — and is deliberately <em>not</em> where always-rules live.</div></div>
+    <div class="rung hard"><div class="step">3 &middot; exit code</div><div class="what"><strong>Anything that must always hold.</strong> The wrapper refuses and returns nonzero. Prose-only enforcement of an always-rule is a known failure mode: a model asked to count its own retries will decide this attempt is different.</div></div>
+    <div class="rung hard"><div class="step">4 &middot; PreToolUse block</div><div class="what">One rule only: <code>plugins/**</code> cannot be edited without <code>DESIGN-CHARTER.md</code> having been read <em>this session</em>. Repo-local, so it taxes this repo and not every session everywhere. Fails open.</div></div>
+  </div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Exit</th><th>The wrapper refused because</th></tr></thead>
+    <tbody>
+      <tr><td class="k">2</td><td>iteration cap reached — nothing was incremented or created</td></tr>
+      <tr><td class="k">90</td><td>bad argument, invalid id, or an attempt to change something immutable (a delivered phase)</td></tr>
+      <tr><td class="k">91</td><td>no project resolved, or no state for it</td></tr>
+      <tr><td class="k">92</td><td>duplicate run order — "what runs next" would be arbitrary while status answered it confidently</td></tr>
+      <tr><td class="k">93</td><td>role or nesting violation</td></tr>
+      <tr><td class="k">94</td><td>unknown node or undeclared phase</td></tr>
+      <tr><td class="k">95</td><td>a mandatory answer was missing — reversibility, observability, or who a wait is on</td></tr>
+      <tr><td class="k">96</td><td>artifact missing or non-conforming</td></tr>
+      <tr><td class="k">97</td><td>signal with no citable moment, or quarantined content trying to leave the machine</td></tr>
+      <tr><td class="k">98</td><td>goal-linkage violation</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>If the wrapper refuses you, fix the input.</strong> The exit code is the contract, not an opinion.</p>
+</section>
+
+<section>
+  <h2>On disk</h2>
+  <pre>&lt;your projects root&gt;\
+  <b>keel\</b>                        a clone of this marketplace, if you develop keel
+  <b>&lt;project&gt;\</b>
+    keel.json                  git? tracker? quarantine?  <u>read before anything else</u>
+    CHARTER.md                 done, scope boundary, goals, counterparties, decisions
+    plan\epics\                decomposition ledgers
+    plan\workstreams\          specs: finding, decisions, phase table, checks
+    plan\prompts\              one per phase, written for a session that has never seen this one
+    record\                    delivery records
+    reference\                 slow project knowledge  +  <b>INDEX.md</b> (generated)
+    repos\                     the project's code                    <u>never indexed</u>
+    private\                   gitignored scratch                    <u>never indexed</u>
+
+%USERPROFILE%\<b>.keel\</b>             <u>never committed anywhere</u>
+  projects\&lt;project&gt;\state.json      written ONLY by keel-state.ps1
+  projects\&lt;project&gt;\phases\W4.2\    the gate artifacts
+  quarantine\&lt;project&gt;\              sensitive material, redacted AT EXTRACTION
+  signals\S0007.json                 local until pushed
+  signals-target.txt                 where signals go; absent = nothing is sent
+
+github.com/&lt;your chosen repo&gt;     signals arrive as issues; fixes return to keel as PRs</pre>
+  <p>The split is deliberate: <strong>files are the plan, state is the record.</strong> A spec's phase table says what was intended; <code>status</code> says what happened. When they disagree, that disagreement is the finding, surfaced rather than resolved in favour of whichever was read last.</p>
+</section>
+
+<section>
+  <h2>Retrieval</h2>
+  <p>A project's documentation accumulates as it runs, and has to stay findable without being re-read. Three tiers, cheapest first.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Tier</th><th>What</th><th>Answers</th></tr></thead>
+    <tbody>
+      <tr><td class="k">0</td><td><code>keel.json</code> + <code>CHARTER.md</code> §1–4. Always read.</td><td>what this project is, what done means, the boundary, the goals</td></tr>
+      <tr><td class="k">1</td><td><code>reference/INDEX.md</code> — every document with its <strong>headings</strong>. Verified against disk before use.</td><td>which document covers X, and which section of it</td></tr>
+      <tr><td class="k">2</td><td>live measurement — <code>status</code>, <code>tree</code>, <code>goal-coverage</code>, and going and looking</td><td>what is true <em>now</em></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The index stores headings, never line numbers, so it survives edits above them. It carries an inputs hash and <strong>exits nonzero when stale</strong> — a grounding router that answered from a rotted index would be the tool built to prevent stale assertions becoming the most-trusted source of them.</p>
+  <div class="note">
+    <span class="lbl">The part that compounds</span>
+    <p><code>keel-close-workstream</code> routes real friction into <code>reference/</code> and rebuilds the index. A portal's session timeout, a counterparty's actual turnaround, a format gotcha that cost an hour — written down at close-out and found by the session six months later that would otherwise rediscover it. <strong>Not writing it down does not lose the fact; not indexing it loses the ability to find it.</strong></p>
+  </div>
+</section>
+
+<section>
+  <h2>The signal loop</h2>
+  <p>A project never edits keel. It files a <strong>signal</strong> — a report, citing project, phase and reproducible evidence. Keel triages it, and because keel is itself a keel project, promotion is just planning.</p>
+  <pre>  <b>PROJECT MACHINE</b>                            <b>KEEL</b>
+
+  note-friction, during the work
+        &#9474;
+        &#9660;
+  close-workstream routes to exactly ONE home
+        &#9500;&#9472; project charter or spec
+        &#9500;&#9472; project reference\
+        &#9500;&#9472; dropped   <i>(no citable moment &#8212; the common case)</i>
+        &#9492;&#9472; <b>signal</b> &#8594; local file    <u>works offline; nothing is lost</u>
+                     &#9474;
+                     &#9660;
+           <b>signals-push</b>  <u>(preview)</u>
+           <b>-Apply</b> &#8594; GitHub <b>ISSUE</b> on your chosen repo
+                                    &#9474;
+                                    &#9660;
+                          triage: reproduce &#8594; cluster &#8594; promote
+                                    &#9474;
+                                    &#9660;
+                          a keel workstream &#8594; <b>PULL REQUEST</b> &#8594; merge
+                                    &#9474;
+  <b>ANY MACHINE</b> &#9668;&#9472;&#9472; release + update + NEW session &#9668;&#9472;&#9472;&#9472;&#9496;</pre>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Kind</th><th>Means</th><th>Acts at</th></tr></thead>
+    <tbody>
+      <tr><td class="b">unsafe</td><td>something outward-facing nearly happened without a preview</td><td><strong>n=1</strong></td></tr>
+      <tr><td class="b">refusal</td><td>the wrapper refused something legitimate</td><td><strong>n=1</strong> — a false refusal teaches you to route around the gate</td></tr>
+      <tr><td class="k">wrong-doc</td><td>a keel skill or reference asserted something false</td><td>n=1 if reproduced</td></tr>
+      <tr><td class="k">gap</td><td>no gate, verb or recipe existed for something real</td><td>n=2</td></tr>
+      <tr><td class="k">friction</td><td>it worked, but cost far more turns than it should</td><td>n=2</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p><strong>Issues in, PRs out.</strong> A PR from a project session would make it the author of its own fix from a sample size of one, having never read the charter — which is exactly what the queue prevents. A quarantined project files evidence <strong>by reference only</strong>; the wrapper refuses content with exit 97, because an issue body cannot be unsent.</p>
+</section>
+
+<section>
+  <h2>What exists</h2>
+  <!-- BEGIN GENERATED HTML INVENTORY -->
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Plugin</th><th>Version</th><th>Skills</th></tr></thead>
+    <tbody>
+      <tr><td><code>keel-project</code></td><td>0.4.7</td><td><code>keel-project-context</code></td></tr>
+      <tr><td><code>keel-surfaces</code></td><td>0.3.2</td><td><code>keel-documents</code>, <code>keel-tracker</code></td></tr>
+      <tr><td><code>keel-workflow</code></td><td>0.68.7</td><td><code>keel-close-workstream</code>, <code>keel-orchestrator</code>, <code>keel-plan-epic</code>, <code>keel-plan-project</code>, <code>keel-plan-workstream</code>, <code>keel-run-phase</code>, <code>using-keel</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <!-- END GENERATED HTML INVENTORY -->
+  <p>Generated by <code>scripts/gen-suite-docs.ps1 -Write</code> and checked by <code>scripts/check-suite-docs.ps1</code>. Hand-editing it is a defect: an inventory that can drift is an inventory that will.</p>
+</section>
+
+<section>
+  <h2>What keel is not</h2>
+  <ul>
+    <li><strong>Not a project.</strong> If a session here is writing a contract or reconstructing a ledger, it is in the wrong folder.</li>
+    <li><strong>Not a replacement for the earlier workflow it was modelled on.</strong> The two do not merge, and a feature shaped for that one estate does not get imported because it exists there.</li>
+    <li><strong>Not a vector store.</strong> Retrieval is a drift-checked heading index plus targeted reads. A semantic index that cannot be checked against disk would be a second authority that rots silently.</li>
+    <li><strong>Not a team tool.</strong> One person, one reviewer. No assignment, permissions or notifications.</li>
+    <li><strong>Not a second backlog.</strong> Signals are the queue. A <code>TODO.md</code> here would be the authority nobody reads.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Untested predictions</h2>
+  <p>These were written before any real project had used keel, as predictions for the first real projects to confirm or break, and none has been marked settled yet. <strong>Strike a line through with a date when experience settles it</strong>, and file a signal if the fix belongs in keel.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Prediction</th><th>What would disprove it</th><th>Settled</th></tr></thead>
+    <tbody>
+      <tr><td>Depth-on-demand keeps projects comparable, because roles are constrained even though depth is not.</td><td>Two projects grow shapes that cannot be reported on together, or the "groups" line becomes a formality nobody reads.</td><td>—</td></tr>
+      <tr><td>The <code>external</code> actor and <code>waiting</code> are enough to track third parties.</td><td>A real accountant or auditor produces a state that will not fit — partial delivery, a re-opened request, a chain of hand-offs.</td><td>—</td></tr>
+      <tr><td>The three-tier index is enough retrieval.</td><td>A project gets big enough that heading-level granularity stops narrowing the search usefully.</td><td>—</td></tr>
+      <tr><td>Eight gates on a one-sitting phase is proportionate, not ceremony.</td><td>Express phases get routed around at 11pm, which is the failure mode the ladder exists to avoid.</td><td>—</td></tr>
+      <tr><td>n=2 before acting on <code>gap</code> and <code>friction</code> is the right threshold.</td><td>A real defect sits in the queue for months because only one project ever meets it.</td><td>—</td></tr>
+      <tr><td>Preview-then-confirm is sufficient protection for the tracker and for enactment.</td><td>Something outward-facing lands that should not have — which is an <code>unsafe</code> signal, acting at n=1.</td><td>—</td></tr>
+      <tr><td><code>keel-tracker</code> and <code>keel-documents</code> work.</td><td><strong>Neither has ever been run against a live board or a real document.</strong> They are written and preview-gated; that is all that is known.</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>Where things are decided</h2>
+  <p>Every fact has one home. This page points; it does not restate.</p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>For</th><th>Read</th></tr></thead>
+    <tbody>
+      <tr><td>Why a rule exists, and what violating it looks like</td><td><code>DESIGN-CHARTER.md</code> — P1–P26</td></tr>
+      <tr><td>Standing rules for a Claude session working in this repo</td><td><code>CLAUDE.md</code></td></tr>
+      <tr><td>How to make a change, version it, and add a skill</td><td><code>CONTRIBUTING.md</code></td></tr>
+      <tr><td>What changed in each release, and why</td><td><code>CHANGELOG.md</code></td></tr>
+      <tr><td>The verb list and the exit codes</td><td><code>keel-state.ps1</code> with no arguments</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<p class="foot">Keel architecture &middot; source of truth is <code>ARCHITECTURE.html</code> in the keel repo; this published page is a projection of it. First written before any real project had run; see <strong>Untested predictions</strong>.</p>
+
+</div>

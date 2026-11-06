@@ -1,0 +1,10 @@
+#!/bin/sh
+# keel pre-push: the full validator, including the slow checks.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "scripts/check-suite-docs.ps1" -Strict
+status=$?
+if [ $status -ne 0 ]; then
+  echo ""
+  echo "pre-push: check-suite-docs -Strict failed. Nothing was pushed."
+  exit $status
+fi
+exit 0

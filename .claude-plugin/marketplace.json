@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "keel",
+  "version": "0.76.0",
+  "description": "Multi-project planning and delivery marketplace. Ships the keel-workflow pipeline (funnel, orchestrator, plan project/epic/workstream, run-phase, close) plus its keel-project grounding router and keel-surfaces tracker/document companions. One project per folder, siblings under a projects root of your choosing. Windows only (Windows PowerShell 5.1).",
+  "owner": {
+    "name": "Yasin Khan"
+  },
+  "plugins": [
+    {
+      "name": "keel-workflow",
+      "description": "End-to-end pipeline for any keel project, software or otherwise: one gate-enforced sequence (ground -> investigate -> plan -> implement -> verify -> human -> enact -> record) driven from a plan tree in the project folder. Owns the durable per-project state under %USERPROFILE%\\.keel. A phase's actor (agent / self / external) selects which evidence a check accepts, never which gates run. Windows only.",
+      "source": "./plugins/keel-workflow",
+      "version": "0.68.7",
+      "author": { "name": "Yasin Khan" },
+      "category": "productivity"
+    },
+    {
+      "name": "keel-project",
+      "description": "Grounding router for the active keel project, resolved from the working directory and never stored. Answers which goals exist, what the plan tree says, what is in flight, what is waiting and on whom. Verifies anything generated against disk before answering. Windows only.",
+      "source": "./plugins/keel-project",
+      "version": "0.4.7",
+      "author": { "name": "Yasin Khan" },
+      "category": "productivity"
+    },
+    {
+      "name": "keel-surfaces",
+      "description": "External surfaces for keel projects: projects the plan onto a per-project tracker (Trello, Jira, GitHub Projects or none) and grounds from documents that live outside the project folder. The only external-write surface and the only sensitive-material surface in the suite. Every write is preview-gated; uncertainty defaults to SKIP. Windows only.",
+      "source": "./plugins/keel-surfaces",
+      "version": "0.3.2",
+      "author": { "name": "Yasin Khan" },
+      "category": "productivity"
+    }
+  ]
+}

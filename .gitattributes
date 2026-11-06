@@ -1,0 +1,19 @@
+* text=auto
+
+# Shell hooks MUST stay LF. Git for Windows runs them through sh, and a CRLF
+# shebang line fails with "bad interpreter". Measured: `git add` warned it was
+# about to convert these on the first commit.
+.githooks/* text eol=lf
+
+# PowerShell runs fine either way, but keep it native so diffs stay clean.
+*.ps1  text eol=crlf
+
+*.md   text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+
+# A plain-text data file may be parsed line by line by a regex anchored on $. Under
+# core.autocrlf a text=auto checkout would hand a reader CRLF, a pattern whose last class
+# cannot match the CR never reaches $, and every row would stop matching. Pin it, as the
+# other data formats above already are.
+*.txt  text eol=lf
