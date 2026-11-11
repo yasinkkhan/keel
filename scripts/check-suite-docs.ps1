@@ -1596,5 +1596,66 @@ if ($Strict) {
     }
 }
 
+# --- 20. the wrapper's write lock still behaves: run its committed suite --------
+#
+# The seventh sibling of sections 9, 11, 14, 15, 17 and 19. scripts/test-concurrent-writes.ps1
+# has two keel commands write one project, keel.json or the signal store at overlapping moments
+# and checks that every write lands or is refused with exit 89, never lost while its command
+# reports success; it also holds the lock past the wait, changes a file under a paused writer and
+# kills a writer holding the lock. A checker that is not wired to anything is a violation of
+# charter P11.
+#
+# It starts a few dozen powershell.exe children and waits out one ten-second lock on purpose, so
+# it costs about a minute. -Strict ONLY, like the other suites, so the commit gate stays fast.
+if ($Strict) {
+    $cwSuitePath = Join-Path $RepoRoot 'scripts\test-concurrent-writes.ps1'
+    if (-not (Test-Path -LiteralPath $cwSuitePath)) {
+        Problem 'scripts/test-concurrent-writes.ps1 is missing. The write lock ships with the suite that re-checks it (charter P11).'
+    }
+    else {
+        # Native call, so no bare 2>&1 and no reliance on $ErrorActionPreference.
+        # The EXIT CODE decides.
+        $cwSuitePrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $cwSuiteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $cwSuitePath
+        $cwSuiteCode   = $LASTEXITCODE
+        $ErrorActionPreference = $cwSuitePrior
+
+        if ($cwSuiteCode -ne 0) {
+            Problem "scripts/test-concurrent-writes.ps1 reported failures (exit $cwSuiteCode). The wrapper's write lock does not behave as specified."
+            foreach ($cwSuiteLine in @($cwSuiteOutput)) {
+                if (-not [string]::IsNullOrWhiteSpace($cwSuiteLine)) { Note $cwSuiteLine }
+            }
+        }
+        else {
+            # A DECLARED coupling to another script's output wording, taken openly as
+            # sections 9, 11, 14, 15, 17 and 19 take theirs: the count is parsed from the
+            # suite's summary line, and an unparseable summary is a PROBLEM, never a zero
+            # and never a silent skip.
+            #
+            # Explicit loop, not a Where-Object: $Matches set inside a pipeline
+            # scriptblock does not reliably survive to the caller under strict mode.
+            $cwSuiteCases = -1
+            $cwSuiteFails = -1
+            foreach ($cwSuiteLine in @($cwSuiteOutput)) {
+                if ($cwSuiteLine -match '^test-concurrent-writes:\s+(\d+)\s+case\(s\),\s+(\d+)\s+failure\(s\)') {
+                    $cwSuiteCases = [int]$Matches[1]
+                    $cwSuiteFails = [int]$Matches[2]
+                }
+            }
+            if ($cwSuiteCases -lt 0) {
+                Problem ("scripts/test-concurrent-writes.ps1 exited 0 but its summary line could not be parsed, so this gate cannot say how many cases actually ran. " +
+                         "Expected a line matching: test-concurrent-writes: <n> case(s), <n> failure(s). If the suite's output format moved, move this pattern with it.")
+                foreach ($cwSuiteLine in @($cwSuiteOutput)) {
+                    if (-not [string]::IsNullOrWhiteSpace($cwSuiteLine)) { Note $cwSuiteLine }
+                }
+            }
+            else {
+                Ran ("concurrent writes suite: {0} case(s), {1} failure(s) (scripts/test-concurrent-writes.ps1)" -f $cwSuiteCases, $cwSuiteFails)
+            }
+        }
+    }
+}
+
 # --- verdict ----------------------------------------------------------------
 Write-Verdict

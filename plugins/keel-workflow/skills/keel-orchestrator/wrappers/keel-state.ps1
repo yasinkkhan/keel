@@ -21,6 +21,9 @@
       0   ok
       2   CAP-REACHED       iteration cap hit; nothing was incremented or created. The cap is
                             $IterationCap below, raised for ONE phase only by 'lift-cap'
+      89  a concurrent write: another keel command held the write lock past the bounded
+          wait ($LockWaitSeconds below), or a file changed after this command read it.
+          Nothing more was written; re-running the command is the answer
       90  bad argument, invalid id, or an attempt to change something immutable
       91  no project resolved, or no state for it
       92  duplicate run order
@@ -119,6 +122,14 @@ $SignalsHome  = Join-Path $KeelHome 'signals'
 $SignalsTargetFile = Join-Path $KeelHome 'signals-target.txt'
 
 $IterationCap = 3
+
+# How long a writing command waits for another one writing the same project, or the signal
+# store, before it stops with exit 89. The slowest measured hold of a project, a verify verdict
+# taking its binding, is about half a second, so this lets several queued writers all land. The
+# signal store is held longer by 'signals-push -Apply' and 'resolve-signal -CloseIssue', across
+# their GitHub calls, about a second each (a read-only GitHub API call measured 0.7 to 1 s), so a push of more than about ten signals
+# can make a judgement or resolution started meanwhile stop with 89 - refused, never lost.
+$LockWaitSeconds = 10
 
 $Actors = @('agent', 'self', 'external')
 
@@ -335,8 +346,12 @@ function Get-JsonFileShape {
     return $shape
 }
 
+# -CheckUnchanged runs the write lock's hash check (Assert-Unchanged, under 'write lock' below)
+# AFTER the text is built and immediately before the write. Serialising a large state takes most
+# of a second, and a check made before it left that whole second for another writer's change to
+# be overwritten unseen.
 function Write-Json {
-    param([string]$FilePath, $Obj)
+    param([string]$FilePath, $Obj, [switch]$CheckUnchanged)
     Ensure-Dir (Split-Path -Parent $FilePath) | Out-Null
 
     # [IO.File] is not provider-aware: it resolves a relative path against the .NET current
@@ -354,6 +369,7 @@ function Write-Json {
     if ($shape.TrailingNewline) { $payloadText += $shape.Eol }
 
     $encoder = New-Object System.Text.UTF8Encoding($shape.Bom)
+    if ($CheckUnchanged) { Assert-Unchanged $FilePath }
     [System.IO.File]::WriteAllText($fullPath, $payloadText, $encoder)
 }
 
@@ -370,6 +386,128 @@ function Write-TextNoBom {
     Ensure-Dir (Split-Path -Parent $FilePath) | Out-Null
     $enc = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($FilePath, $Payload, $enc)
+}
+
+# -------------------------------------------------------------- write lock --
+# Two keel commands writing the same file at overlapping moments used to lose one of the two
+# writes while both reported success: each read the whole file, changed its copy and wrote the
+# whole file back. Every read-modify-write now runs under a lock taken BEFORE the read and let go
+# after the write, so a second writer waits, then reads the first one's result.
+#
+# THE LOCK IS A NAMED MUTEX, one per guarded target: a project's state path, which also covers
+# that project's keel.json, or the signal folder. Chosen by measurement across separate
+# powershell.exe processes, beside a lock file opened with FileShare.None: both worked; the
+# mutex waits natively, leaves no file behind, and a holder that dies while another process waits
+# surfaces as AbandonedMutexException, which hands ownership over, so a killed command never
+# blocks the next one. Global\ so that every logon session on the machine shares it; an account
+# that is not an administrator can create one. A mutex is owned by a THREAD, which is why the
+# dispatch below lets go in a finally: a command run in-process by a caller that keeps running
+# would otherwise keep the lock until that caller exits.
+#
+# scripts/test-concurrent-writes.ps1 computes the same name to hold the lock itself. A DECLARED
+# coupling: change the prefix or the hashing here and change it there.
+#
+# THE HASH CHECK is the second line. A command records the SHA-256 of each file it reads for a
+# rewrite and, once its new text is built, checks again immediately before writing, refusing if
+# the file has moved. Between two copies of this wrapper that cannot happen under the lock; it is
+# what notices a writer that takes no lock, such as an older copy of keel. It cannot notice a
+# change landing in the instant between that last check and the write, nor one written AFTER this
+# command has written, and nothing on this side can, while an older copy can still write.
+$script:WriteLocks  = @{}
+$script:ReadShas    = @{}
+$script:WrittenList = New-Object System.Collections.Generic.List[string]
+
+function Get-ContentSha {
+    param([string]$FilePath)
+    if (-not (Test-Path -LiteralPath $FilePath)) { return '' }
+    $csAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($csAlg.ComputeHash([System.IO.File]::ReadAllBytes($FilePath)) | ForEach-Object { $_.ToString('x2') })) }
+    finally { $csAlg.Dispose() }
+}
+
+function Get-FullPathKey {
+    param([string]$FilePath)
+    return [System.IO.Path]::GetFullPath($FilePath).ToLowerInvariant()
+}
+
+function Get-WriteLockName {
+    param([string]$Target)
+    $wlAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { $wlHex = -join ($wlAlg.ComputeHash([System.Text.Encoding]::UTF8.GetBytes((Get-FullPathKey $Target))) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $wlAlg.Dispose() }
+    return ('Global\keel-write-' + $wlHex)
+}
+
+# Every 89 says what this command had already written, so the message stays true whichever write
+# it stops at.
+function Get-WrittenNote {
+    if ($script:WrittenList.Count -eq 0) { return 'Nothing was written.' }
+    return "This command had already written $($script:WrittenList -join ', '); nothing more was written."
+}
+
+function Enter-WriteLock {
+    param([string]$Target, [string]$What)
+    $elName = Get-WriteLockName $Target
+    if ($script:WriteLocks.ContainsKey($elName)) { return }
+    $elMutex = $null
+    try { $elMutex = [System.Threading.Mutex]::new($false, $elName) }
+    catch [System.UnauthorizedAccessException] {
+        Fail 89 "The write lock for $What exists but this process may not open it; most likely another user or an elevated session created it and is still running. $(Get-WrittenNote) Re-run the command when that session has finished."
+    }
+    $elGot = $false
+    try { $elGot = $elMutex.WaitOne([TimeSpan]::FromSeconds($LockWaitSeconds)) }
+    catch [System.Threading.AbandonedMutexException] { $elGot = $true }
+    if (-not $elGot) {
+        $elMutex.Dispose()
+        Fail 89 "Another keel command is writing $What and did not finish within $LockWaitSeconds seconds. $(Get-WrittenNote) Re-run the command."
+    }
+    $script:WriteLocks[$elName] = $elMutex
+}
+
+function Exit-WriteLocks {
+    foreach ($xlMutex in @($script:WriteLocks.Values)) {
+        try { $xlMutex.ReleaseMutex() } catch { }
+        $xlMutex.Dispose()
+    }
+    $script:WriteLocks.Clear()
+}
+
+function Save-ReadSha {
+    param([string]$FilePath)
+    $script:ReadShas[(Get-FullPathKey $FilePath)] = Get-ContentSha $FilePath
+}
+
+# A path never recorded is not checked: a file this command creates has no earlier reading.
+function Assert-Unchanged {
+    param([string]$FilePath)
+    $auKey = Get-FullPathKey $FilePath
+    if (-not $script:ReadShas.ContainsKey($auKey)) { return }
+    if ((Get-ContentSha $FilePath) -ne $script:ReadShas[$auKey]) {
+        Fail 89 "'$(Split-Path -Leaf $FilePath)' changed after this command read it, so writing now would erase another command's write. $(Get-WrittenNote) Re-run the command."
+    }
+}
+
+function Write-GuardedJson {
+    param([string]$FilePath, $Obj)
+    Write-Json $FilePath $Obj -CheckUnchanged
+    Save-ReadSha $FilePath
+    $script:WrittenList.Add((Split-Path -Leaf $FilePath))
+}
+
+# A signal rewrite made AFTER a GitHub call never refuses: refusing would leave a live outward act
+# with no local record of it. Under the store lock it re-reads the file and copies onto it only the
+# fields that record the call, so a change another writer made meanwhile survives as well.
+function Write-SignalFields {
+    param([string]$FilePath, $SigObj, [string[]]$Fields)
+    $sfFresh = $null
+    try { $sfFresh = Read-Json $FilePath } catch { $sfFresh = $null }
+    if ($null -eq $sfFresh) { $sfFresh = $SigObj }
+    else {
+        foreach ($sfField in $Fields) { Set-Prop $sfFresh $sfField $SigObj.PSObject.Properties[$sfField].Value }
+    }
+    Write-Json $FilePath $sfFresh
+    Save-ReadSha $FilePath
+    $script:WrittenList.Add((Split-Path -Leaf $FilePath))
 }
 
 # ------------------------------------------------------------ id validation --
@@ -458,19 +596,26 @@ function Resolve-ProjectOrFail {
 function Get-StatePath { param([string]$Slug) Join-Path (Join-Path $ProjectsHome $Slug) 'state.json' }
 function Get-PhaseDir  { param([string]$Slug, [string]$PhaseId) Join-Path (Join-Path (Join-Path $ProjectsHome $Slug) 'phases') $PhaseId }
 
+# -ForWrite on every read that a Write-State follows: the lock is taken before the read, so a
+# second writer waits and then reads the first one's result. A read that misses it still cannot
+# lose a write - Write-State takes the lock and the hash check refuses - it is refused instead.
 function Read-State {
-    param([string]$Slug)
+    param([string]$Slug, [switch]$ForWrite)
     $sp = Get-StatePath $Slug
+    if ($ForWrite) { Enter-WriteLock $sp "project '$Slug'" }
     if (-not (Test-Path -LiteralPath $sp)) {
         Fail 91 "No state for project '$Slug'. Expected '$sp'. Run 'init-project' first."
     }
+    Save-ReadSha $sp
     return (Read-Json $sp)
 }
 
 function Write-State {
     param([string]$Slug, $State)
+    $wsPath = Get-StatePath $Slug
+    Enter-WriteLock $wsPath "project '$Slug'"
     Set-Prop $State 'updated' (Now)
-    Write-Json (Get-StatePath $Slug) $State
+    Write-GuardedJson $wsPath $State
 }
 
 # ------------------------------------------------------------ keel version --
@@ -2103,6 +2248,31 @@ function Next-SignalId {
     return ('S{0:D4}' -f ($n + 1))
 }
 
+# A new signal takes its id by MOVING a fully written record onto S<n>.json. A move onto a name
+# that exists throws and leaves that file alone, so two filings at once cannot take one id, and
+# no reader ever sees an empty or half-written signal file. The temporary name does not match
+# S*.json. The record holds its own id and later writers build its path from that field, so the
+# id is set again on every try. Returns the id taken.
+function Save-NewSignal {
+    param($SigObj)
+    Ensure-Dir $SignalsHome | Out-Null
+    for ($nsTry = 0; $nsTry -lt 50; $nsTry++) {
+        $nsId = Next-SignalId
+        Set-Prop $SigObj 'id' $nsId
+        $nsTmp = Join-Path $SignalsHome ('.new-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        Write-Json $nsTmp $SigObj
+        try {
+            [System.IO.File]::Move($nsTmp, (Join-Path $SignalsHome "$nsId.json"))
+            $script:WrittenList.Add("$nsId.json")
+            return $nsId
+        }
+        catch [System.IO.IOException] {
+            Remove-Item -LiteralPath $nsTmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Fail 89 "Fifty signal ids in a row were taken by other filings while this one was being written. $(Get-WrittenNote) Re-run the command."
+}
+
 # ===================================================================== main ==
 
 if ([string]::IsNullOrWhiteSpace($Command)) {
@@ -2145,6 +2315,9 @@ if ($Command -ne 'signals-target' -and -not [string]::IsNullOrWhiteSpace($Repo) 
     Fail 90 "-Repo '$Repo' is not owner/name (for example octo-org/keel-reports). Nothing was written and nothing was sent."
 }
 
+# The finally lets go of every write lock on every way out, exit and Fail included: PowerShell runs
+# it when a script exits from inside the try, and keeps the exit code.
+try {
 switch ($Command) {
 
 # --------------------------------------------------------------------------- #
@@ -2157,6 +2330,9 @@ switch ($Command) {
     $root = (Resolve-Path -LiteralPath $root).Path
     $slug = Split-Path -Leaf $root
 
+    # Before the existence check, so a second init-project of the same folder waits and then
+    # meets the file the first one wrote.
+    Enter-WriteLock (Get-StatePath $slug) "project '$slug'"
     $cfgPath = Join-Path $root 'keel.json'
     if (Test-Path -LiteralPath $cfgPath) {
         Fail 90 "'$cfgPath' already exists. A project is initialised once; edit the file to change its settings."
@@ -2228,6 +2404,9 @@ switch ($Command) {
     }
     Require-Param $RepoPath 'RepoPath'
 
+    # keel.json shares its project's lock with state.json.
+    Enter-WriteLock (Get-StatePath $proj.Slug) "project '$($proj.Slug)'"
+    Save-ReadSha $proj.ConfigPath
     $cfg = Read-ProjectConfig $proj.ConfigPath
     if ($null -eq $cfg) { Fail 90 "Could not read '$($proj.ConfigPath)'." }
 
@@ -2262,7 +2441,7 @@ switch ($Command) {
         external = $external
         note     = $(if ($Detail) { $Detail } else { $null })
     })
-    Write-Json $proj.ConfigPath $cfg
+    Write-GuardedJson $proj.ConfigPath $cfg
 
     Say "Declared repo '$Name' -> $resolved$(if ($external) { '  [EXTERNAL - referenced, not owned]' } else { '' })"
     if ($external) {
@@ -2896,7 +3075,7 @@ switch ($Command) {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Id 'Id'; Assert-GoalId $Id
     Require-Param $Text 'Text'
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $dupe = @(@(Get-GoalList $state) | Where-Object { $_.id -eq $Id })
     if ($dupe.Count -gt 0) { Fail 90 "Goal '$Id' already exists." }
 
@@ -2921,7 +3100,7 @@ switch ($Command) {
     $wanted = $Status.ToUpper()
     Assert-Enum $wanted $GoalStatuses 'Status'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $arr = @(Get-GoalList $state)
     $target = @($arr | Where-Object { $_.id -eq $Id })
     if ($target.Count -eq 0) { Fail 98 "Goal '$Id' does not exist in this project. Add it with add-goal first." }
@@ -2969,7 +3148,7 @@ switch ($Command) {
         Fail 95 "-Detail is required. Say what you checked between the two versions - 'read the CHANGELOG, all widenings, nothing affects this project' is an answer. An ack with no reason is the warning silenced rather than answered."
     }
 
-    $state   = Read-State $proj.Slug
+    $state   = Read-State $proj.Slug -ForWrite
     $running = Get-KeelVersion
     $planned = Get-Prop $state 'plannedUnder' 'unknown'
     if ($running -eq $planned) {
@@ -2977,18 +3156,23 @@ switch ($Command) {
         exit 0
     }
 
+    # keel.json carries the same version for a human reading the folder; leaving the
+    # two to disagree would be a second authority that rots (P10). Read, and checked unchanged,
+    # BEFORE the state is written: a refusal after the state write would leave the two
+    # disagreeing, and a re-run would then find no drift to acknowledge and never repair it.
+    Save-ReadSha $proj.ConfigPath
+    $cfg = Read-ProjectConfig $proj.ConfigPath
+
     $acks = @(Get-Prop $state 'versionAcks' @())
     $acks += [pscustomobject]@{ from = $planned; to = $running; detail = $Detail; at = (Now) }
     Set-Prop $state 'versionAcks' $acks
     Set-Prop $state 'plannedUnder' $running
+    Assert-Unchanged $proj.ConfigPath
     Write-State $proj.Slug $state
 
-    # keel.json carries the same version for a human reading the folder; leaving the
-    # two to disagree would be a second authority that rots (P10).
-    $cfg = Read-ProjectConfig $proj.ConfigPath
     if ($null -ne $cfg) {
         Set-Prop $cfg 'keelVersion' $running
-        Write-Json $proj.ConfigPath $cfg
+        Write-GuardedJson $proj.ConfigPath $cfg
     }
 
     Say "Acknowledged keel $planned -> $running for '$($proj.Slug)': $Detail"
@@ -3003,7 +3187,7 @@ switch ($Command) {
     Require-Param $Title 'Title'
     Require-Param $Groups 'Groups'   # P17 - an epic must say what it groups
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     if ($null -ne (Find-Node $state $Id)) { Fail 90 "Node '$Id' already exists." }
     if ($Groups.Trim() -eq $Title.Trim()) {
         Fail 93 "-Groups restates the title. It must say what this epic GROUPS, so each rung of the nesting justifies itself (charter P17)."
@@ -3035,7 +3219,7 @@ switch ($Command) {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Id 'Id'; Assert-EpicId $Id
 
-    $state  = Read-State $proj.Slug
+    $state  = Read-State $proj.Slug -ForWrite
     $reNode = Find-Node $state $Id
     if ($null -eq $reNode) { Fail 94 "Epic '$Id' does not exist." }
     if ($reNode.role -ne 'epic') { Fail 93 "'$Id' is a $($reNode.role), not an epic (charter P17)." }
@@ -3083,7 +3267,7 @@ switch ($Command) {
     Require-Param $Id 'Id'; Assert-WsId $Id
     Require-Param $Title 'Title'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     if ($null -ne (Find-Node $state $Id)) { Fail 90 "Node '$Id' already exists." }
     [void](Assert-Parent $state $Parent 'workstream')
 
@@ -3139,7 +3323,7 @@ switch ($Command) {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Id 'Id'; Assert-WsId $Id
 
-    $state  = Read-State $proj.Slug
+    $state  = Read-State $proj.Slug -ForWrite
     $rwNode = Find-Node $state $Id
     if ($null -eq $rwNode) { Fail 94 "Workstream '$Id' does not exist." }
     if ($rwNode.role -ne 'workstream') { Fail 93 "'$Id' is a $($rwNode.role), not a workstream (charter P17)." }
@@ -3193,7 +3377,7 @@ switch ($Command) {
     Require-Param $Scope 'Scope'
     Require-Param $Actor 'Actor'; Assert-Enum $Actor $Actors 'Actor'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $wsId   = Ws-Of-Phase $Phase
     # NOTE: never name a script-scope local after a param. PowerShell variable names are
     # case-insensitive, so '$ws' IS the [string]$Ws parameter and would silently coerce
@@ -3241,7 +3425,7 @@ switch ($Command) {
 'revise-phase' {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
 
@@ -3296,7 +3480,7 @@ switch ($Command) {
     Require-Param $Stage 'Stage'; Assert-Enum $Stage $Stages 'Stage'
     if ($Stage -eq 'waiting') { Fail 90 "Use 'set-waiting' for the waiting stage - it needs -WaitingOn and -ReviewOn (charter P19)." }
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     if ((Get-Prop $p 'stage' '') -eq 'delivered' -and $Stage -ne 'delivered') {
         Fail 90 "Phase '$Phase' is delivered and cannot move backwards."
@@ -3321,7 +3505,7 @@ switch ($Command) {
     }
     Assert-Date $ReviewOn 'ReviewOn'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered." }
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
@@ -3338,7 +3522,7 @@ switch ($Command) {
 'clear-waiting' {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     if ((Get-Prop $p 'stage' '') -ne 'waiting') { Fail 90 "Phase '$Phase' is not waiting (stage: $(Get-Prop $p 'stage' '?'))." }
 
@@ -3387,7 +3571,7 @@ switch ($Command) {
     Require-Param $Verdict 'Verdict'
     Assert-Enum $Verdict $GateVerdicts[$Gate] "Verdict (for gate '$Gate')"
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered; its gates are closed." }
     # Both before the stage logic, whose record-gate DONE branch is tested ahead of
@@ -3531,7 +3715,7 @@ switch ($Command) {
     Assert-Enum $Trigger @('verify', 'human', 'enact', 'plan') 'Trigger'
     Require-Param $Detail 'Detail'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
     $n = [int](Get-Prop $p 'iterations' 0)
@@ -3598,7 +3782,7 @@ switch ($Command) {
     # 1..999. The upper bound only keeps the [int] conversion below from overflowing.
     if ($Rounds -notmatch '^[1-9][0-9]{0,2}$') { Fail 90 "-Rounds '$Rounds' is not a whole number from 1 to 999." }
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
     $liftStage = Get-Prop $p 'stage' ''
@@ -3624,7 +3808,7 @@ switch ($Command) {
     Require-Param $Kind 'Kind'; Assert-Enum $Kind $FrictionKinds 'Kind'
     Require-Param $Detail 'Detail'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     $log = @(Get-Prop $p 'friction' @())
     $log += [pscustomobject]@{ kind = $Kind; detail = $Detail; at = (Now) }
@@ -3640,7 +3824,7 @@ switch ($Command) {
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
     Require-Param $Question 'Question'
 
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     $qs = @(Get-Prop $p 'questions' @())
     $qs += [pscustomobject]@{
@@ -3667,7 +3851,7 @@ switch ($Command) {
         if ($Phase) { Fail 90 "Name -Ws or -Phase for 'abandon', not both." }
         Assert-WsId $Ws 'Ws'
         Require-Param $Detail 'Detail'
-        $state = Read-State $proj.Slug
+        $state = Read-State $proj.Slug -ForWrite
         $node = Find-Node $state $Ws
         if ($null -eq $node) { Fail 94 "Workstream '$Ws' does not exist." }
         if ($node.role -ne 'workstream') { Fail 93 "'$Ws' is a $($node.role), not a workstream." }
@@ -3692,7 +3876,7 @@ switch ($Command) {
 
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
     Require-Param $Detail 'Detail'
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered and cannot be abandoned." }
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
@@ -3707,7 +3891,7 @@ switch ($Command) {
 'close' {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Ws 'Ws'; Assert-WsId $Ws 'Ws'
-    $state = Read-State $proj.Slug
+    $state = Read-State $proj.Slug -ForWrite
     $node = Find-Node $state $Ws
     if ($null -eq $node) { Fail 94 "Workstream '$Ws' does not exist." }
     if ($node.role -ne 'workstream') { Fail 93 "'$Ws' is a $($node.role), not a workstream." }
@@ -3779,7 +3963,7 @@ switch ($Command) {
         resolution = $null
         resolvedAt = $null
     }
-    Write-Json (Join-Path $SignalsHome "$sid.json") $sig
+    $sid = Save-NewSignal $sig
     Say "Filed signal $sid ($Kind) from $($proj.Slug) $Phase. Evidence mode: $evidenceMode."
     Say '  This does NOT change keel. It is triaged in a keel session (charter P25).'
     if ($null -ne (Get-SignalsDestination)) {
@@ -3850,6 +4034,9 @@ switch ($Command) {
         Fail 90 'GitHub CLI not found. Looked on PATH and in the standard install locations. Install it, or pass -Repo and push by hand.'
     }
 
+    # With -Apply the store lock is taken before any signal is read, so a judgement or a
+    # resolution made meanwhile waits rather than being written over. The preview writes nothing.
+    if ($Apply) { Enter-WriteLock $SignalsHome 'the signal store' }
     $pending = @(Get-Signals -Slug '' -FilterKind '' | Where-Object { $_.state -eq 'OPEN' -and $null -eq (Get-Prop $_ 'issue' $null) })
 
     # -Id scopes the push to ONE signal. Without it the pending set is every unpushed open
@@ -3956,7 +4143,7 @@ switch ($Command) {
             Set-Prop $s 'issue' $num
             Set-Prop $s 'issueUrl' $urlText
             Set-Prop $s 'pushedAt' (Now)
-            Write-Json (Join-Path $SignalsHome "$($s.id).json") $s
+            Write-SignalFields (Join-Path $SignalsHome "$($s.id).json") $s @('issue', 'issueUrl', 'pushedAt')
             Say "$($s.id) -> issue #$num  $urlText"
         }
 
@@ -4040,6 +4227,10 @@ switch ($Command) {
             -OwAssurance 'gh WAS found and a destination WAS chosen - this refusal says nothing about either. No local record was written.')
     }
 
+    # The store lock first, so the scan below and the write at the end are one step: two
+    # adoptions of one issue at once would otherwise both pass the scan.
+    Enter-WriteLock $SignalsHome 'the signal store'
+
     # REFUSE A SECOND RECORD FOR ONE ISSUE, BEFORE the network call. This covers two cases with
     # one test: re-adopting an issue already adopted, and adopting an issue keel ITSELF pushed
     # from a local signal - which would otherwise let two different resolutions be written for
@@ -4120,7 +4311,7 @@ switch ($Command) {
     if ($Id) { $adSig.origin.id = $Id }
     if ($Name) { $adSig.origin.machine = $Name }
 
-    Write-Json (Join-Path $SignalsHome "$adId.json") $adSig
+    $adId = Save-NewSignal $adSig
     Say "Adopted issue #$Issue as $adId ($Kind) from $Project $Phase. The issue is $adState on $adSlug."
     Say "  This record is FOREIGN: it was filed on another machine and is marked '<' in 'signals'."
     Say "  It is excluded from 'signals-push' - it already has an issue and was never pushed from here."
@@ -4256,7 +4447,9 @@ switch ($Command) {
     [void](Get-PhaseOrFail $jgState $Phase)
 
     $jgPath = Join-Path $SignalsHome "$Id.json"
+    Enter-WriteLock $SignalsHome 'the signal store'
     if (-not (Test-Path -LiteralPath $jgPath)) { Fail 94 "Signal '$Id' does not exist." }
+    Save-ReadSha $jgPath
     $jgSig = Read-Json $jgPath
     # An empty or truncated file parses to $null without throwing, so the crash would
     # otherwise land on the first property access below.
@@ -4306,7 +4499,7 @@ switch ($Command) {
     $jgEntry = [pscustomobject]$jgOrdered
     $jgTrail += $jgEntry
     Set-Prop $jgSig 'judgements' $jgTrail
-    Write-Json $jgPath $jgSig
+    Write-GuardedJson $jgPath $jgSig
 
     Say "Signal $Id judged $judgedAs by $Phase. It STAYS OPEN: $Detail"
     Say "  $($jgTrail.Count) judgement(s) now recorded. This is NOT a terminal verdict, and no issue is closed."
@@ -4517,7 +4710,9 @@ switch ($Command) {
     $asUpper = $As.ToUpper()
 
     $sp = Join-Path $SignalsHome "$Id.json"
+    Enter-WriteLock $SignalsHome 'the signal store'
     if (-not (Test-Path -LiteralPath $sp)) { Fail 94 "Signal '$Id' does not exist." }
+    Save-ReadSha $sp
     $sig = Read-Json $sp
 
     # THE TERMINAL STATE IS STILL WRITTEN BEFORE gh IS CALLED. That ordering is deliberate -
@@ -4630,7 +4825,7 @@ switch ($Command) {
         $fixes = @(Get-Prop $sig 'instanceFixes' @())
         $fixes += [pscustomobject]@{ at = (Now); detail = $Detail }
         Set-Prop $sig 'instanceFixes' $fixes
-        Write-Json $sp $sig
+        Write-GuardedJson $sp $sig
         Say "Signal $Id -> PROMOTED, but an INSTANCE only: $Detail"
         Say "  The signal STAYS OPEN and its issue is not closed. The defect this instance belongs to is unfixed."
         Say "  $($fixes.Count) instance fix(es) now recorded. Resolve with -Addresses defect once the class itself is fixed."
@@ -4659,7 +4854,7 @@ switch ($Command) {
         # MEANS addresses = instance, and writing the word beside it would be one fact
         # with two homes (charter P10).
         if ($addressesLower -ne '') { Set-Prop $sig 'addresses' $addressesLower }
-        Write-Json $sp $sig
+        Write-GuardedJson $sp $sig
         Say "Signal $Id -> $($asUpper): $Detail"
     }
 
@@ -4733,7 +4928,7 @@ switch ($Command) {
                     # same order and the same reason as signals-push.
                     if ($res.Code -eq 0) {
                         Set-Prop $sig 'issueCommentedAt' (Now)
-                        Write-Json $sp $sig
+                        Write-SignalFields $sp $sig @('issueCommentedAt')
                     }
                     Remove-KeelTempFile $tmp
                     if ($res.Code -ne 0) {
@@ -4746,7 +4941,7 @@ switch ($Command) {
                     $res = Invoke-Native -Exe $gh -Arguments @('issue','close',"$issueNum",'--repo',$slug)
                     if ($res.Code -eq 0) {
                         Set-Prop $sig 'issueClosedAt' (Now)
-                        Write-Json $sp $sig
+                        Write-SignalFields $sp $sig @('issueClosedAt')
                         Say "  Closed issue #$issueNum on $slug."
                     }
                     else {
@@ -4769,3 +4964,5 @@ default {
 }
 
 }
+}
+finally { Exit-WriteLocks }

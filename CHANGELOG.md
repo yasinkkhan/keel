@@ -4,6 +4,31 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.77.0 - 2026-11-10
+
+- **`keel-workflow` 0.69.0: two keel commands writing at once no longer lose a write.** Two
+  sessions on one machine writing the same project at overlapping moments, for example one
+  recording a gate while another adds a phase, each read the whole state file, changed their own
+  copy and wrote it back, so one of the two writes vanished while both commands reported success.
+  `keel-state.ps1` now takes a lock before it reads anything it will rewrite and lets go after
+  writing, so the second command waits and then works on the first one's result. The lock covers
+  three stores: a project's `state.json`, its `keel.json`, and the signal store, where a new
+  signal also takes its number in a way two filings cannot share. A command that cannot get the
+  lock within 10 seconds stops with a new exit code, **89**, and writes nothing; the answer is to
+  run it again. A command also checks, immediately before writing, that the file has not changed
+  since it read it, and stops with 89 if it has; that is how it notices a writer that takes no
+  lock, such as an older copy of keel. The exception is the record of a GitHub call just made (a
+  pushed issue's number, a closing comment, a closed issue), which is merged into the file as it
+  then stands rather than refused, so the call is never left unrecorded. An older copy writing at
+  the same moment can still lose a write, its own or this command's, so run one version of keel
+  at a time. A signal push holds the signal store across its GitHub calls, so a judgement or resolution
+  started during a long push can also stop with 89. Nothing else changes: no
+  verb, argument, state field or existing exit code.
+- **`scripts/test-concurrent-writes.ps1`** runs overlapping writes against all three stores and
+  checks that none is lost, plus a held lock, a file changed under a waiting command and a command
+  killed while holding the lock. `check-suite-docs.ps1 -Strict` runs it; it takes about a minute.
+- **`ARCHITECTURE.html`'s exit-code table** lists 89, and now 99 as well, which it had left out.
+
 ## marketplace 0.76.0 - 2026-11-05
 
 - **`keel-workflow` 0.68.7: creating a project.** `keel-plan-project` now has the session make the
