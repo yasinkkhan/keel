@@ -21,6 +21,9 @@
       0   ok
       2   CAP-REACHED       iteration cap hit; nothing was incremented or created. The cap is
                             $IterationCap below, raised for ONE phase only by 'lift-cap'
+      88  not the owner: in a project that shares its progress, someone other than a phase's
+          owner tried to work on it, or to change it once it had started. Nothing was written;
+          the message names the owner and 'hand-over'
       89  a concurrent write: another keel command held the write lock past the bounded
           wait ($LockWaitSeconds below), or a file changed after this command read it.
           Nothing more was written; re-running the command is the answer
@@ -95,6 +98,10 @@ param(
     # as absent, which is how every other revise-phase parameter treats an empty string.
     [string]$Correction,
     [string]$Status,
+    # A phase's owner, a person id, for 'add-phase' and 'revise-phase'; and the person 'hand-over'
+    # hands a phase to. A project that shares its progress only.
+    [string]$Owner,
+    [string]$To,
     [string]$Repo,
     [string]$Name,
     [string]$RepoPath,
@@ -894,7 +901,7 @@ function New-SpContext {
     param([string]$SpDir)
     return @{
         Dir = $SpDir; Texts = @{}; Snap = @{}; Meta = @{}; Paths = @{}; People = @()
-        GateSnap = @{}; Counts = @{}; Raw = @{}; Folded = @{}; NodeStatus = @{}; NodeExtras = @{}
+        GateSnap = @{}; Counts = @{}; Raw = @{}; Folded = @{}; NodeStatus = @{}; NodeExtras = @{}; GateBy = @{}
         MaxAt = $null; MaxAtText = $null
     }
 }
@@ -906,6 +913,14 @@ function Add-SpSeen {
     $spI = Get-SpInstant $SpAt
     if ($null -eq $spI) { return }
     if ($null -eq $SpContext.MaxAt -or $spI -gt $SpContext.MaxAt) { $SpContext.MaxAt = $spI; $SpContext.MaxAtText = [string](Add-SpOffset $SpAt) }
+}
+
+function Add-SpGateBy {
+    # Who wrote each gate entry, kept for the read-time check of gate authors: the in-memory gate
+    # keeps only its newest entry and drops 'by'.
+    param($SpContext, [string]$GbPhase, [string]$GbBy, [string]$GbName)
+    if (-not $SpContext.GateBy.ContainsKey($GbPhase)) { $SpContext.GateBy[$GbPhase] = New-Object System.Collections.Generic.List[object] }
+    $SpContext.GateBy[$GbPhase].Add([pscustomobject]@{ By = $GbBy; Name = $GbName })
 }
 
 function Get-SpJsonFiles {
@@ -967,6 +982,7 @@ function Add-SpEntries {
             foreach ($spF in @(Get-SpJsonFiles $spGd.FullName)) {
                 $spRawObj = Read-SpFile $spF.FullName $SpContext
                 $SpContext.Raw[$spId].Add(@{ Kind = 'gate'; Path = $spF.FullName; Obj = $spRawObj; Name = $spF.Name })
+                Add-SpGateBy $SpContext $spId ([string](Get-Prop $spRawObj 'by' '')) "$($spGd.Name)/$($spF.Name)"
                 Add-SpSeen $SpContext (Get-Prop $spRawObj 'at' $null)
                 Set-SpLatestGate $SpMem $spGd.Name $spRawObj
             }
@@ -1040,6 +1056,7 @@ function Read-SharedState {
             $spCtx.Meta["decl|$($spMem.id)"] = [pscustomobject]@{ by = (Get-Prop $spFp 'declaredBy' $null); machine = (Get-Prop $spFp 'declaredMachine' $null); at = (Get-Prop $spFp 'declaredAt' $null) }
             $spCtx.Meta["run|$($spMem.id)"] = [pscustomobject]@{ by = (Get-Prop $spFp 'by' $null); machine = (Get-Prop $spFp 'machine' $null); at = (Get-Prop $spFp 'at' $null) }
             foreach ($spGe in @(Get-Prop $spFp 'gates' @())) {
+                Add-SpGateBy $spCtx $spMem.id ([string](Get-Prop $spGe 'by' '')) "$(Get-Prop $spGe 'gate' '?') at $(Get-Prop $spGe 'at' '?')"
                 Add-SpSeen $spCtx (Get-Prop $spGe 'at' $null)
                 Set-SpLatestGate $spMem ([string](Get-Prop $spGe 'gate' '')) $spGe
             }
@@ -1168,6 +1185,48 @@ function Get-SpMe {
     return $smMine[0]
 }
 
+# OWNERSHIP. In a project that shares its progress every phase has one owner, a person id set when
+# it is planned. Only the owner works on it: the verbs that do the work refuse anyone else at every
+# stage, and the verbs that change it refuse anyone else once it has left 'planned', each at 88.
+# note-friction and open-question stay open to anyone, as does revise-phase -Correction on a
+# finished phase. An owner who cannot finish a started phase hands it over ('hand-over'): the phase
+# ends as 'handed-over' and a successor continues it. A per-machine project has no owners.
+function Get-SpPersonText {
+    # A person as status and the refusals name them: '<display name> (<person id>)'.
+    param([string]$PtSlug, [string]$PtId)
+    $ptPe = @($script:SpCtx[$PtSlug].People | Where-Object { [string](Get-Prop $_ 'id' '') -ceq $PtId })
+    if ($ptPe.Count -eq 0) { return "(no person file) ($PtId)" }
+    return "$(Get-Prop $ptPe[0] 'name' '?') ($PtId)"
+}
+
+function Assert-SpPerson {
+    param([string]$PsSlug, [string]$PsId, [string]$PsParam)
+    $psPe = @($script:SpCtx[$PsSlug].People | Where-Object { [string](Get-Prop $_ 'id' '') -ceq $PsId })
+    if ($psPe.Count -eq 0) {
+        $psKnown = (@($script:SpCtx[$PsSlug].People | ForEach-Object { Get-SpPersonText $PsSlug ([string](Get-Prop $_ 'id' '')) })) -join ', '
+        Fail 90 "-$PsParam '$PsId' names no person file under progress/people/ (registered: $psKnown). Nothing was written."
+    }
+}
+
+function Assert-PhaseOpen {
+    # A handed-over phase is finished: nothing more runs on it, and it can never also read as abandoned.
+    param([string]$PoSlug, $PoPhase)
+    if (-not (Test-SharedProgress $PoSlug)) { return }
+    if ([string](Get-Prop $PoPhase 'stage' '') -ne 'handed-over') { return }
+    $poSucc = [string](Get-Prop $PoPhase 'handedOverTo' '?')
+    Fail 90 "Phase '$($PoPhase.id)' was handed over and is finished: $poSucc continues it, so work on $poSucc instead. note-friction, open-question and revise-phase -Correction still accept entries on $($PoPhase.id). Nothing was written."
+}
+
+function Assert-PhaseOwner {
+    param([string]$OwSlug, $OwPhase, [string]$OwVerb)
+    if (-not (Test-SharedProgress $OwSlug)) { return }
+    $owId = [string](Get-Prop $OwPhase 'owner' '')
+    if (-not $owId) { return }
+    $owMe = Get-SpWriter $OwSlug
+    if ($owMe -ceq $owId) { return }
+    Fail 88 "Phase '$($OwPhase.id)' is owned by $(Get-SpPersonText $OwSlug $owId); only its owner may $OwVerb it, and this machine is $(Get-SpPersonText $OwSlug $owMe). Ask them, or, if they cannot finish it, hand it over: keel-state.ps1 hand-over -Phase $($OwPhase.id) -To <person id> -Detail `"<why>`". Nothing was written."
+}
+
 # THE READ-TIME CHECK AFTER A MERGE. Git merges two files without asking keel, so two writes each
 # valid alone can merge into a whole that breaks a rule the wrapper refuses for a single writer.
 # Run on what Read-SharedState built, which holds every phase, folded ones included, and on the
@@ -1250,6 +1309,28 @@ function Get-SpMergeProblems {
             if (-not $mpGoalIds.ContainsKey([string]$mpGid)) {
                 $mpOut.Lines.Add("workstream $($mpN.id) names goal $mpGid, which has no file under progress/goals/. $mpPull")
             }
+        }
+    }
+
+    # A gate entry written by someone other than the phase's owner. The owner cannot change once work
+    # has started, so only a merge produces one: one person changed a planned phase's owner while
+    # another, offline, started it. One line per phase and author.
+    $mpGateBy = $script:SpCtx[$MpSlug].GateBy
+    foreach ($mpP in $mpPhases) {
+        $mpOwnerId = [string](Get-Prop $mpP 'owner' '')
+        if (-not $mpOwnerId -or -not $mpGateBy.ContainsKey([string]$mpP.id)) { continue }
+        $mpByAuthor = [ordered]@{}
+        foreach ($mpGe in $mpGateBy[[string]$mpP.id]) {
+            $mpBy = [string]$mpGe.By
+            if (-not $mpBy -or $mpBy -ceq $mpOwnerId) { continue }
+            if (-not $mpByAuthor.Contains($mpBy)) { $mpByAuthor[$mpBy] = New-Object System.Collections.Generic.List[string] }
+            $mpByAuthor[$mpBy].Add([string]$mpGe.Name)
+        }
+        foreach ($mpBy in @($mpByAuthor.Keys)) {
+            $mpEntries = $mpByAuthor[$mpBy]
+            $mpNoun = if ($mpEntries.Count -eq 1) { 'gate entry' } else { 'gate entries' }
+            $mpAre = if ($mpEntries.Count -eq 1) { 'is' } else { 'are' }
+            $mpOut.Lines.Add("phase $($mpP.id)'s $mpNoun $($mpEntries -join ', ') $mpAre by $(Get-SpPersonText $MpSlug $mpBy), but its owner is $(Get-SpPersonText $MpSlug $mpOwnerId): the owner was changed while the phase was planned, as someone else started it. Agree who finishes it; if not its owner, hand it over: hand-over -Phase $($mpP.id) -To <person id>.")
         }
     }
 
@@ -2456,8 +2537,23 @@ function Write-BindStatusLine {
 
 # ------------------------------------------------------------------ reports --
 
+function Get-PhaseLineExtras {
+    # What a phase line adds in a project that shares its progress, for 'status' and 'tree': a
+    # handed-over phase's successor after its stage, and the owner of a phase not yet finished.
+    # A per-machine project gets two empty strings, so its lines are what they always were.
+    param($ExP, [string]$ExSlug)
+    $exOut = @{ Stage = ''; Owner = '' }
+    if (-not $ExSlug -or -not (Test-SharedProgress $ExSlug)) { return $exOut }
+    $exSt = [string](Get-Prop $ExP 'stage' '')
+    if ($exSt -eq 'handed-over') { $exOut.Stage = " -> $(Get-Prop $ExP 'handedOverTo' '?')" }
+    $exId = [string](Get-Prop $ExP 'owner' '')
+    if ($exId -and @('delivered', 'abandoned', 'handed-over') -notcontains $exSt) { $exOut.Owner = "  owner: $(Get-SpPersonText $ExSlug $exId)" }
+    return $exOut
+}
+
 function Format-PhaseLine {
-    param($P)
+    param($P, [string]$FlSlug = '')
+    $flEx = Get-PhaseLineExtras $P $FlSlug
     $wait = ''
     if ((Get-Prop $P 'stage' '') -eq 'waiting') {
         $wait = "  waiting-on: $(Get-Prop $P 'waitingOn' '?') review: $(Get-Prop $P 'reviewOn' '?')"
@@ -2466,7 +2562,7 @@ function Format-PhaseLine {
     if ($dueText) { $dueText = "  due: $dueText" }
     $ro = Get-Prop $P 'runOrder' -1
     $roText = if ($ro -lt 0) { 'NO-ORDER' } else { "#$ro" }
-    return ("  {0,-9} {1,-9} {2,-9} {3,-15}{4}{5}" -f $P.id, $roText, (Get-Prop $P 'actor' '?'), (Get-Prop $P 'stage' '?'), $dueText, $wait)
+    return ("  {0,-9} {1,-9} {2,-9} {3,-15}{4}{5}{6}" -f $P.id, $roText, (Get-Prop $P 'actor' '?'), ([string](Get-Prop $P 'stage' '?') + $flEx.Stage), $dueText, $wait, $flEx.Owner)
 }
 
 function Get-Signals {
@@ -3321,7 +3417,8 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  Structure:  add-goal  set-goal-status  add-epic  add-workstream  add-phase"
     Write-Output "              revise-epic  revise-workstream  revise-phase"
     Write-Output "  Execution:  set-stage  set-waiting  clear-waiting  record-verdict"
-    Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  close"
+    Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  hand-over"
+    Write-Output "              close"
     Write-Output "  Signals:    signal  signals  signals-target  signals-push  adopt-signal  judge-signal"
     Write-Output "              resolve-signal"
     Write-Output ""
@@ -3345,6 +3442,9 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  'share-progress' moves a project's progress from this machine into its repo, under"
     Write-Output "  progress/, once; it commits nothing. 'join' registers this machine as a person in such"
     Write-Output "  a project, -As <person id> as one already listed, -As <id> -Clear to take it off one."
+    Write-Output "  There every phase has one owner (add-phase -Owner, default you; revise-phase -Owner while"
+    Write-Output "  planned), and anyone else's work on it exits 88. 'hand-over -Phase X -To <person id>"
+    Write-Output "  -Detail <why>' ends a started phase and creates its successor (Xb) for that person."
     exit 0
 }
 
@@ -3952,7 +4052,7 @@ switch ($Command) {
     Write-Output ''
     Write-Output ("  {0,-9} {1,-9} {2,-9} {3,-15}" -f 'PHASE', 'ORDER', 'ACTOR', 'STAGE')
     foreach ($p in @($phases | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
-        Write-Output (Format-PhaseLine $p)
+        Write-Output (Format-PhaseLine $p $proj.Slug)
     }
     Write-Output ''
 
@@ -4126,7 +4226,7 @@ switch ($Command) {
     # One line per in-flight phase, printed with or without -Brief. Each line starts
     # 'WARNING:', so scripts/keel-session-start.ps1 forwards it - deliberately: a resuming session
     # is the one that must see it. Silent, and no git call, for a phase with no binding (P16).
-    foreach ($bindPh in @($phases | Where-Object { @('delivered', 'abandoned') -notcontains (Get-Prop $_ 'stage' '') })) {
+    foreach ($bindPh in @($phases | Where-Object { @('delivered', 'abandoned', 'handed-over') -notcontains (Get-Prop $_ 'stage' '') })) {
         Write-BindStatusLine $proj $bindPh
     }
 
@@ -4136,7 +4236,7 @@ switch ($Command) {
         $d = Get-Prop $_ 'due' ''
         # An abandoned phase is never overdue: its due date can no longer be met or missed,
         # and listing it forever teaches the reader to skip this line.
-        $d -and (Get-Prop $_ 'stage' '') -notin @('delivered', 'abandoned') -and ([datetime]::ParseExact($d, 'yyyy-MM-dd', $null) -lt $today)
+        $d -and (Get-Prop $_ 'stage' '') -notin @('delivered', 'abandoned', 'handed-over') -and ([datetime]::ParseExact($d, 'yyyy-MM-dd', $null) -lt $today)
     })
     if ($overdue.Count -gt 0) {
         Say "  OVERDUE: $(($overdue | ForEach-Object { "$($_.id) (due $(Get-Prop $_ 'due' ''))" }) -join ', ')"
@@ -4319,7 +4419,8 @@ switch ($Command) {
             }
             else {
                 foreach ($p in @(Get-Phases $State | Where-Object { $_.ws -eq $n.id } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })) {
-                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'))
+                    $trEx = Get-PhaseLineExtras $p $proj.Slug
+                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trEx.Owner)
                     foreach ($cItem in @(Get-Prop $p 'corrections' @())) {
                         Write-Output ("{0}      correction {1}: {2}" -f $pad, ((Get-Prop $cItem 'at' '') -split 'T')[0], (Get-Prop $cItem 'text' ''))
                     }
@@ -4670,9 +4771,18 @@ switch ($Command) {
     if ($wsNode.role -ne 'workstream') { Fail 93 "'$wsId' is a $($wsNode.role). Only a workstream may contain phases (charter P17)." }
     Assert-WsNotAbandoned $wsNode
     if ($null -ne (Find-Phase $state $Phase)) { Fail 90 "Phase '$Phase' already exists." }
+    # The owner: a person id, the writer when none is given. Stored explicitly, so the file says it.
+    $apShared = Test-SharedProgress $proj.Slug
+    $apOwnerId = $null
+    if ($Owner -and -not $apShared) { Fail 90 "-Owner is for a project that shares its progress; '$($proj.Slug)' keeps its progress on this machine, so its phases have no owner. Nothing was written." }
+    if ($apShared) {
+        if ($Owner) { Assert-SpPerson $proj.Slug $Owner 'Owner'; $apOwnerId = $Owner }
+        else { $apOwnerId = Get-SpWriter $proj.Slug }
+    }
 
+    # A handed-over phase is set aside: the phase that continues it takes its place in the order.
     if ($RunOrder -ge 0) {
-        $clash = @(Get-Phases $state | Where-Object { $_.ws -eq $wsId -and (Get-Prop $_ 'runOrder' -1) -eq $RunOrder })
+        $clash = @(Get-Phases $state | Where-Object { $_.ws -eq $wsId -and (Get-Prop $_ 'runOrder' -1) -eq $RunOrder -and (Get-Prop $_ 'stage' '') -ne 'handed-over' })
         if ($clash.Count -gt 0) {
             Fail 92 "Run order $RunOrder is already taken in $wsId by '$($clash[0].id)'. Move it first with revise-phase; two phases sharing an order makes 'what runs next' arbitrary while status answers it confidently."
         }
@@ -4695,11 +4805,13 @@ switch ($Command) {
         friction = @(); questions = @()
         created = (Now)
     }
+    if ($apShared) { Set-Prop $p 'owner' $apOwnerId }
     $arr = @(Get-Phases $state); $arr += $p; Set-Prop $state 'phases' $arr
     Write-State $proj.Slug $state
     Ensure-Dir (Get-PhaseDir $proj.Slug $Phase) | Out-Null
 
-    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' }))."
+    $apOwnerNote = if ($apShared) { ", owner: $(Get-SpPersonText $proj.Slug $apOwnerId)" } else { '' }
+    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' })$apOwnerNote)."
     if ($RunOrder -lt 0) { Say '  NOTE: no run order declared. status will refuse to guess what runs next.' }
     exit 0
 }
@@ -4716,13 +4828,16 @@ switch ($Command) {
     # and exits here, so it can reach none of the writes below, and the scope is never touched: the
     # wrong text stays visible beside its correction. Above the refusal because it is the exception
     # to it, and a call also naming another parameter is refused whole rather than half-applied.
+    # On a handed-over phase too, from anyone: it is finished, like a delivered one.
+    $rpStage = [string](Get-Prop $p 'stage' '')
     if ($PSBoundParameters.ContainsKey('Correction')) {
         Require-Param $Correction 'Correction'
-        if ((Get-Prop $p 'stage' '') -ne 'delivered') {
-            Fail 90 "Phase '$Phase' is not delivered, so its scope is still yours to change: use -Scope. -Correction is for a delivered phase."
+        if (@('delivered', 'handed-over') -notcontains $rpStage) {
+            if ($rpStage -ne 'planned') { Assert-PhaseOwner $proj.Slug $p 'revise' }
+            Fail 90 "Phase '$Phase' is not delivered, so its scope is still yours to change: use -Scope. -Correction is for a delivered or handed-over phase."
         }
-        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $RunOrder -ge 0) {
-            Fail 90 "-Correction stands alone. Phase '$Phase' is delivered and every other revise-phase parameter still refuses; nothing was stored."
+        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $Owner -or $RunOrder -ge 0) {
+            Fail 90 "-Correction stands alone. Phase '$Phase' is $rpStage and every other revise-phase parameter still refuses; nothing was stored."
         }
         $corrLog = @(Get-Prop $p 'corrections' @())
         $corrLog += [pscustomobject]@{ at = (Now); text = $Correction }
@@ -4732,10 +4847,20 @@ switch ($Command) {
         exit 0
     }
 
-    if ((Get-Prop $p 'stage' '') -eq 'delivered') {
+    Assert-PhaseOpen $proj.Slug $p
+    if ($rpStage -eq 'delivered') {
         Fail 90 "Phase '$Phase' is delivered. Its record cites evidence that exists and checks that were run. If delivered work needs redoing, that is a NEW phase whose scope says what it supersedes."
     }
+    # While planned, anyone may revise it, its owner included: no work exists yet for a new owner to
+    # inherit. Once it has started, only its owner.
+    if ($rpStage -ne 'planned') { Assert-PhaseOwner $proj.Slug $p 'revise' }
+    if ($Owner) {
+        if (-not (Test-SharedProgress $proj.Slug)) { Fail 90 "-Owner is for a project that shares its progress; '$($proj.Slug)' keeps its progress on this machine, so its phases have no owner. Nothing was written." }
+        if ($rpStage -ne 'planned') { Fail 90 "Phase '$Phase' is $rpStage, so its owner can no longer change: work has started under them. If they cannot finish it, hand it over: keel-state.ps1 hand-over -Phase $Phase -To <person id> -Detail `"<why>`". Nothing was written." }
+        Assert-SpPerson $proj.Slug $Owner 'Owner'
+    }
 
+    if ($Owner) { Set-Prop $p 'owner' $Owner }
     if ($Scope) { Set-Prop $p 'scope' $Scope }
     if ($Actor) { Assert-Enum $Actor $Actors 'Actor'; Set-Prop $p 'actor' $Actor }
     if ($Repos) {
@@ -4746,7 +4871,7 @@ switch ($Command) {
     if ($Due)   { Assert-Date $Due 'Due'; Set-Prop $p 'due' $Due }
     if ($PromptPath) { Set-Prop $p 'promptPath' $PromptPath }
     if ($RunOrder -ge 0) {
-        $clash = @(Get-Phases $state | Where-Object { $_.ws -eq $p.ws -and $_.id -ne $p.id -and (Get-Prop $_ 'runOrder' -1) -eq $RunOrder })
+        $clash = @(Get-Phases $state | Where-Object { $_.ws -eq $p.ws -and $_.id -ne $p.id -and (Get-Prop $_ 'runOrder' -1) -eq $RunOrder -and (Get-Prop $_ 'stage' '') -ne 'handed-over' })
         if ($clash.Count -gt 0) { Fail 92 "Run order $RunOrder is already taken in $($p.ws) by '$($clash[0].id)'." }
         Set-Prop $p 'runOrder' $RunOrder
     }
@@ -4765,6 +4890,8 @@ switch ($Command) {
 
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'set-stage'
     if ((Get-Prop $p 'stage' '') -eq 'delivered' -and $Stage -ne 'delivered') {
         Fail 90 "Phase '$Phase' is delivered and cannot move backwards."
     }
@@ -4790,6 +4917,8 @@ switch ($Command) {
 
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'set-waiting'
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered." }
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
 
@@ -4807,6 +4936,8 @@ switch ($Command) {
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'clear-waiting'
     if ((Get-Prop $p 'stage' '') -ne 'waiting') { Fail 90 "Phase '$Phase' is not waiting (stage: $(Get-Prop $p 'stage' '?'))." }
 
     # THE STAGE COMES BACK FROM THE GATES, by record-verdict's own rule. Writing 'planned'
@@ -4856,6 +4987,8 @@ switch ($Command) {
 
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'record a verdict on'
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered; its gates are closed." }
     # Both before the stage logic, whose record-gate DONE branch is tested ahead of
     # $StickyStages: left to it, a direct call would deliver an abandoned phase at exit 0.
@@ -5000,6 +5133,8 @@ switch ($Command) {
 
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'loop on'
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
     $n = [int](Get-Prop $p 'iterations' 0)
     $capLifts = @(Get-Prop $p 'capLifts' @())
@@ -5067,9 +5202,11 @@ switch ($Command) {
 
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
+    Assert-PhaseOwner $proj.Slug $p 'lift the cap of'
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
     $liftStage = Get-Prop $p 'stage' ''
-    if (@('delivered', 'abandoned') -contains $liftStage) { Fail 90 "$Phase is $liftStage. A lift there changes nothing, and would be a misleading record." }
+    if (@('delivered', 'abandoned', 'handed-over') -contains $liftStage) { Fail 90 "$Phase is $liftStage. A lift there changes nothing, and would be a misleading record." }
 
     $used = [int](Get-Prop $p 'iterations' 0)
     $capLifts = @(Get-Prop $p 'capLifts' @())
@@ -5140,9 +5277,10 @@ switch ($Command) {
         if ($node.role -ne 'workstream') { Fail 93 "'$Ws' is a $($node.role), not a workstream." }
         Assert-WsNotAbandoned $node
         $beneath = @(Get-Phases $state | Where-Object { $_.ws -eq $Ws })
-        $beneathDelivered = @($beneath | Where-Object { (Get-Prop $_ 'stage' '') -eq 'delivered' })
+        # A handed-over phase ran, as a delivered one did, so it refuses the same way.
+        $beneathDelivered = @($beneath | Where-Object { @('delivered', 'handed-over') -contains (Get-Prop $_ 'stage' '') })
         if ($beneathDelivered.Count -gt 0) {
-            Fail 90 "$Ws has delivered phase(s) and so did run: $(($beneathDelivered | ForEach-Object { $_.id }) -join ', '). A delivered phase's description takes 'revise-phase -Correction'."
+            Fail 90 "$Ws has delivered or handed-over phase(s) and so did run: $(($beneathDelivered | ForEach-Object { $_.id }) -join ', '). A finished phase's description takes 'revise-phase -Correction'."
         }
         $beneathOpen = @($beneath | Where-Object { (Get-Prop $_ 'stage' '') -ne 'abandoned' })
         if ($beneathOpen.Count -gt 0) {
@@ -5161,12 +5299,78 @@ switch ($Command) {
     Require-Param $Detail 'Detail'
     $state = Read-State $proj.Slug -ForWrite
     $p = Get-PhaseOrFail $state $Phase
+    Assert-PhaseOpen $proj.Slug $p
     if ((Get-Prop $p 'stage' '') -eq 'delivered') { Fail 90 "Phase '$Phase' is delivered and cannot be abandoned." }
+    if ((Get-Prop $p 'stage' '') -ne 'planned') { Assert-PhaseOwner $proj.Slug $p 'abandon' }
     Assert-WsNotAbandoned (Find-Node $state $p.ws)
     Set-Prop $p 'stage' 'abandoned'
     Set-Prop $p 'abandonedReason' $Detail
     Write-State $proj.Slug $state
     Say "$Phase abandoned: $Detail"
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# A started phase whose owner cannot finish it is not reassigned in place: it ends as 'handed-over'
+# and a successor continues it, owned by the person named, at the same run order, from grounding.
+# Anyone may run it, since the owner may be the one who left. A shared project only.
+'hand-over' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
+    if (-not (Test-SharedProgress $proj.Slug)) {
+        Fail 90 "hand-over is for a project that shares its progress: it hands a phase to another person, and '$($proj.Slug)' keeps its progress on this machine. Nothing was written."
+    }
+    Require-Param $To 'To'
+    Require-Param $Detail 'Detail'
+    $state = Read-State $proj.Slug -ForWrite
+    $p = Get-PhaseOrFail $state $Phase
+    Assert-WsNotAbandoned (Find-Node $state $p.ws)
+    $hoStage = [string](Get-Prop $p 'stage' '')
+    if ($hoStage -eq 'planned') { Fail 90 "Phase '$Phase' is planned: no work has started, so change its owner instead: keel-state.ps1 revise-phase -Phase $Phase -Owner <person id>. Nothing was written." }
+    if ($hoStage -eq 'handed-over') { Fail 90 "Phase '$Phase' was already handed over: $(Get-Prop $p 'handedOverTo' '?') continues it. Hand that one over instead. Nothing was written." }
+    if (@('delivered', 'abandoned') -contains $hoStage) { Fail 90 "Phase '$Phase' is $hoStage, so it is finished and there is nothing to hand over. Nothing was written." }
+    Assert-SpPerson $proj.Slug $To 'To'
+
+    # The successor's id: the first free letter after this phase's own, so W5.2 is continued by
+    # W5.2b, and W5.2b by W5.2c. Folded phases are in state, so their ids count as taken.
+    $hoBase = [regex]::Match($Phase, '^W\d+\.\d+').Value
+    $hoFrom = if ($Phase -cmatch '[a-z]$') { [int][char]$Phase[$Phase.Length - 1] } else { [int][char]'a' }
+    $hoSucc = $null
+    for ($hoC = $hoFrom + 1; $hoC -le [int][char]'z'; $hoC++) {
+        $hoCand = $hoBase + [string][char]$hoC
+        if ($null -eq (Find-Phase $state $hoCand)) { $hoSucc = $hoCand; break }
+    }
+    if (-not $hoSucc) { Fail 90 "Phase '$Phase' has no free successor id: every letter after its own up to z is taken under $hoBase. Plan the rest as a new phase with add-phase. Nothing was written." }
+
+    $hoNew = [pscustomobject]@{
+        id = $hoSucc; ws = $p.ws; scope = $p.scope; actor = (Get-Prop $p 'actor' 'agent')
+        runOrder = (Get-Prop $p 'runOrder' -1)
+        repos = @(Get-Prop $p 'repos' @())
+        due = (Get-Prop $p 'due' $null)
+        promptPath = (Get-Prop $p 'promptPath' $null)
+        stage = 'planned'
+        waitingOn = $null; reviewOn = $null
+        iterations = 0
+        gates = [pscustomobject]@{}
+        friction = @(); questions = @()
+        created = (Now)
+        owner = $To
+        needs = @(Get-Prop $p 'needs' @())
+        continues = $Phase
+    }
+    Set-Prop $p 'stage' 'handed-over'
+    Set-Prop $p 'handedOverTo' $hoSucc
+    Set-Prop $p 'handOverReason' $Detail
+    Set-Prop $p 'waitingOn' $null
+    Set-Prop $p 'reviewOn' $null
+    $arr = @(Get-Phases $state); $arr += $hoNew; Set-Prop $state 'phases' $arr
+    Write-State $proj.Slug $state
+    Ensure-Dir (Get-PhaseDir $proj.Slug $hoSucc) | Out-Null
+
+    $hoOrder = Get-Prop $p 'runOrder' -1
+    Say "$Phase handed over to $(Get-SpPersonText $proj.Slug $To): $hoSucc continues it from grounding, at run order $(if ($hoOrder -ge 0) { $hoOrder } else { 'NOT DECLARED' }). Reason: $Detail"
+    Say "  $Phase is finished. Its artifacts are evidence for $hoSucc to re-measure, never to inherit."
+    Say "  Commit and push now, so the new owner sees $hoSucc."
     exit 0
 }
 
@@ -5180,9 +5384,10 @@ switch ($Command) {
     if ($node.role -ne 'workstream') { Fail 93 "'$Ws' is a $($node.role), not a workstream." }
     Assert-WsNotAbandoned $node
 
-    $open = @(Get-Phases $state | Where-Object { $_.ws -eq $Ws -and @('delivered', 'abandoned') -notcontains (Get-Prop $_ 'stage' '') })
+    # A handed-over phase is done: its successor carries the work, and is counted in its own right.
+    $open = @(Get-Phases $state | Where-Object { $_.ws -eq $Ws -and @('delivered', 'abandoned', 'handed-over') -notcontains (Get-Prop $_ 'stage' '') })
     if ($open.Count -gt 0) {
-        Fail 90 "$Ws still has $($open.Count) phase(s) neither delivered nor abandoned: $(($open | ForEach-Object { $_.id }) -join ', ')."
+        Fail 90 "$Ws still has $($open.Count) phase(s) not finished (delivered, handed over or abandoned): $(($open | ForEach-Object { $_.id }) -join ', ')."
     }
     Set-Prop $node 'status' 'DELIVERED'
     Set-Prop $node 'closedAt' (Now)

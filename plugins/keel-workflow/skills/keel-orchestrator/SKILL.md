@@ -47,6 +47,8 @@ keel-state.ps1 status
 | `WARNING: after a merge, ...` | A shared project: two writes, each valid alone, merged into a whole that breaks a rule the wrapper refuses for a single writer. One line per broken rule, naming the ids. See below. |
 | `others:` | A shared project: each other person's next phase, by name. There `next:` is **yours**, the lowest-order runnable phase you own. |
 | `your last handoff:` | A shared project: your own newest handoff, when someone else's is newer. `handoff:` names the newest by time, with its author. |
+| `owner: <name> (<id>)` at the end of a phase line | A shared project: the person who owns that unfinished phase. Only they may work on it; see below. |
+| `handed-over -> W5.2b` in the phase table | A shared project: the phase ended unfinished and W5.2b continues it. It is finished, like a delivered phase. |
 
 **The `handoff:` line names a document, and the stamp beside it dates that document rather than
 checking it** — a handoff whose every claim has gone false is marked fresh until an unrelated verdict
@@ -56,7 +58,7 @@ it"**, below.
 ### Resuming a project that shares its progress
 
 A project whose `keel.json` says `"progress": "repo"` keeps its progress under `progress/` in its
-own repo, written by several people (charter P15). Three things differ when a session resumes one:
+own repo, written by several people (charter P15). Five things differ when a session resumes one:
 
 - **The behind reading comes first.** If `status` says the remote holds work this copy has not
   pulled, or that this copy is behind, pull and run `status` again before anything else: every other
@@ -75,10 +77,26 @@ own repo, written by several people (charter P15). Three things differ when a se
   - *an id names no file*: the file it refers to was not committed or not pulled; pull again, or
     have the person who wrote it commit and push it;
   - *a machine is listed by two person files*: writes from it are refused until one drops it, with
-    `join -As <person id> -Clear`.
+    `join -As <person id> -Clear`;
+  - *a gate entry is by someone other than the phase's owner*: one person changed the owner of a
+    planned phase while another, offline, started it. Agree who finishes it; if that is not its
+    owner, hand it over (below).
 
   Other writes go on, so a clash in one workstream does not stop work in another. A repair is a
   write like any other, committed and pushed.
+- **A phase is its owner's.** Every phase has one owner, set when it is planned (`add-phase
+  -Owner`, the planner by default). Anyone else's work on it is refused at **exit 88**, which names
+  the owner: `set-stage`, `set-waiting`, `clear-waiting`, `record-verdict`, `new-iteration` and
+  `lift-cap` always, and `revise-phase` and `abandon -Phase` once it has left `planned`. Do not work
+  around an 88: ask the owner, or hand the phase over. `note-friction` and `open-question` stay open
+  to anyone. While a phase is still `planned`, anyone may change its owner with `revise-phase
+  -Owner`, revise it or abandon it, because no work exists yet for a new owner to inherit.
+- **When to hand a phase over.** When the owner of a started phase cannot finish it - they have
+  left, moved to other work, or agree someone else should - run `hand-over -Phase W5.2 -To <person
+  id> -Detail "<why>"`. Anyone may run it, since the owner may be the one who left. It ends W5.2 as
+  `handed-over`, which is finished: nothing more runs on it and it can never read as abandoned. It
+  creates W5.2b, owned by that person, at the same run order, starting at grounding. Commit and
+  push at once, so the new owner sees it. A planned phase is not handed over; change its owner.
 
 ### Signals cross machines; improvements cross back
 
@@ -710,6 +728,8 @@ keel-state.ps1 add-phase    -Phase W<n>.<new> -Scope "<...>" -Actor <a> -RunOrde
 **Run orders are unique per workstream and the wrapper enforces it (exit 92).** To insert between
 two phases, move the later one out of the way first. Two phases sharing an order *within* a
 workstream would make "what runs next" arbitrary, which is why the wrapper refuses it outright.
+The one exception is a hand-over's successor, which takes the order of the phase it continues: a
+`handed-over` phase is finished and is set aside when orders are compared.
 
 **Across workstreams the same order is legal and `status` says so.** Two workstreams may each hold a
 phase at order 1; the state file has no way to express which workstream runs first, so when the

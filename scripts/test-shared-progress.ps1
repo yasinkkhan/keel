@@ -58,6 +58,23 @@
                    HANDOFF    authored handoffs, named per person; the newest by instant with its
                               author, your last handoff, STALE; a stamp later as an instant and
                               smaller as text is named. Control: without it, the earlier one is.
+      OWNER      ownership and hand-over, on its own bare remote and two clones, people A and B:
+                 every verb design section 8 lists refuses B at 88 on A's started phase, writing
+                 nothing (control: the same calls by A exit 0), and the verbs run are compared with
+                 that list both ways; note-friction and open-question stay open; anyone may revise,
+                 take or abandon a planned phase. hand-over by a non-owner ends the phase and
+                 creates its successor (Xb, then Xc), carrying its declaration (control: 92 at its
+                 order before); hand-over's five refusals write nothing; a handed-over phase refuses
+                 every covered verb at 90 naming its successor. status prints handed-over with its
+                 successor; close counts it done and folds handedOver (control: one phase open);
+                 abandon -Ws refuses it (control: a workstream with only an abandoned phase); a
+                 successor at its predecessor's order is no clash (control: two merged phases at
+                 one order are). After a merge, a gate entry by someone other than the owner is
+                 named (control: the same with no owner change). The owner ends each unfinished
+                 phase line and no finished one (control: a per-machine project prints none). Per
+                 machine: -Owner and hand-over refuse at 90, and a full sequence's state.json has
+                 the property paths of HEAD's wrapper's (control: a planted key is named); once the
+                 change is committed that half compares the wrapper with itself, and says so.
 
     Modes, human-invoked and not on the push path, as the other suites' comparison modes are:
       -OldRef <rev>  the wrapper at <rev>, an older copy: a state.json it wrote keeps the same
@@ -257,6 +274,9 @@ function Get-View {
             # Lines only a shared project prints about this copy's git state, which an export and a
             # fold move by design: the uncommitted count, and a reading not taken.
             if ($vLine -match 'progress file\(s\) written here are not committed|was NOT checked \(') { continue }
+            # The owner a shared project prints at the end of an unfinished phase's line, which a
+            # per-machine project has no owner to print; OWNER-column tests it.
+            $vLine = $vLine -replace '  owner: [^()]*\(p-[0-9a-f]{4}\)$', ''
             $vAll.Add(($vLine -replace '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})[+-]\d{2}:\d{2}', '$1'))
         }
     }
@@ -537,6 +557,8 @@ try {
     Assert-K $homeA 'KSP-A' @('lift-cap', '-Path', $dirA, '-Phase', 'W1.2', '-Rounds', '1', '-Detail', 'suite words') | Out-Null
     Assert-K $homeB 'KSP-B' @('add-phase', '-Path', $dirB, '-Phase', 'W2.2', '-Scope', "added by B $tokB", '-Actor', 'agent', '-RunOrder', '2') | Out-Null
     Write-Artifacts (Get-ArtDir $dirB $homeB 'W2.1' -AShared) 'W2.1'
+    # W2.1 was planned by A, so it is A's; B takes it while it is still planned, as anyone may.
+    Assert-K $homeB 'KSP-B' @('revise-phase', '-Path', $dirB, '-Phase', 'W2.1', '-Owner', $pidB) | Out-Null
     Invoke-Gates $homeB 'KSP-B' $dirB 'W2.1' @('ground', 'investigate', 'plan') | Out-Null
     Assert-K $homeB 'KSP-B' @('note-friction', '-Path', $dirB, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', $tokB) | Out-Null
     Assert-K $homeB 'KSP-B' @('open-question', '-Path', $dirB, '-Phase', 'W2.1', '-Question', "question $tokB", '-Answer', 'answered') | Out-Null
@@ -1231,6 +1253,286 @@ try {
     $myLine ='WARNING: after a merge, machine KSP-Y is listed by two person files, p-[0-9a-f]{4} \([^)]*\) and p-[0-9a-f]{4} \([^)]*\), so writes from it are refused'
     Add-Case 'ORIENT-merge-machine-twice' (($my.S -match $myLine) -and ($my.T -match $myLine)) "a machine that joined on both clones offline: status and tree name it and both person files"
     Add-Case 'ORIENT-merge-machine-twice-CONTROL' (($my.S -notmatch 'machine KSP-Z') -and ($my.T -notmatch 'machine KSP-Z')) "a machine that joined on one clone only is not named"
+
+    # =============================================================== OWNER ==
+    # Ownership and hand-over, on its own bare remote and two clones, people A and B. Uses ORIENT's
+    # helpers (Save-Push, Sync-Pair, Get-OrBoth) and its copy of HEAD's wrapper.
+    function Get-PhaseHash {
+        # The phase's own files - phase.json, run.json and every entry folder - artifacts left out.
+        param([string]$PhDir, [string]$PhId)
+        $phRoot = Join-Path $PhDir "progress\phases\$PhId"
+        if (-not (Test-Path -LiteralPath $phRoot)) { return '(none)' }
+        $phLines = @(Get-ChildItem -LiteralPath $phRoot -Recurse -File | Where-Object { $_.FullName.Substring($phRoot.Length) -notmatch '^\\artifacts\\' } | Sort-Object FullName | ForEach-Object {
+            $_.FullName.Substring($phRoot.Length) + '|' + (Get-Sha ([System.IO.File]::ReadAllBytes($_.FullName)))
+        })
+        return (Get-Sha ([System.Text.Encoding]::UTF8.GetBytes(($phLines -join "`n"))))
+    }
+    function Get-JsonPaths {
+        # Every property path of a parsed JSON value, an array's elements as [].
+        param($JpVal, [string]$JpAt, $JpOut)
+        if ($JpVal -is [System.Management.Automation.PSCustomObject]) {
+            foreach ($jpP in @($JpVal.PSObject.Properties)) { $jpPath = "$JpAt.$($jpP.Name)"; [void]$JpOut.Add($jpPath); Get-JsonPaths $jpP.Value $jpPath $JpOut }
+        }
+        elseif ($JpVal -is [System.Collections.IEnumerable] -and $JpVal -isnot [string]) {
+            foreach ($jpE in $JpVal) { Get-JsonPaths $jpE "$JpAt[]" $JpOut }
+        }
+    }
+    function Get-JField {
+        # A field of a parsed file, or $null where the file or the field is missing.
+        param($JfObj, [string]$JfName)
+        if ($null -eq $JfObj) { return $null }
+        $jfP = $JfObj.PSObject.Properties[$JfName]
+        if ($null -eq $jfP) { return $null }
+        return $jfP.Value
+    }
+    function Get-PhaseFile {
+        param([string]$PfDir, [string]$PfId, [string]$PfName)
+        $pfFull = Join-Path $PfDir "progress\phases\$PfId\$PfName"
+        if (-not (Test-Path -LiteralPath $pfFull)) { return $null }
+        return (Read-JsonFile $pfFull)
+    }
+
+    $wRemote = Join-Path $scratch 'wremote.git'
+    New-Item -ItemType Directory -Path $wRemote -Force | Out-Null
+    Assert-G $wRemote @('init', '-q', '--bare', '-b', 'main') | Out-Null
+    $wSlug = 'kow' + $runTag
+    $homeOA = New-Home 'OA'; $homeOB = New-Home 'OB'
+    $dirOA = Join-Path $scratch "cloneOA\$wSlug"
+    $dirOB = Join-Path $scratch "cloneOB\$wSlug"
+    New-Repo $dirOA 'Owner A'
+    Assert-G $dirOA @('remote', 'add', 'origin', $wRemote) | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('init-project', '-Path', $dirOA, '-Title', 'ownership') | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('add-goal', '-Path', $dirOA, '-Id', 'G1', '-Text', 'goal') | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('add-repo', '-Path', $dirOA, '-Name', 'side', '-RepoPath', $side) | Out-Null
+    foreach ($ow in @('W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7')) {
+        Assert-K $homeOA 'KSP-OA' @('add-workstream', '-Path', $dirOA, '-Id', $ow, '-Title', "workstream $ow", '-Parent', 'root', '-Goals', 'G1') | Out-Null
+    }
+    Save-Commit $dirOA 'project'
+    Assert-K $homeOA 'KSP-OA' @('share-progress', '-Path', $dirOA) | Out-Null
+    $wPlan = @(@('W1.1', 1), @('W1.2', 2), @('W1.3', 3), @('W2.2', 2), @('W2.3', 3), @('W2.4', 4), @('W2.5', 5), @('W3.1', 1), @('W3.2', 2), @('W4.1', 1), @('W7.1', 1))
+    foreach ($wpl in $wPlan) {
+        Assert-K $homeOA 'KSP-OA' @('add-phase', '-Path', $dirOA, '-Phase', $wpl[0], '-Scope', "phase $($wpl[0])", '-Actor', 'agent', '-RunOrder', "$($wpl[1])") | Out-Null
+    }
+    Assert-K $homeOA 'KSP-OA' @('add-phase', '-Path', $dirOA, '-Phase', 'W2.1', '-Scope', 'phase W2.1 to hand over', '-Actor', 'self', '-RunOrder', '1', '-Repos', 'side', '-Due', '2099-01-02', '-PromptPath', 'plan/prompts/W2.1-prompt.md') | Out-Null
+    Save-Commit $dirOA 'shared'
+    Assert-G $dirOA @('push', '-q', '-u', 'origin', 'main') | Out-Null
+    $wPidA = [string](@(Get-ChildItem -LiteralPath (Join-Path $dirOA 'progress\people') -Filter '*.json' | ForEach-Object { Read-JsonFile $_.FullName } | Where-Object { @($_.machines) -contains 'KSP-OA' })[0].id)
+    New-Item -ItemType Directory -Path (Join-Path $scratch 'cloneOB') -Force | Out-Null
+    Assert-G (Join-Path $scratch 'cloneOB') @('clone', '-q', $wRemote, $wSlug) | Out-Null
+    foreach ($oc in @(@('user.name', 'Owner B'), @('user.email', 'suite@example.invalid'), @('pull.rebase', 'false'), @('core.autocrlf', 'false'))) { Assert-G $dirOB @('config', $oc[0], $oc[1]) | Out-Null }
+    $wjb = Assert-K $homeOB 'KSP-OB' @('join', '-Path', $dirOB)
+    $wPidB = if ($wjb.Out -match 'as person (p-[0-9a-f]{4}) ') { $Matches[1] } else { throw 'join on OB printed no person id.' }
+    Save-Push $dirOB 'B joins'
+    Assert-G $dirOA @('pull', '-q', '--no-edit') | Out-Null
+    $wWhoA = "Owner A \($wPidA\)"; $wWhoB = "Owner B \($wPidB\)"
+    # Two phases owned by B, for the merge case, added by A with -Owner.
+    foreach ($wpl in @(@('W5.1', 1), @('W5.2', 2))) {
+        Assert-K $homeOA 'KSP-OA' @('add-phase', '-Path', $dirOA, '-Phase', $wpl[0], '-Scope', "phase $($wpl[0])", '-Actor', 'agent', '-RunOrder', "$($wpl[1])", '-Owner', $wPidB) | Out-Null
+    }
+    $wOwnB = Get-JField (Get-PhaseFile $dirOA 'W5.1' 'phase.json') 'owner'
+    $wOwnA = Get-JField (Get-PhaseFile $dirOA 'W1.1' 'phase.json') 'owner'
+    Add-Case 'OWNER-add-phase-owner' (($wOwnB -ceq $wPidB) -and ($wOwnA -ceq $wPidA)) "add-phase -Owner B stores B: $($wOwnB -ceq $wPidB); with no -Owner, the writer A: $($wOwnA -ceq $wPidA)"
+
+    # ---- anyone but the owner is refused at 88 on a started phase. A starts W1.1.
+    foreach ($wp in @('W1.1', 'W2.1', 'W2.3', 'W2.5', 'W3.1', 'W3.2', 'W4.1')) { Write-Artifacts (Get-ArtDir $dirOA $homeOA $wp -AShared) $wp @() }
+    foreach ($wp in @('W1.1', 'W2.1', 'W2.5', 'W3.2', 'W4.1')) { Invoke-Gates $homeOA 'KSP-OA' $dirOA $wp @('ground') | Out-Null }
+    Save-Push $dirOA 'A starts phases'
+    Assert-G $dirOB @('pull', '-q', '--no-edit') | Out-Null
+    # The verbs design section 8 "Ownership" lists: the work verbs always, and the two that change
+    # a phase once it has left 'planned' (revise-phase other than -Correction, and abandon -Phase).
+    $wCovered = @('set-stage', 'set-waiting', 'clear-waiting', 'record-verdict', 'new-iteration', 'lift-cap', 'revise-phase', 'abandon -Phase')
+    $wCalls = @(
+        @{ Verb = 'set-stage'; Args = @('set-stage', '-Phase', 'W1.1', '-Stage', 'investigating') }
+        @{ Verb = 'set-waiting'; Args = @('set-waiting', '-Phase', 'W1.1', '-WaitingOn', 'a supplier', '-ReviewOn', '2099-01-01') }
+        @{ Verb = 'clear-waiting'; Args = @('clear-waiting', '-Phase', 'W1.1') }
+        @{ Verb = 'record-verdict'; Args = @('record-verdict', '-Phase', 'W1.1', '-Gate', 'investigate', '-Verdict', 'DONE') }
+        @{ Verb = 'new-iteration'; Args = @('new-iteration', '-Phase', 'W1.1', '-Trigger', 'plan', '-Detail', 'a round') }
+        @{ Verb = 'lift-cap'; Args = @('lift-cap', '-Phase', 'W1.1', '-Rounds', '1', '-Detail', 'operator words') }
+        @{ Verb = 'revise-phase'; Args = @('revise-phase', '-Phase', 'W1.1', '-Scope', 'rescoped') }
+        @{ Verb = 'abandon -Phase'; Args = @('abandon', '-Phase', 'W1.1', '-Detail', 'not needed') }
+    )
+    $wRan = New-Object System.Collections.Generic.List[string]
+    foreach ($wc in $wCalls) {
+        $wBefore = Get-PhaseHash $dirOB 'W1.1'
+        $wr = Invoke-K $homeOB 'KSP-OB' (@($wc.Args[0]) + @('-Path', $dirOB) + @($wc.Args | Select-Object -Skip 1))
+        $wSame = (Get-PhaseHash $dirOB 'W1.1') -eq $wBefore
+        $wMsg = ($wr.Err -match "owned by $wWhoA") -and ($wr.Err -match "this machine is $wWhoB") -and ($wr.Err -match 'hand-over -Phase W1\.1 -To <person id>')
+        $wRan.Add($wc.Verb)
+        Add-Case "OWNER-refuse-$($wc.Verb -replace ' ', '')" (($wr.Code -eq 88) -and $wSame -and $wMsg) "B on A's started W1.1: exit $($wr.Code), phase files unchanged: $wSame, names A by name and id, B, and hand-over: $wMsg"
+    }
+    $wSetA = @($wCovered | Where-Object { @($wRan) -notcontains $_ })
+    $wSetB = @(@($wRan) | Where-Object { $wCovered -notcontains $_ })
+    Add-Case 'OWNER-refuse-set' (($wSetA.Count -eq 0) -and ($wSetB.Count -eq 0) -and ($wRan.Count -eq $wCovered.Count)) "the verbs the refusal cases ran against design section 8's list: missing '$($wSetA -join ',')', extra '$($wSetB -join ',')', $($wRan.Count) ran"
+    $wnf = Invoke-K $homeOB 'KSP-OB' @('note-friction', '-Path', $dirOB, '-Phase', 'W1.1', '-Kind', 'gap', '-Detail', 'from B')
+    $woq = Invoke-K $homeOB 'KSP-OB' @('open-question', '-Path', $dirOB, '-Phase', 'W1.1', '-Question', 'from B', '-Answer', 'yes')
+    Add-Case 'OWNER-open-to-anyone' (($wnf.Code -eq 0) -and ($woq.Code -eq 0)) "B's note-friction exit $($wnf.Code), open-question exit $($woq.Code) on A's W1.1"
+    # Control: each refused call, made by the owner, exits 0, in an order a phase allows.
+    $wCtl = @()
+    foreach ($wc in $wCalls) {
+        $wa = Invoke-K $homeOA 'KSP-OA' (@($wc.Args[0]) + @('-Path', $dirOA) + @($wc.Args | Select-Object -Skip 1))
+        $wCtl += "$($wc.Verb)=$($wa.Code)"
+    }
+    Add-Case 'OWNER-refuse-CONTROL' (@($wCtl | Where-Object { $_ -notmatch '=0$' }).Count -eq 0) "the same eight calls by A: $($wCtl -join ' ')"
+    # A planned phase: anyone may revise it, change its owner, or abandon it.
+    $wpr = Invoke-K $homeOB 'KSP-OB' @('revise-phase', '-Path', $dirOB, '-Phase', 'W1.2', '-Scope', 'rescoped by B')
+    $wpo = Invoke-K $homeOB 'KSP-OB' @('revise-phase', '-Path', $dirOB, '-Phase', 'W1.2', '-Owner', $wPidB)
+    $wpa = Invoke-K $homeOB 'KSP-OB' @('abandon', '-Path', $dirOB, '-Phase', 'W1.3', '-Detail', 'by B while planned')
+    $wpOwner = Get-JField (Get-PhaseFile $dirOB 'W1.2' 'phase.json') 'owner'
+    Add-Case 'OWNER-planned-anyone' (($wpr.Code -eq 0) -and ($wpo.Code -eq 0) -and ($wpa.Code -eq 0) -and ($wpOwner -ceq $wPidB)) "on A's planned phases, B's revise-phase exit $($wpr.Code), revise-phase -Owner exit $($wpo.Code) (owner now B: $($wpOwner -ceq $wPidB)), abandon -Phase exit $($wpa.Code)"
+    $wpu = Invoke-K $homeOB 'KSP-OB' @('revise-phase', '-Path', $dirOB, '-Phase', 'W1.2', '-Owner', 'p-0000')
+    $wps = Invoke-K $homeOA 'KSP-OA' @('revise-phase', '-Path', $dirOA, '-Phase', 'W2.1', '-Owner', $wPidB)
+    Add-Case 'OWNER-revise-owner-refused' (($wpu.Code -eq 90) -and ($wps.Code -eq 90) -and ($wps.Err -match 'hand-over')) "-Owner naming no person file exit $($wpu.Code); -Owner on a started phase, by its owner, exit $($wps.Code), naming hand-over"
+    Sync-Pair $dirOA $dirOB 'C1 cases'
+
+    # ---- hand-over, run by someone other than the owner, and its successor.
+    $wDup = Invoke-K $homeOA 'KSP-OA' @('add-phase', '-Path', $dirOA, '-Phase', 'W2.9', '-Scope', 'at the same order', '-Actor', 'agent', '-RunOrder', '1')
+    Add-Case 'OWNER-handover-92-CONTROL' ($wDup.Code -eq 92) "before the hand-over, add-phase at W2.1's order 1 exits $($wDup.Code)"
+    $who = Invoke-K $homeOB 'KSP-OB' @('hand-over', '-Path', $dirOB, '-Phase', 'W2.1', '-To', $wPidB, '-Detail', 'A was moved to other work')
+    $wxR = Get-PhaseFile $dirOB 'W2.1' 'run.json'
+    $wxD = Get-PhaseFile $dirOB 'W2.1' 'phase.json'
+    $wbD = Get-PhaseFile $dirOB 'W2.1b' 'phase.json'
+    $wbR = Get-PhaseFile $dirOB 'W2.1b' 'run.json'
+    $wxOk = ($who.Code -eq 0) -and ((Get-JField $wxR 'stage') -eq 'handed-over') -and ((Get-JField $wxR 'handedOverTo') -eq 'W2.1b') -and ((Get-JField $wxR 'handOverReason') -eq 'A was moved to other work')
+    $wbOk = ($null -ne $wbD) -and ((Get-JField $wbD 'scope') -ceq (Get-JField $wxD 'scope')) -and ((Get-JField $wbD 'actor') -eq 'self') -and ((@(Get-JField $wbD 'repos') -join ',') -eq 'side') -and
+            ((Get-JField $wbD 'due') -eq '2099-01-02') -and ((Get-JField $wbD 'promptPath') -eq 'plan/prompts/W2.1-prompt.md') -and
+            ((@(Get-JField $wbD 'needs') | ConvertTo-Json -Compress) -eq (@(Get-JField $wxD 'needs') | ConvertTo-Json -Compress)) -and ((Get-JField $wbD 'runOrder') -eq 1) -and
+            ((Get-JField $wbD 'owner') -ceq $wPidB) -and ((Get-JField $wbD 'continues') -eq 'W2.1') -and ((Get-JField $wbR 'stage') -eq 'planned')
+    Add-Case 'OWNER-handover' ($wxOk -and $wbOk) "B hands over A's W2.1 to B: exit $($who.Code); W2.1 handed-over with handedOverTo W2.1b and the reason: $wxOk; W2.1b carries scope, actor, repos, due, prompt path, needs and order 1, owner B, continues W2.1, planned: $wbOk"
+    Assert-K $homeOB 'KSP-OB' @('set-stage', '-Path', $dirOB, '-Phase', 'W2.1b', '-Stage', 'grounding') | Out-Null
+    $whc = Invoke-K $homeOB 'KSP-OB' @('hand-over', '-Path', $dirOB, '-Phase', 'W2.1b', '-To', $wPidA, '-Detail', 'back to A')
+    $wcD = Get-PhaseFile $dirOB 'W2.1c' 'phase.json'
+    Add-Case 'OWNER-handover-again' (($whc.Code -eq 0) -and ((Get-JField $wcD 'continues') -eq 'W2.1b') -and ((Get-JField $wcD 'owner') -ceq $wPidA) -and ((Get-JField (Get-PhaseFile $dirOB 'W2.1b' 'run.json') 'handedOverTo') -eq 'W2.1c')) "handing W2.1b over exits $($whc.Code) and creates W2.1c, continuing W2.1b, owned by A"
+    Save-Push $dirOB 'hand-overs'
+    Assert-G $dirOA @('pull', '-q', '--no-edit') | Out-Null
+
+    # ---- hand-over's refusals write nothing; a handed-over phase is finished.
+    Invoke-Gates $homeOA 'KSP-OA' $dirOA 'W2.3' $AllGates | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Phase', 'W2.4', '-Detail', 'not needed') | Out-Null
+    $wRef = @(@('planned', 'W2.2', $wPidB), @('delivered', 'W2.3', $wPidB), @('abandoned', 'W2.4', $wPidB), @('handed-over', 'W2.1', $wPidB), @('unknown-to', 'W2.5', 'p-0000'))
+    foreach ($wrf in $wRef) {
+        $wSnap = Get-WriteSnapshot $dirOA $homeOA
+        $wrr = Invoke-K $homeOA 'KSP-OA' @('hand-over', '-Path', $dirOA, '-Phase', $wrf[1], '-To', $wrf[2], '-Detail', 'refused')
+        $wNo = (Get-WriteSnapshot $dirOA $homeOA) -eq $wSnap
+        Add-Case "OWNER-handover-refused-$($wrf[0])" (($wrr.Code -eq 90) -and $wNo) "hand-over of $($wrf[1]) ($($wrf[0])) exits $($wrr.Code), wrote nothing: $wNo"
+    }
+    $wok = Invoke-K $homeOA 'KSP-OA' @('hand-over', '-Path', $dirOA, '-Phase', 'W2.5', '-To', $wPidB, '-Detail', 'a started phase')
+    Add-Case 'OWNER-handover-refused-CONTROL' ($wok.Code -eq 0) "the hand-over of started W2.5 to a person who exists exits $($wok.Code)"
+    $wClosed = @()
+    foreach ($wc in $wCalls) {
+        $wcArgs = @($wc.Args | ForEach-Object { if ($_ -eq 'W1.1') { 'W2.1' } else { $_ } })
+        $wcr = Invoke-K $homeOA 'KSP-OA' (@($wcArgs[0]) + @('-Path', $dirOA) + @($wcArgs | Select-Object -Skip 1))
+        $wClosed += "$($wc.Verb)=$($wcr.Code)$(if ($wcr.Err -match 'W2\.1b continues it') { '+names' } else { '-silent' })"
+    }
+    $wcf = Invoke-K $homeOB 'KSP-OB' @('note-friction', '-Path', $dirOB, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', 'after the hand-over')
+    $wcq = Invoke-K $homeOB 'KSP-OB' @('open-question', '-Path', $dirOB, '-Phase', 'W2.1', '-Question', 'after the hand-over')
+    $wcc = Invoke-K $homeOB 'KSP-OB' @('revise-phase', '-Path', $dirOB, '-Phase', 'W2.1', '-Correction', 'a correction by B')
+    $wcco = Invoke-K $homeOB 'KSP-OB' @('revise-phase', '-Path', $dirOB, '-Phase', 'W2.1', '-Correction', 'with owner', '-Owner', $wPidA)
+    Add-Case 'OWNER-handed-over-finished' (@($wClosed | Where-Object { $_ -notmatch '^[^=]+=90\+names$' }).Count -eq 0) "on handed-over W2.1, by its owner A: $($wClosed -join ' ')"
+    Add-Case 'OWNER-handed-over-entries' (($wcf.Code -eq 0) -and ($wcq.Code -eq 0) -and ($wcc.Code -eq 0) -and ($wcco.Code -eq 90)) "on handed-over W2.1, by B: note-friction $($wcf.Code), open-question $($wcq.Code), revise-phase -Correction $($wcc.Code); -Correction with -Owner $($wcco.Code)"
+    Sync-Pair $dirOA $dirOB 'C3 cases'
+
+    # ---- status, close, abandon -Ws and the run-order check know a handed-over phase.
+    $wst = Invoke-K $homeOA 'KSP-OA' @('status', '-Path', $dirOA)
+    $wtr = Invoke-K $homeOA 'KSP-OA' @('tree', '-Path', $dirOA)
+    Add-Case 'OWNER-status-handed-over' (($wst.Out -match '(?m)^\s+W2\.1\s+#1\s+self\s+handed-over -> W2\.1b\s+due: 2099-01-02\s*$') -and ($wst.Out -match '(?m)^\s+W2\.1b\s+#1\s+self\s+handed-over -> W2\.1c\s+due: 2099-01-02\s*$')) "status prints W2.1 as handed-over -> W2.1b and W2.1b as handed-over -> W2.1c"
+    Add-Case 'OWNER-runorder' (($wst.Out -notmatch 'share run order') -and ($wtr.Out -notmatch 'share run order')) "W2.1, W2.1b and W2.1c at one order: no run-order line in status or tree"
+    Assert-K $homeOA 'KSP-OA' @('add-phase', '-Path', $dirOA, '-Phase', 'W6.1', '-Scope', 'phase W6.1', '-Actor', 'agent', '-RunOrder', '5') | Out-Null
+    Assert-K $homeOB 'KSP-OB' @('add-phase', '-Path', $dirOB, '-Phase', 'W6.2', '-Scope', 'phase W6.2', '-Actor', 'agent', '-RunOrder', '5') | Out-Null
+    Sync-Pair $dirOA $dirOB 'W6 clash'
+    $wcl = Get-OrBoth $homeOA 'KSP-OA' $dirOA
+    Add-Case 'OWNER-runorder-CONTROL' (($wcl.S -match 'W6\.1 and W6\.2 share run order 5 in W6') -and ($wcl.T -match 'W6\.1 and W6\.2 share run order 5 in W6')) "two phases at one order, neither handed over, merged: status and tree flag them"
+    Assert-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Phase', 'W6.1', '-Detail', 'clash done') | Out-Null
+    Assert-K $homeOB 'KSP-OB' @('abandon', '-Path', $dirOB, '-Phase', 'W6.2', '-Detail', 'clash done') | Out-Null
+    Sync-Pair $dirOA $dirOB 'W6 done'
+    # close: W3.1 delivered, W3.2 handed over, its successor W3.2b delivered.
+    Invoke-Gates $homeOA 'KSP-OA' $dirOA 'W3.1' $AllGates | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('hand-over', '-Path', $dirOA, '-Phase', 'W3.2', '-To', $wPidA, '-Detail', 'a fresh start') | Out-Null
+    $wcl0 = Invoke-K $homeOA 'KSP-OA' @('close', '-Path', $dirOA, '-Ws', 'W3')
+    Write-Artifacts (Get-ArtDir $dirOA $homeOA 'W3.2b' -AShared) 'W3.2b' @()
+    Invoke-Gates $homeOA 'KSP-OA' $dirOA 'W3.2b' $AllGates | Out-Null
+    $wcl1 = Invoke-K $homeOA 'KSP-OA' @('close', '-Path', $dirOA, '-Ws', 'W3')
+    $wHo = Get-JField (Read-JsonFile (Join-Path $dirOA 'progress\nodes\W3.json')) 'handedOver'
+    Add-Case 'OWNER-close' (($wcl1.Code -eq 0) -and ([string](Get-JField $wHo 'W3.2') -eq 'W3.2b') -and (Test-Path -LiteralPath (Join-Path $dirOA 'progress\closed\W3.json'))) "close of W3 (W3.1 delivered, W3.2 handed over, W3.2b delivered) exits $($wcl1.Code); the folded node's handedOver maps W3.2 to W3.2b"
+    Add-Case 'OWNER-close-CONTROL' ($wcl0.Code -eq 90) "the same close while W3.2b was still planned exits $($wcl0.Code)"
+    # abandon -Ws: W4.1 handed over, its successor abandoned. Control: W7, whose one phase is abandoned.
+    Assert-K $homeOA 'KSP-OA' @('hand-over', '-Path', $dirOA, '-Phase', 'W4.1', '-To', $wPidB, '-Detail', 'to B') | Out-Null
+    Assert-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Phase', 'W4.1b', '-Detail', 'not needed after all') | Out-Null
+    $waw = Invoke-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Ws', 'W4', '-Detail', 'never mind')
+    Assert-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Phase', 'W7.1', '-Detail', 'not needed') | Out-Null
+    $waw7 = Invoke-K $homeOA 'KSP-OA' @('abandon', '-Path', $dirOA, '-Ws', 'W7', '-Detail', 'never ran')
+    Add-Case 'OWNER-abandon-ws' (($waw.Code -eq 90) -and ($waw.Err -match 'W4\.1') -and ($waw.Err -match 'did run')) "abandon -Ws W4 with W4.1 handed over exits $($waw.Code), naming W4.1 as having run"
+    Add-Case 'OWNER-abandon-ws-CONTROL' ($waw7.Code -eq 0) "abandon -Ws W7, whose one phase is abandoned, exits $($waw7.Code)"
+    Save-Push $dirOA 'close and abandon'
+    Assert-G $dirOB @('pull', '-q', '--no-edit') | Out-Null
+
+    # ---- a gate entry by someone other than the owner, after a merge. W5.1 and W5.2 are
+    # B's. A takes W5.1 while it is planned; B, offline, starts both.
+    Assert-K $homeOA 'KSP-OA' @('revise-phase', '-Path', $dirOA, '-Phase', 'W5.1', '-Owner', $wPidA) | Out-Null
+    foreach ($wp in @('W5.1', 'W5.2')) {
+        Write-Artifacts (Get-ArtDir $dirOB $homeOB $wp -AShared) $wp @()
+        Assert-K $homeOB 'KSP-OB' @('set-stage', '-Path', $dirOB, '-Phase', $wp, '-Stage', 'grounding') | Out-Null
+        Invoke-Gates $homeOB 'KSP-OB' $dirOB $wp @('ground') | Out-Null
+    }
+    Sync-Pair $dirOA $dirOB 'owner changed while started'
+    $wm = Get-OrBoth $homeOA 'KSP-OA' $dirOA
+    $wmLine = "WARNING: after a merge, phase W5\.1's gate entry ground/\d{8}T\d{6}Z-$wPidB-[0-9a-f]{4}\.json is by $wWhoB, but its owner is $($wWhoA):"
+    Add-Case 'OWNER-merge-author' (($wm.S -match $wmLine) -and ($wm.T -match $wmLine)) "status and tree name W5.1's ground entry, B as its author and A as its owner"
+    Add-Case 'OWNER-merge-author-CONTROL' (($wm.S -notmatch 'phase W5\.2''s gate') -and ($wm.T -notmatch 'phase W5\.2''s gate')) "W5.2, started by its owner with no owner change, is not named"
+
+    # ---- the owner beside each phase not finished; none on a finished one.
+    $wcs = Invoke-K $homeOA 'KSP-OA' @('status', '-Path', $dirOA)
+    $wct = Invoke-K $homeOA 'KSP-OA' @('tree', '-Path', $dirOA)
+    $wColS = ($wcs.Out -match "(?m)^\s+W2\.2\s+#2\s+agent\s+planned\s+owner: $wWhoA\s*$") -and ($wcs.Out -match "(?m)^\s+W5\.2\s+#2\s+agent\s+investigating\s+owner: $wWhoB\s*$") -and ($wcs.Out -match "(?m)^\s+W2\.1c\s+#1\s+self\s+planned\s+due: 2099-01-02\s+owner: $wWhoA\s*$")
+    $wColT = ($wct.Out -match "(?m)W2\.2 \[phase\] phase W2\.2  actor:agent  planned  owner: $wWhoA\s*$") -and ($wct.Out -match "(?m)W5\.2 \[phase\] phase W5\.2  actor:agent  investigating  owner: $wWhoB\s*$")
+    $wNone = $true
+    $wFinished = 0
+    foreach ($wl in @(($wcs.Out + "`n" + $wct.Out) -split "`n")) {
+        if ($wl -match '^\s+(W2\.3|W2\.4|W2\.1|W2\.1b)(\s|\s\[phase\])') { $wFinished++; if ($wl -match 'owner:') { $wNone = $false } }
+    }
+    Add-Case 'OWNER-column' ($wColS -and $wColT -and $wNone -and ($wFinished -eq 8)) "status ends a planned, a started and a due phase's line with its owner: $wColS; tree the same: $wColT; delivered W2.3, abandoned W2.4 and handed-over W2.1 and W2.1b carry none, over $wFinished lines (8 expected): $wNone"
+
+    # ---- a per-machine project: no owners, no hand-over, and its state keeps HEAD's paths.
+    $wPmRuns = @{}
+    foreach ($wSide in @(@('wt', $wtWrapper), @('head', $headWrapper))) {
+        $wpHome = New-Home "PM$($wSide[0])"
+        $wpDir = Join-Path $scratch "permachine-own\pm$($wSide[0])$runTag"
+        New-Repo $wpDir 'Person M'
+        $wpSteps = @(@('init-project', '-Title', 'per machine'), @('add-goal', '-Id', 'G1', '-Text', 'goal'), @('add-workstream', '-Id', 'W1', '-Title', 'ws', '-Parent', 'root', '-Goals', 'G1'),
+                     @('add-phase', '-Phase', 'W1.1', '-Scope', 'one', '-Actor', 'agent', '-RunOrder', '1'), @('add-phase', '-Phase', 'W1.2', '-Scope', 'two', '-Actor', 'agent', '-RunOrder', '2'))
+        $wpCodes = New-Object System.Collections.Generic.List[string]
+        foreach ($ws1 in $wpSteps) { $wpCodes.Add("$($ws1[0])=$((Invoke-K $wpHome 'KSP-PM' (@($ws1[0]) + @('-Path', $wpDir) + @($ws1 | Select-Object -Skip 1)) $wSide[1]).Code)") }
+        Write-Artifacts (Get-ArtDir $wpDir $wpHome 'W1.1') 'W1.1' @()
+        foreach ($wg in $AllGates) { $wpCodes.Add("$wg=$((Invoke-K $wpHome 'KSP-PM' @('record-verdict', '-Path', $wpDir, '-Phase', 'W1.1', '-Gate', $wg, '-Verdict', $GateVerdict[$wg]) $wSide[1]).Code)") }
+        foreach ($ws2 in @(@('set-waiting', '-Phase', 'W1.2', '-WaitingOn', 'a supplier', '-ReviewOn', '2099-01-01'), @('clear-waiting', '-Phase', 'W1.2'), @('new-iteration', '-Phase', 'W1.2', '-Trigger', 'plan', '-Detail', 'round'),
+                           @('lift-cap', '-Phase', 'W1.2', '-Rounds', '1', '-Detail', 'words'), @('revise-phase', '-Phase', 'W1.2', '-Scope', 'two again'), @('note-friction', '-Phase', 'W1.2', '-Kind', 'gap', '-Detail', 'x'),
+                           @('open-question', '-Phase', 'W1.2', '-Question', 'q'), @('revise-phase', '-Phase', 'W1.1', '-Correction', 'c'))) {
+            $wpCodes.Add("$($ws2[0])=$((Invoke-K $wpHome 'KSP-PM' (@($ws2[0]) + @('-Path', $wpDir) + @($ws2 | Select-Object -Skip 1)) $wSide[1]).Code)")
+        }
+        $wpSet = New-Object 'System.Collections.Generic.HashSet[string]'
+        Get-JsonPaths (Read-JsonFile (Join-Path $wpHome ".keel\projects\$(Split-Path -Leaf $wpDir)\state.json")) '$' $wpSet
+        $wPmRuns[$wSide[0]] = @{ Codes = $wpCodes.ToArray(); Paths = $wpSet; Home = $wpHome; Dir = $wpDir }
+    }
+    $wPmBad = @($wPmRuns['wt'].Codes | Where-Object { $_ -notmatch '=0$' })
+    $wPmA = @($wPmRuns['wt'].Paths | Where-Object { -not $wPmRuns['head'].Paths.Contains($_) })
+    $wPmB = @($wPmRuns['head'].Paths | Where-Object { -not $wPmRuns['wt'].Paths.Contains($_) })
+    $wHeadNote = if ($headSame) { ' (HEAD holds this same wrapper, so the comparison is of the wrapper with itself)' } else { '' }
+    Add-Case 'OWNER-machine-paths' (($wPmBad.Count -eq 0) -and ($wPmA.Count -eq 0) -and ($wPmB.Count -eq 0) -and ($wPmRuns['wt'].Paths.Count -gt 20)) "per machine, a full gate sequence and eight more verbs: steps not at 0 '$($wPmBad -join ',')'; paths only here '$($wPmA -join ',')'; only at HEAD '$($wPmB -join ',')'; $($wPmRuns['wt'].Paths.Count) paths$wHeadNote"
+    $wPmCopy = Read-JsonFile (Join-Path $wPmRuns['wt'].Home ".keel\projects\$(Split-Path -Leaf $wPmRuns['wt'].Dir)\state.json")
+    @($wPmCopy.phases)[0] | Add-Member -NotePropertyName 'owner' -NotePropertyValue 'p-0000'
+    $wPmSet2 = New-Object 'System.Collections.Generic.HashSet[string]'
+    Get-JsonPaths $wPmCopy '$' $wPmSet2
+    $wPmC = @($wPmSet2 | Where-Object { -not $wPmRuns['head'].Paths.Contains($_) })
+    Add-Case 'OWNER-machine-paths-CONTROL' ((@($wPmC) -join ',') -eq '$.phases[].owner') "one key planted in a copy is named: $($wPmC -join ',')"
+    $wpmHome = $wPmRuns['wt'].Home; $wpmDir = $wPmRuns['wt'].Dir
+    $wpmSnap = Get-WriteSnapshot $wpmDir $wpmHome
+    $wpo1 = Invoke-K $wpmHome 'KSP-PM' @('add-phase', '-Path', $wpmDir, '-Phase', 'W1.3', '-Scope', 'three', '-Actor', 'agent', '-RunOrder', '3', '-Owner', 'p-0000')
+    $wpo2 = Invoke-K $wpmHome 'KSP-PM' @('hand-over', '-Path', $wpmDir, '-Phase', 'W1.2', '-To', 'p-0000', '-Detail', 'x')
+    $wpo3 = Invoke-K $wpmHome 'KSP-PM' @('revise-phase', '-Path', $wpmDir, '-Phase', 'W1.2', '-Owner', 'p-0000')
+    $wpmNo = (Get-WriteSnapshot $wpmDir $wpmHome) -eq $wpmSnap
+    Add-Case 'OWNER-per-machine-refuse' (($wpo1.Code -eq 90) -and ($wpo2.Code -eq 90) -and ($wpo3.Code -eq 90) -and $wpmNo) "per machine: add-phase -Owner exit $($wpo1.Code), hand-over exit $($wpo2.Code), revise-phase -Owner exit $($wpo3.Code), wrote nothing: $wpmNo"
+    $wpmS = Invoke-K $wpmHome 'KSP-PM' @('status', '-Path', $wpmDir)
+    $wpmT = Invoke-K $wpmHome 'KSP-PM' @('tree', '-Path', $wpmDir)
+    Add-Case 'OWNER-column-CONTROL' (($wpmS.Out -notmatch 'owner:') -and ($wpmT.Out -notmatch 'owner:') -and ($wpmS.Out -match '(?m)^\s+W1\.2\s+#2\s+agent\s')) "a per-machine project's status and tree print no owner: beside W1.2, which is not finished"
 
     # ============================================================== modes ==
     if ($OldRef) {

@@ -24,6 +24,15 @@ state - still goes under `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\`,
 machine's alone and never committed. Every gate a verb records there names this machine's person
 id as its author, so a machine that is not registered is refused at exit 95 until it runs `join`.
 
+**There a phase is run only by its owner**, who records every gate, the `human` verdict included:
+the operator at the `human` gate is the owner. Anyone else's gate is refused at exit 88, which names
+the owner. If the owner cannot finish a started phase, it is handed over (`keel-orchestrator`,
+"When to hand a phase over"), never run on by someone else. **A successor phase** (its `phase.json`
+says `continues`) starts at gate 1 like any other. Its predecessor's artifacts, under
+`progress\phases\<predecessor>\artifacts\`, are evidence to re-measure at grounding, never to
+inherit: a claim, a count or a verdict in them is re-taken, and a gate the predecessor passed is not
+passed for the successor.
+
 ## Before anything: what kind of phase is this?
 
 Read the phase's **actor** from `status`. It determines what you are about to do:

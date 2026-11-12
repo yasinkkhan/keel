@@ -367,7 +367,8 @@ no check.*
 ### Run order is declared, never inferred
 
 State it explicitly in the phase table, and say why when it is not numeric order. The wrapper
-enforces uniqueness per workstream (exit 92).
+enforces uniqueness per workstream (exit 92), setting aside only a `handed-over` phase, whose
+successor takes its order.
 
 ## Step 5 — register the phases
 
@@ -393,6 +394,12 @@ renumbers. The push shrinks that window, it cannot close it. It is reversible in
 with `git ls-remote`, and inside what the operator has just approved, which is why it is performed
 and reported (`keel-orchestrator/SKILL.md`, "Whether to ask, or to act and report"). The wrapper
 never pushes; this step does. A project that keeps its progress on this machine is unchanged.
+
+**In such a project, each phase is planned with an owner**: `add-phase -Owner <person id>`, the
+planner when it is left out. Only the owner may run the phase (exit 88 refuses anyone else), so name
+the person who will. **Work two people would share is planned as two phases**, one each, never one
+phase with two people on it. **A hand-over's successor is committed and pushed at once too**, by
+whoever ran `hand-over`, for the same reason: until it is pushed, its new owner cannot see it.
 
 ## Step 6 — the next phase's prompt, and only that one
 

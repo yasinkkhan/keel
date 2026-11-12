@@ -4,6 +4,53 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.80.0 - 2026-11-12
+
+- **`keel-workflow` 0.72.0: in a project that shares its progress, each phase has one owner, and
+  only the owner works on it.** Without this, two people could both run one phase and nothing
+  would say so; the previous release recorded each phase's owner but enforced nothing. A project
+  that keeps its progress on one machine has no owners and behaves exactly as before.
+  - **Ownership.** `add-phase -Owner <person id>` sets a phase's owner, the person running it when
+    left out; `revise-phase -Owner` changes it while the phase is still `planned`, and is refused
+    once work has started. A person id that no person file holds is refused (exit 90), and `-Owner`
+    in a project that keeps its progress on one machine is refused too.
+  - **Exit 88, new: not the owner.** Anyone but the owner is refused, writing nothing, on
+    `set-stage`, `set-waiting`, `clear-waiting`, `record-verdict`, `new-iteration` and `lift-cap`
+    at any stage, and on `revise-phase` and `abandon -Phase` once the phase has left `planned`. The
+    message names the owner by name and person id, and how to hand the phase over. `note-friction`
+    and `open-question` stay open to anyone, and while a phase is `planned` anyone may revise it,
+    change its owner or abandon it.
+  - **`hand-over -Phase <X> -To <person id> -Detail "<why>"`, a new verb**, for a started phase whose
+    owner cannot finish it. Anyone may run it. It ends X as `handed-over`, recording the successor
+    and the reason, and creates the successor, X's id with the next free letter (W5.2b, then
+    W5.2c), carrying X's scope, actor, repos, due date, prompt path, needs and run order, owned by
+    the person named, continuing X, and `planned`. It is refused, writing nothing (exit 90), on a
+    phase that is `planned` (change its owner instead), `delivered`, `abandoned` or already
+    handed over, when the person names no person file, and in a project that keeps its progress
+    on one machine.
+  - **A handed-over phase is finished.** Every verb the owner check covers refuses it (exit 90),
+    naming its successor, `abandon -Phase` included, so it can never also read as abandoned;
+    `note-friction`, `open-question` and `revise-phase -Correction` still accept entries on it, from
+    anyone. `close` counts it as done and the workstream's folded file records the hand-over;
+    `abandon -Ws` refuses a workstream with one, as it refuses one with a delivered phase; the run
+    order check of `add-phase` and `revise-phase` sets it aside, so its successor takes its order;
+    and `status` no longer lists it as overdue or warns about its verify fingerprint.
+  - **`status` and `tree`** print a handed-over phase as `handed-over -> <successor>`, and end the
+    line of each phase not yet finished with `owner: <name> (<person id>)`.
+  - **One more check after a merge**: a gate entry written by someone other than the phase's owner,
+    which only a merge can produce (one person changed a planned phase's owner while another,
+    offline, started it). `status`, `tree` and every write name the entry and both people.
+  - **`revise-phase -Correction`** now also refuses to be combined with `-Owner`, and a non-owner
+    using it on a started phase gets exit 88 rather than advice to use `-Scope`.
+  - Skills: `keel-orchestrator` says what a phase's owner means, what exit 88 means, and when and
+    how to hand a phase over; `keel-run-phase` says a phase is run only by its owner, who gives the
+    human verdict, and that a successor grounds against its predecessor's artifacts, re-measured,
+    never inherited; `keel-plan-workstream` says each phase is planned with an owner, work two
+    people would share is planned as two phases, and a successor is pushed at once.
+- **`scripts/test-shared-progress.ps1`** gains a group for ownership and hand-over, on its own bare
+  remote and two clones. It now runs 118 cases and took about twenty minutes in one run, so
+  `check-suite-docs.ps1 -Strict` and a push take that much longer.
+
 ## marketplace 0.79.0 - 2026-11-11
 
 **The first release that carries shared progress.** 0.78.0, which added it, was never released on

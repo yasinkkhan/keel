@@ -222,6 +222,7 @@ project
     <thead><tr><th>Exit</th><th>The wrapper refused because</th></tr></thead>
     <tbody>
       <tr><td class="k">2</td><td>iteration cap reached — nothing was incremented or created</td></tr>
+      <tr><td class="k">88</td><td>not the owner: in a project that shares its progress, someone other than a phase's owner tried to work on it, or to change it once it had started. Nothing was written; the message names the owner and <code>hand-over</code></td></tr>
       <tr><td class="k">89</td><td>another keel command was writing the same project or the signal store: it held the lock past the ten-second wait, or a file changed after this command read it. Nothing more was written; re-run the command</td></tr>
       <tr><td class="k">90</td><td>bad argument, invalid id, or an attempt to change something immutable (a delivered phase)</td></tr>
       <tr><td class="k">91</td><td>no project resolved, or no state for it</td></tr>
@@ -334,7 +335,7 @@ github.com/&lt;your chosen repo&gt;     signals arrive as issues; fixes return t
     <tbody>
       <tr><td><code>keel-project</code></td><td>0.4.8</td><td><code>keel-project-context</code></td></tr>
       <tr><td><code>keel-surfaces</code></td><td>0.3.2</td><td><code>keel-documents</code>, <code>keel-tracker</code></td></tr>
-      <tr><td><code>keel-workflow</code></td><td>0.71.0</td><td><code>keel-close-workstream</code>, <code>keel-orchestrator</code>, <code>keel-plan-epic</code>, <code>keel-plan-project</code>, <code>keel-plan-workstream</code>, <code>keel-run-phase</code>, <code>using-keel</code></td></tr>
+      <tr><td><code>keel-workflow</code></td><td>0.72.0</td><td><code>keel-close-workstream</code>, <code>keel-orchestrator</code>, <code>keel-plan-epic</code>, <code>keel-plan-project</code>, <code>keel-plan-workstream</code>, <code>keel-run-phase</code>, <code>using-keel</code></td></tr>
     </tbody>
   </table>
   </div>
