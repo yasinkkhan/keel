@@ -53,6 +53,16 @@
                              LIMIT then forces the one loss no lock on one side can stop, an
                              older copy that read before a newer one wrote and writes after it.
       -List                  also print one row per write.
+      -Shared                human-invoked, not on the push path: the same cases on projects that
+                             share their progress through their repo (each a git repo that ran
+                             share-progress), tokens read from progress/, HELD comparing the whole
+                             progress/ tree and CHANGED rewriting the paused phase's run.json. Adds
+                             ITEM, where both writers rewrite ONE file (phase.json of W1.1, one its
+                             scope, the other its prompt path), checked after every round, since in
+                             this layout every other write lands in a file of its own and could not
+                             be lost without a lock. Its control, ITEM-UNLOCKED, runs ITEM against a
+                             copy of the wrapper with the lock and the text check removed, which
+                             must lose a write, or ITEM proves nothing.
 
     Summary line, parsed by check-suite-docs.ps1 (a declared coupling):
       test-concurrent-writes: <n> case(s), <n> failure(s), <n> inconclusive
@@ -67,7 +77,8 @@ param(
     [string]$AgainstWrapper = '',
     [switch]$AgainstHead,
     [switch]$List,
-    [switch]$Keep
+    [switch]$Keep,
+    [switch]$Shared
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,6 +104,7 @@ if (-not $scratchFull.StartsWith($tempFull + '\', [System.StringComparison]::Ord
 if (Test-Path -LiteralPath $scratchFull) { Stop-Suite 90 'Refusing to run: the scratch state home already exists.' }
 if ($Pairs -lt 20) { Stop-Suite 90 "-Pairs must be at least 20; got $Pairs." }
 if ($AgainstHead -and $AgainstWrapper) { Stop-Suite 90 'Pass -AgainstHead or -AgainstWrapper, not both.' }
+if ($AgainstHead -and $Shared) { Stop-Suite 90 'Pass -AgainstHead or -Shared, not both: an older wrapper cannot run a shared project.' }
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $wtWrapper = Join-Path $repoRoot 'plugins\keel-workflow\skills\keel-orchestrator\wrappers\keel-state.ps1'
@@ -193,8 +205,18 @@ function New-ScratchProject {
     $slugs.Add($slug)
     $dir = Join-Path (Join-Path $scratchFull 'work') $slug
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $initFlag = ' -NoGit'
+    if ($Shared) {
+        $initFlag = ''
+        foreach ($gArgs in @(@('init', '-q', '-b', 'main'), @('config', 'user.name', 'Suite Person'), @('config', 'user.email', 'suite@example.invalid'), @('config', 'core.autocrlf', 'false'))) {
+            $gPrior = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            & git -C $dir @gArgs 2>&1 | Out-Null
+            $gCode = $LASTEXITCODE; $ErrorActionPreference = $gPrior
+            if ($gCode -ne 0) { throw "Setup of a shared scratch project failed at git $($gArgs[0])." }
+        }
+    }
     $calls = @(
-        "init-project -Path '$dir' -Title 'suite $Label' -NoGit",
+        "init-project -Path '$dir' -Title 'suite $Label'$initFlag",
         "add-goal -Path '$dir' -Id G1 -Text 'suite goal'",
         "add-workstream -Path '$dir' -Id W1 -Title 'suite workstream' -Parent root -Goals G1",
         "add-phase -Path '$dir' -Phase W1.1 -Scope 'suite phase one' -Actor agent -RunOrder 1",
@@ -208,19 +230,31 @@ function New-ScratchProject {
     foreach ($cl in $calls) {
         $setupText += "`$global:LASTEXITCODE = -1; & '$Wrapper' $cl | Out-Null; if (`$LASTEXITCODE -ne 0) { [Console]::Out.WriteLine('SETUPFAIL ' + `$LASTEXITCODE + ' $($cl.Split(' ')[0])'); exit 3 }`r`n"
     }
+    if ($Shared) {
+        # Committed first, because the export refuses a repo with uncommitted changes. The
+        # export registers this machine as the one person, so no join is needed.
+        $setupText += "& git -C '$dir' add -A 2>`$null | Out-Null; & git -C '$dir' commit -q -m setup 2>`$null | Out-Null`r`n"
+        $setupText += "`$global:LASTEXITCODE = -1; & '$Wrapper' share-progress -Path '$dir' | Out-Null; if (`$LASTEXITCODE -ne 0) { [Console]::Out.WriteLine('SETUPFAIL ' + `$LASTEXITCODE + ' share-progress'); exit 3 }`r`n"
+    }
     $setupText += "exit 0`r`n"
     $setupRun = Complete-Child (Start-Child $setupText) 120000
     if ($setupRun.Code -ne 0) { throw "Setup of a scratch project failed: $("$($setupRun.Out)".Trim())" }
     $projHome = Join-Path (Join-Path (Join-Path $scratchFull '.keel') 'projects') $slug
     $sp = Join-Path $projHome 'state.json'
-    if (-not (Test-Path -LiteralPath $sp)) { throw 'Harness control failed: no state.json in the scratch home after setup.' }
+    $progDir = Join-Path $dir 'progress'
+    if ($Shared) {
+        if ((Test-Path -LiteralPath $sp) -or -not (Test-Path -LiteralPath (Join-Path $progDir 'project.json'))) { throw 'Harness control failed: the scratch project did not move its progress into its repo.' }
+    }
+    elseif (-not (Test-Path -LiteralPath $sp)) { throw 'Harness control failed: no state.json in the scratch home after setup.' }
     if ($WithRepo) {
         $phaseDir = Join-Path (Join-Path $projHome 'phases') 'W1.1'
+        if ($Shared) { $phaseDir = Join-Path $progDir 'phases\W1.1\artifacts' }
         New-Item -ItemType Directory -Path $phaseDir -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $phaseDir 'verify-report.md'), "| W1.1-C1 | PASS | run-by: agent |`r`n`r`nPositive control: suite fixture`r`n")
         [System.IO.File]::WriteAllText((Join-Path $phaseDir 'changes-bound.patch'), "suite fixture`r`n")
     }
-    return [pscustomobject]@{ Dir = $dir; StatePath = $sp; ConfigPath = (Join-Path $dir 'keel.json') }
+    # StatePath is still the lock's name under -Shared, where no file is there.
+    return [pscustomobject]@{ Dir = $dir; StatePath = $sp; ConfigPath = (Join-Path $dir 'keel.json'); ProgressDir = $progDir; IsShared = [bool]$Shared }
 }
 
 function Get-VerbLine {
@@ -231,6 +265,8 @@ function Get-VerbLine {
         'friction' { return "note-friction -Path '$Dir' -Phase $PhaseId -Kind gap -Detail `$tok" }
         'repo'     { return "add-repo -Path '$Dir' -Name `$tok -RepoPath ." }
         'signal'   { return "signal -Path '$Dir' -Phase $PhaseId -Kind gap -Detail `$tok -Evidence 'suite evidence'" }
+        'itemscope'  { return "revise-phase -Path '$Dir' -Phase W1.1 -Scope `$tok" }
+        'itemprompt' { return "revise-phase -Path '$Dir' -Phase W1.1 -PromptPath `$tok" }
     }
     throw "Unknown verb $Verb"
 }
@@ -285,7 +321,19 @@ function Get-PresentTokens {
     param([string]$Verb, $Proj)
     $found = New-Object System.Collections.Generic.List[string]
     try {
-        if ($Verb -eq 'friction') {
+        if ($Verb -eq 'friction' -and $Proj.IsShared) {
+            foreach ($ff in @(Get-ChildItem -LiteralPath (Join-Path $Proj.ProgressDir 'phases') -Recurse -Filter '*.json' -File | Where-Object { $_.Directory.Name -eq 'friction' })) {
+                $fo = [System.IO.File]::ReadAllText($ff.FullName) | ConvertFrom-Json
+                if ($null -eq $fo) { return $null }
+                $found.Add("$($fo.detail)")
+            }
+        }
+        elseif ($Verb -like 'item*') {
+            $io = [System.IO.File]::ReadAllText((Join-Path $Proj.ProgressDir 'phases\W1.1\phase.json')) | ConvertFrom-Json
+            if ($null -eq $io) { return $null }
+            $found.Add("$($io.scope)"); $found.Add("$($io.promptPath)")
+        }
+        elseif ($Verb -eq 'friction') {
             $st = [System.IO.File]::ReadAllText($Proj.StatePath) | ConvertFrom-Json
             if ($null -eq $st) { return $null }
             foreach ($ph in @($st.phases)) {
@@ -322,17 +370,23 @@ function Write-RowList {
 function Invoke-Family {
     # Concurrent: two synchronised children, A on W1.1 and B on W1.2. Leaves its counts in
     # $script:LastFamily rather than returning them, because it also prints.
-    param([string]$Label, [string]$Verb, $Proj, [string]$WrapperA, [string]$WrapperB)
+    param([string]$Label, [string]$Verb, $Proj, [string]$WrapperA, [string]$WrapperB, [string]$VerbB = '')
+    if (-not $VerbB) { $VerbB = $Verb }
     $readyA = "keel-cw-$runTag-$Label-ra"; $readyB = "keel-cw-$runTag-$Label-rb"
     $goA = "keel-cw-$runTag-$Label-ga"; $goB = "keel-cw-$runTag-$Label-gb"
     $evs = @{}
     foreach ($en in @($readyA, $readyB, $goA, $goB)) { $evs[$en] = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, $en) }
     $tb = "$tokenStem-$Label"
     $ca = Start-Child (Get-WriterScript $WrapperA $Verb $Proj.Dir 'W1.1' $tb 'A' $Pairs $readyA $goA)
-    $cb = Start-Child (Get-WriterScript $WrapperB $Verb $Proj.Dir 'W1.2' $tb 'B' $Pairs $readyB $goB)
+    $cb = Start-Child (Get-WriterScript $WrapperB $VerbB $Proj.Dir 'W1.2' $tb 'B' $Pairs $readyB $goB)
+    # ITEM rewrites one file, so each round's two tokens are read from it before the next round:
+    # both writers are ready again only once both writes of the round are done.
+    $perRound = New-Object System.Collections.Generic.List[string]
+    $isItem = $Verb -like 'item*'
     try {
         for ($r = 1; $r -le $Pairs; $r++) {
             if (-not $evs[$readyA].WaitOne(120000) -or -not $evs[$readyB].WaitOne(120000)) { throw "Family $Label : a writer never became ready in round $r." }
+            if ($isItem -and $r -gt 1) { $rt = Get-PresentTokens $Verb $Proj; if ($null -eq $rt) { throw "Family $Label : the file could not be read after round $($r - 1)." }; foreach ($x in $rt) { $perRound.Add($x) } }
             [void]$evs[$goA].Set(); [void]$evs[$goB].Set()
         }
         $ra = Complete-Child $ca
@@ -342,6 +396,7 @@ function Invoke-Family {
     $rowsA = @(ConvertFrom-Rows $ra.Out); $rowsB = @(ConvertFrom-Rows $rb.Out)
     if ($rowsA.Count -ne $Pairs -or $rowsB.Count -ne $Pairs) { throw "Family $Label : expected $Pairs rows from each writer, got $($rowsA.Count) and $($rowsB.Count)." }
     $present = Get-PresentTokens $Verb $Proj
+    if ($isItem -and $null -ne $present) { foreach ($x in $perRound) { $present += $x } }
     if ($null -eq $present) { throw "Family $Label : the store could not be read after the run." }
     $overlap = 0
     for ($k = 0; $k -lt $Pairs; $k++) {
@@ -361,7 +416,7 @@ function Invoke-Family {
         }
     }
     $okSids = @(@($rowsA) + @($rowsB) | Where-Object { $_.Code -eq 0 -and $_.Sid -ne '' } | ForEach-Object { $_.Sid })
-    $shared = @($okSids | Group-Object | Where-Object { $_.Count -gt 1 }).Count
+    $idsShared = @($okSids | Group-Object | Where-Object { $_.Count -gt 1 }).Count
     $res = [pscustomobject]@{
         Label = $Label; Overlap = $overlap; Attempted = 2 * $Pairs
         Exit0 = $sideCounts['A'].Exit0 + $sideCounts['B'].Exit0
@@ -371,7 +426,7 @@ function Invoke-Family {
         LostExit0A = $sideCounts['A'].LostExit0; LostExit0B = $sideCounts['B'].LostExit0
         Refused89B = $sideCounts['B'].Refused89
         PresentNonZero = $sideCounts['A'].PresentNonZero + $sideCounts['B'].PresentNonZero
-        SharedIds = $shared
+        SharedIds = $idsShared
     }
     Write-Output ("{0}: pairs={1} overlapped={2} attempted={3} exit0={4} nonzero={5} present={6} lostWithExit0={7} lostWithExit0A={8} lostWithExit0B={9} presentButNonzero={10} sharedIds={11}" -f `
         $Label, $Pairs, $res.Overlap, $res.Attempted, $res.Exit0, $res.NonZero, $res.Present, $res.LostExit0, $res.LostExit0A, $res.LostExit0B, $res.PresentNonZero, $res.SharedIds)
@@ -433,7 +488,13 @@ function Read-TimedRow {
 }
 
 function Get-VerifyVerdict {
-    param([string]$StatePath)
+    param([string]$StatePath, $Proj = $null)
+    if ($null -ne $Proj -and $Proj.IsShared) {
+        $vd = Join-Path $Proj.ProgressDir 'phases\W1.1\gates\verify'
+        $vf = @(Get-ChildItem -LiteralPath $vd -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($vf.Count -eq 0) { return '' }
+        return "$(([System.IO.File]::ReadAllText($vf[$vf.Count - 1].FullName) | ConvertFrom-Json).verdict)"
+    }
     try {
         $vst = [System.IO.File]::ReadAllText($StatePath) | ConvertFrom-Json
         $vph = @($vst.phases | Where-Object { $_.id -eq 'W1.1' })
@@ -443,6 +504,35 @@ function Get-VerifyVerdict {
         return "$($vg.Value.verdict)"
     }
     catch { return '' }
+}
+
+function Get-ProgressSha {
+    # The listing and hashes of every file under a project's progress/: a write anywhere moves it.
+    param($Proj)
+    $pfl = @(Get-ChildItem -LiteralPath $Proj.ProgressDir -Recurse -File | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($Proj.ProgressDir.Length) + '|' + (Get-Sha $_.FullName) })
+    $pAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($pAlg.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($pfl -join "`n"))) | ForEach-Object { $_.ToString('x2') })) }
+    finally { $pAlg.Dispose() }
+}
+
+function Get-UnlockedWrapper {
+    # A copy of the wrapper under test with the shared branch's lock and its text check taken out,
+    # so ITEM can be shown losing a write when nothing stops it.
+    $ulText = [System.IO.File]::ReadAllText($underTest)
+    foreach ($ulPair in @(
+        @("    if (`$ForWrite) { Enter-WriteLock `$sp `"project '`$Slug'`" }", ''),
+        @("    Enter-WriteLock `$wsPath `"project '`$Slug'`"", ''),
+        @("            if (`$spNowText -cne `$spCtx.Texts[`$spKey]) {", "            if (`$false) {")
+    )) {
+        $ulN = ([regex]::Matches($ulText, [regex]::Escape($ulPair[0]))).Count
+        if ($ulN -ne 1) { throw "The unlocked copy could not be made: a line to remove was found $ulN time(s)." }
+        $ulText = $ulText.Replace($ulPair[0], $ulPair[1])
+    }
+    $ulDir = Join-Path $scratchFull 'unlocked'
+    New-Item -ItemType Directory -Path $ulDir -Force | Out-Null
+    $ulPath = Join-Path $ulDir 'keel-state.ps1'
+    [System.IO.File]::WriteAllText($ulPath, $ulText)
+    return $ulPath
 }
 
 function Get-HeadWrapper {
@@ -505,21 +595,39 @@ try {
             Add-Case "$($fm.Label)-sequential-control" ($sr.Attempted -eq 2 * $Pairs -and $sr.Exit0 -eq $sr.Attempted -and $sr.Present -eq $sr.Attempted) "$($sr.Present) of $($sr.Attempted) present, $($sr.Exit0) exited 0"
         }
 
+        if ($Shared) {
+            $pi = New-ScratchProject $underTest 'itemc'
+            Invoke-Family 'ITEM' 'itemscope' $pi $underTest $underTest 'itemprompt'
+            $ir = $script:LastFamily
+            Add-Case 'ITEM-overlapped' ($ir.Overlap -ge 20) "$($ir.Overlap) of $Pairs rounds had both writes to one file in flight at once"
+            Add-Case 'ITEM-no-silent-loss' ($ir.LostExit0 -eq 0) "$($ir.LostExit0) write(s) absent from that round's file while their command exited 0"
+            $piu = New-ScratchProject $underTest 'itemu'
+            Invoke-Family 'ITEM-UNLOCKED' 'itemscope' $piu (Get-UnlockedWrapper) (Get-UnlockedWrapper) 'itemprompt'
+            $iu = $script:LastFamily
+            Add-Case 'ITEM-UNLOCKED-loses-a-write' ($iu.LostExit0 -ge 1) "with the lock and the text check removed, $($iu.LostExit0) write(s) absent while their command exited 0; the family can see a loss"
+            $pis = New-ScratchProject $underTest 'items'
+            Invoke-Sequential 'ITEM-SEQ' 'itemscope' $pis $underTest
+            $isq = $script:LastSeq
+            $lastTok = '{0}-{1:D3}-S' -f "$tokenStem-ITEM-SEQ", (2 * $Pairs)
+            $iFinal = Get-PresentTokens 'itemscope' $pis
+            Add-Case 'ITEM-sequential-control' ($isq.Exit0 -eq 2 * $Pairs -and $null -ne $iFinal -and $iFinal -contains $lastTok) "$($isq.Exit0) of $(2 * $Pairs) exited 0, and the file holds the last one"
+        }
+
         # ----------------------------------------------------------- HELD --
         $ph = New-ScratchProject $underTest 'held'
         $mx = New-Object System.Threading.Mutex($false, (Get-LockNameFor $ph.StatePath))
         [void]$mx.WaitOne()
-        $shaBefore = Get-Sha $ph.StatePath
+        $shaBefore = if ($Shared) { Get-ProgressSha $ph } else { Get-Sha $ph.StatePath }
         $tokHeld = "$tokenStem-HELD-1"
         $heldCall = "note-friction -Path '$($ph.Dir)' -Phase W1.1 -Kind gap -Detail '$tokHeld'"
         $hr = Read-TimedRow (Complete-Child (Start-TimedWriter $underTest $heldCall '') 60000)
-        $shaAfter = Get-Sha $ph.StatePath
+        $shaAfter = if ($Shared) { Get-ProgressSha $ph } else { Get-Sha $ph.StatePath }
         $mx.ReleaseMutex(); $mx.Dispose()
         $heldMs = [int](($hr.T1 - $hr.T0) / 10000)
         Add-Case 'HELD-exit-89' ($hr.Code -eq 89) "the write exited $($hr.Code) while the lock was held"
         Add-Case 'HELD-waited-the-bound' ($hr.T1 -gt 0 -and $heldMs -ge $LockWaitMs) "the write gave up after $heldMs ms"
         Add-Case 'HELD-names-the-rerun' ($hr.Err -match 're-run') 'the refusal message says to re-run'
-        Add-Case 'HELD-state-unchanged' ($shaBefore -ne '' -and $shaBefore -eq $shaAfter) 'state.json SHA-256 equal before and after the refused write'
+        Add-Case 'HELD-state-unchanged' ($shaBefore -ne '' -and $shaBefore -eq $shaAfter) "$(if ($Shared) { 'every file under progress/' } else { 'state.json' }) SHA-256 equal before and after the refused write"
         $hr2 = Read-TimedRow (Complete-Child (Start-TimedWriter $underTest $heldCall '') 60000)
         $presentHeld = Get-PresentTokens 'friction' $ph
         Add-Case 'HELD-control-after-release' ($hr2.Code -eq 0 -and $null -ne $presentHeld -and $presentHeld -contains $tokHeld) "after the release the same write exited $($hr2.Code)"
@@ -532,15 +640,17 @@ try {
         $fg = New-FakeGit
         $wa = Start-TimedWriter $underTest (& $verifyCall $pcg) $fg
         if (-not (Wait-ForFile (Join-Path $fg 'paused.flag') 30000)) { throw 'PAUSED CHANGED: the writer never reached git.' }
-        # The same JSON plus one trailing space: still valid, and a different file.
-        $foreign = [byte[]]([System.IO.File]::ReadAllBytes($pcg.StatePath) + [byte]0x20)
-        [System.IO.File]::WriteAllBytes($pcg.StatePath, $foreign)
-        $shaForeign = Get-Sha $pcg.StatePath
+        # The same JSON plus one trailing space: still valid, and a different file. Under -Shared
+        # the file is the paused phase's run.json, which the verdict rewrites.
+        $changedFile = if ($Shared) { Join-Path $pcg.ProgressDir 'phases\W1.1\run.json' } else { $pcg.StatePath }
+        $foreign = [byte[]]([System.IO.File]::ReadAllBytes($changedFile) + [byte]0x20)
+        [System.IO.File]::WriteAllBytes($changedFile, $foreign)
+        $shaForeign = Get-Sha $changedFile
         [System.IO.File]::WriteAllText((Join-Path $fg 'go.flag'), 'go')
         $war = Read-TimedRow (Complete-Child $wa 60000)
-        Add-Case 'PAUSED-CHANGED-exit-89' ($war.Code -eq 89) "the write exited $($war.Code) after state.json changed under it"
+        Add-Case 'PAUSED-CHANGED-exit-89' ($war.Code -eq 89) "the write exited $($war.Code) after $(Split-Path -Leaf $changedFile) changed under it"
         Add-Case 'PAUSED-CHANGED-names-the-rerun' ($war.Err -match 're-run') 'the refusal message says to re-run'
-        Add-Case 'PAUSED-CHANGED-foreign-write-kept' ((Get-Sha $pcg.StatePath) -eq $shaForeign) 'state.json is byte-equal to what the foreign writer left'
+        Add-Case 'PAUSED-CHANGED-foreign-write-kept' ((Get-Sha $changedFile) -eq $shaForeign -and (Get-VerifyVerdict $pcg.StatePath $pcg) -eq '') "$(Split-Path -Leaf $changedFile) is byte-equal to what the foreign writer left, and no verdict was recorded"
 
         $pcc = New-ScratchProject $underTest 'changedctl' -WithRepo
         $fg = New-FakeGit
@@ -548,7 +658,7 @@ try {
         if (-not (Wait-ForFile (Join-Path $fg 'paused.flag') 30000)) { throw 'PAUSED CHANGED control: the writer never reached git.' }
         [System.IO.File]::WriteAllText((Join-Path $fg 'go.flag'), 'go')
         $wcr = Read-TimedRow (Complete-Child $wc 60000)
-        $ctlVerdict = Get-VerifyVerdict $pcc.StatePath
+        $ctlVerdict = Get-VerifyVerdict $pcc.StatePath $pcc
         Add-Case 'PAUSED-CHANGED-control' ($wcr.Code -eq 0 -and $ctlVerdict -eq 'PASS') "with no foreign write the same verb exited $($wcr.Code) and recorded '$ctlVerdict'"
 
         # KILLED: the writer holding the lock is killed while a second one waits.

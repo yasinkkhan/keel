@@ -1,6 +1,6 @@
 {
   "name": "keel-project",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Grounding router for the active keel project, resolved from the working directory. Windows only.",
   "author": { "name": "Yasin Khan" }
 }

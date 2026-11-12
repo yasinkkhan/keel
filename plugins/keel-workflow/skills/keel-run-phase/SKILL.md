@@ -17,6 +17,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 
 Artifacts go in the phase directory: `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\`.
 
+**In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`), the
+phase directory is `progress\phases\W<n>.<p>\artifacts\` inside the project folder, and the artifacts
+are committed with the project. Scratch that is not an artifact - a verifier's fixtures, a copy of
+state - still goes under `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\`, which is this
+machine's alone and never committed. Every gate a verb records there names this machine's person
+id as its author, so a machine that is not registered is refused at exit 95 until it runs `join`.
+
 ## Before anything: what kind of phase is this?
 
 Read the phase's **actor** from `status`. It determines what you are about to do:

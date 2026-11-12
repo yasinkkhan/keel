@@ -1,6 +1,6 @@
 {
   "name": "keel-workflow",
-  "version": "0.69.0",
+  "version": "0.70.0",
   "description": "The keel pipeline: one funnel, one dispatcher, seven skills covering project, epic, workstream and phase, eight gates per phase, and the state wrapper that is the only writer of project state. Windows only.",
   "author": { "name": "Yasin Khan" }
 }

@@ -1657,5 +1657,65 @@ if ($Strict) {
     }
 }
 
+# --- 21. shared progress still behaves: run its committed suite ---------------
+#
+# The eighth sibling of sections 9, 11, 14, 15, 17, 19 and 20. scripts/test-shared-progress.ps1
+# builds projects that keep their progress in their own repo, two clones of one of them on two
+# machines, and checks the layout of every file, a clean merge of two people's work, the people
+# refusals, the fold of a closed workstream, the export and its refusals, and that a project that
+# has not chosen shared progress is unchanged. A checker that is not wired to anything is a
+# violation of charter P11.
+#
+# It makes a few hundred wrapper calls, each in its own powershell.exe, so it costs about five
+# minutes. -Strict ONLY, like the other suites, so the commit gate stays fast. Its two comparison
+# modes, -OldRef and -RealState, are human-invoked and not run here; the suite says so in NOT RUN
+# lines.
+if ($Strict) {
+    $spSuitePath = Join-Path $RepoRoot 'scripts\test-shared-progress.ps1'
+    if (-not (Test-Path -LiteralPath $spSuitePath)) {
+        Problem 'scripts/test-shared-progress.ps1 is missing. Shared progress ships with the suite that re-checks it (charter P11).'
+    }
+    else {
+        # Native call, so no bare 2>&1 and no reliance on $ErrorActionPreference.
+        # The EXIT CODE decides.
+        $spSuitePrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $spSuiteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $spSuitePath
+        $spSuiteCode   = $LASTEXITCODE
+        $ErrorActionPreference = $spSuitePrior
+
+        if ($spSuiteCode -ne 0) {
+            Problem "scripts/test-shared-progress.ps1 reported failures (exit $spSuiteCode). Shared progress does not behave as specified."
+            foreach ($spSuiteLine in @($spSuiteOutput)) {
+                if (-not [string]::IsNullOrWhiteSpace($spSuiteLine)) { Note $spSuiteLine }
+            }
+        }
+        else {
+            # A DECLARED coupling to another script's output wording, taken openly as sections
+            # 9, 11, 14, 15, 17, 19 and 20 take theirs: the count is parsed from the suite's
+            # summary line, and an unparseable summary is a PROBLEM, never a zero and never a
+            # silent skip. Explicit loop, not a Where-Object, for the reason section 20 gives.
+            $spSuiteCases = -1
+            $spSuiteFails = -1
+            foreach ($spSuiteLine in @($spSuiteOutput)) {
+                if ($spSuiteLine -match '^test-shared-progress:\s+(\d+)\s+case\(s\),\s+(\d+)\s+failure\(s\)') {
+                    $spSuiteCases = [int]$Matches[1]
+                    $spSuiteFails = [int]$Matches[2]
+                }
+            }
+            if ($spSuiteCases -lt 0) {
+                Problem ("scripts/test-shared-progress.ps1 exited 0 but its summary line could not be parsed, so this gate cannot say how many cases actually ran. " +
+                         "Expected a line matching: test-shared-progress: <n> case(s), <n> failure(s). If the suite's output format moved, move this pattern with it.")
+                foreach ($spSuiteLine in @($spSuiteOutput)) {
+                    if (-not [string]::IsNullOrWhiteSpace($spSuiteLine)) { Note $spSuiteLine }
+                }
+            }
+            else {
+                Ran ("shared progress suite: {0} case(s), {1} failure(s) (scripts/test-shared-progress.ps1)" -f $spSuiteCases, $spSuiteFails)
+            }
+        }
+    }
+}
+
 # --- verdict ----------------------------------------------------------------
 Write-Verdict

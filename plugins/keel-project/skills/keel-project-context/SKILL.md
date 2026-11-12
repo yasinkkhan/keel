@@ -121,6 +121,14 @@ artifact is `delivery-record.md`, it lives outside the project entirely at
 to the workstream spec under `plan/` at close. The `record/` file is the project-folder write-up.
 Two different files, both legitimate.
 
+**In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`),
+every gate artifact, `delivery-record.md` included, is read from
+`progress/phases/<id>/artifacts/` inside the project folder instead, committed with the project and
+pulled with it. The other files under `progress/` are the project's state, one JSON file per item
+and per entry; read them through `keel-state.ps1 status` and `tree`, never by opening them, as for a
+`state.json`. `progress/` is outside the roots the document index covers, so it is never in
+`reference/INDEX.md`.
+
 **The docs root is optional and declared, never assumed.** A project that wants one sets a path
 relative to its root in `keel.json`:
 

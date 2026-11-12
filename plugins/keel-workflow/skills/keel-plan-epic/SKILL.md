@@ -83,6 +83,16 @@ keel-state.ps1 add-workstream  -Id W<n> -Title "<title>" -Parent E<n> -Goals G1[
 `-Goals` is **mandatory on a workstream** (exit 98). An epic may carry goals too, but the coverage
 query reads workstreams — an epic's goals are documentation, a workstream's are the claim.
 
+**In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`), two
+things change. A "Decided by the operator" label in the ledger or a Decision row names which person
+answered: *Decided by the operator, Person A (p-1a2b)*, the display name and person id from
+`progress/people/<id>.json`. And once the operator approves what you registered, **commit and push
+it at once** - the ledger and the new nodes under `progress/` - and report the commit and the push
+rather than previewing them: an epic or workstream number is taken by whoever pushes it first, and
+one taken twice is a git conflict at the second pull. It is reversible in part, observable with
+`git ls-remote`, and inside what the operator has just approved (`keel-orchestrator/SKILL.md`,
+"Whether to ask, or to act and report"). The wrapper never pushes; this step does.
+
 Then **stop**. Do not plan its phases. `keel-plan-workstream` writes the spec and the next runnable
 phase's prompt — only that one — when that workstream is actually picked up, and it should run
 *then*, against the world as it will be by then. Phases planned months ahead describe a situation

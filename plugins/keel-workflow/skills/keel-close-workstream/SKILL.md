@@ -44,6 +44,13 @@ the parts that were.
 If the friction log is empty, that is a finding in itself, and usually means the work went smoothly.
 It can also mean nobody recorded anything. Say which you think it was; do not invent entries.
 
+**In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`),
+the ledger is everyone's: each entry is a file under `progress/` naming its author by a person id,
+and `progress/people/<id>.json` gives that person's name. Pull before you read it, or the entries a
+colleague pushed are not there. Route every person's friction, not only your own, and say whose an
+item was where it matters to the route. A signal you file still stays on this machine until it is
+pushed, whoever's friction it came from.
+
 **The phase's gate artifacts and the two ledgers are keel-produced records** — `grounding.md`,
 `investigation.md`, `plan.md`, `act-log.md`, `enact-record.md`, the friction ledger and the
 open-question ledger — governed by **"Material keel produced is re-measured before you act on it"**

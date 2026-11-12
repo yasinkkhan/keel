@@ -25,7 +25,10 @@ does.**
 
 ## Where the evidence is
 
-**Phase directory:** `{{%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>}}`
+**Phase directory:** `{{%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>}}` - or, in a project
+whose `keel.json` says `"progress": "repo"`, `{{<project folder>\progress\phases\W<n>.<p>\artifacts}}`,
+which is committed; put any scratch of yours in `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\`,
+never under `progress\`
 **Project folder:** `{{absolute path to the project folder}}`
 **Changed:** {{patch files, or the act-log and what it points at. Name files by symbol, heading or
 unique string - never by line number.}}

@@ -4,6 +4,59 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.78.0 - 2026-11-11
+
+**Not yet released.** This is on `main` only: no installed copy gets it until the release that also
+adds the warnings a shared project needs (a copy that has not pulled a colleague's work, a merge
+that breaks a rule, whose handoff is newest). A keel clone used as a directory source has it now,
+and it changes nothing for a project until that project runs `share-progress`.
+
+- **`keel-workflow` 0.70.0: a project can keep its progress in its own repo, so several people can
+  work on it.** Until now a project's progress (its goals, workstreams, phases, gate verdicts,
+  friction and questions) lived in one `state.json` on one machine, so a second person had no way
+  to see it. A project can now keep it under `progress/` in the project repo instead, one small
+  JSON file per item and per entry, each naming who wrote it by a person id, the machine, and the
+  time with its UTC offset. Two people writing different things write different files, so git
+  merges them; one id taken by both is a conflict on that item's file at the second pull. The
+  layout can be read without keel.
+  - **`share-progress`**, a new verb, makes the switch once. It writes `progress/` from
+    `state.json`, marking every file as exported and naming the person who ran it; folds each
+    closed or abandoned workstream into one file; copies each phase's gate artifacts into
+    `progress/phases/<id>/artifacts/`; writes `"progress": "repo"` into `keel.json`; and renames
+    `state.json` to `state.json.shared-<date>`, so an older keel refuses the project (exit 91)
+    rather than writing to a copy nobody reads. It commits nothing. It refuses a project with
+    quarantine on, one with `git: false`, a repo with uncommitted changes and a project already
+    shared (exit 90), and a repo with no `git config user.name` (exit 95).
+  - **`join`**, a new verb, registers a machine as a person: a new one, named once from `git config
+    user.name`, or with `-As <person id>` one already listed. `join -As <id> -Clear` takes the
+    machine off that person. A write from a machine no person lists is refused (exit 95, naming
+    `join`), and so is one from a machine two people list after a merge (exit 90), until one drops
+    it.
+  - A workstream that is closed or abandoned folds its phases into `progress/closed/<id>.json`, so
+    a long project does not grow thousands of small files. Its gate artifacts stay where they are.
+  - In a shared project the phase directory, where gate artifacts go, is
+    `progress/phases/<id>/artifacts/`; the per-machine phase folder stays as that machine's scratch.
+    The verify fingerprint does not warn about files under `progress/`, which the gates themselves
+    write. `list` shows a shared project as `shared`, with its root.
+  - A project that does not choose this is unchanged: nothing it stores, prints or writes moves.
+  - Not in this version: each phase records an `owner` (whoever planned it) that nothing enforces
+    yet, and a `needs` list that nothing reads yet.
+  - Skills: `keel-run-phase` and its verifier brief say where artifacts and scratch go;
+    `keel-close-workstream` routes everyone's friction, each entry naming its author;
+    `keel-plan-project` describes the choice and that quarantine excludes it; `keel-plan-workstream`
+    and `keel-plan-epic` name the person in a "Decided by the operator" label and commit and push an
+    approved plan at once, since a number is taken by whoever pushes it first.
+- **`keel-project` 0.4.8:** `keel-project-context` reads a shared project's gate artifacts from
+  `progress/`.
+- **`DESIGN-CHARTER.md`:** P15 lets a project that shares its progress keep it in its repo, while
+  sensitive material still never leaves the quarantine; P26 is retitled "A signal crosses machines
+  only as a report", since signals are no longer the only thing that crosses.
+- **`scripts/test-shared-progress.ps1`**, a new suite, checks the layout, two clones merging, the
+  people refusals, the fold, the export and its refusals, and that a project that has not chosen
+  this is unchanged. `check-suite-docs.ps1 -Strict` runs it; it takes about five minutes.
+  `scripts/test-concurrent-writes.ps1 -Shared` runs the write-lock suite on shared projects, with a
+  case in which two writers rewrite one file.
+
 ## marketplace 0.77.0 - 2026-11-10
 
 - **`keel-workflow` 0.69.0: two keel commands writing at once no longer lose a write.** Two

@@ -421,12 +421,21 @@ flight. A hook that prints on a clean run.
 
 ---
 
-### P15 — State and sensitive material live outside every git repo
+### P15 — State lives outside every git repo unless a project shares its progress; sensitive material always does
 
 **Rule.** Pipeline state lives under `%USERPROFILE%\.keel\` and is written **only** through
 `keel-state.ps1`. Sensitive source material and every artifact derived from it before redaction live
 there too, under `quarantine\<project>\`. Neither is ever committed anywhere, and neither is ever
 written by a direct file edit.
+
+**Amended 2026-11-11, decided by the maintainer.** A project that declares shared progress in its
+`keel.json` keeps its progress and gate records in its own repo, under `progress/`, one file per
+item and per entry, each naming its author by a person id; they are still written only through
+`keel-state.ps1` and never by a direct file edit, and they are committed with the project.
+Sensitive material does not move with them: it stays under `quarantine\<project>\`, it is never
+committed, and a project with quarantine on cannot declare shared progress. The reason given
+below for state, "meaningless elsewhere and misleading if shared", holds for a project one person
+runs; for a project two people run, state kept on one machine is what misleads the other.
 
 **Why.** State is machine-local by nature — it records where a half-finished workstream got to, which
 is meaningless elsewhere and misleading if shared. Sensitive material is a one-way door: git makes
@@ -601,9 +610,10 @@ project folder.
 
 ---
 
-### P26 — A signal is the only thing that crosses machines, and it crosses as a report
+### P26 — A signal crosses machines only as a report
 
-**Rule.** Signals are the sole exception to P15's "state never leaves this machine". They are filed
+**Rule.** Signals stay on the machine that filed them, even in a project that shares its progress
+(P15), and leave it only as reports. They are filed
 **locally first**, then pushed as **GitHub issues** on the repo each user chooses (with
 `keel-state.ps1 signals-target`) by an explicit, preview-gated step; with no choice made it stays on
 their machine. The fix travels the other way as a **pull request**, authored in keel by a session
@@ -622,8 +632,9 @@ machines would otherwise create by both allocating the same first signal id.
 **Why local first.** A signal filed with no network must not be lost, and the wrapper must work
 offline. The push is a separate, deliberate act with its own preview.
 
-**Why this is a carve-out and not a hole in P15.** Pipeline state is machine-local because it is
-meaningless elsewhere. A signal is the opposite: it is only useful elsewhere. What must still never
+**Why this is a carve-out and not a hole in P15.** Per-machine pipeline state is machine-local
+because it is meaningless elsewhere; shared progress is the project's own record and travels with
+it. A signal is the opposite: it is only useful elsewhere. What must still never
 cross is *content* from a quarantined project, which is why the evidence rule is an exit code rather
 than a convention.
 

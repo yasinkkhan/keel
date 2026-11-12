@@ -73,6 +73,21 @@ a named third party.
 and commits the project to redaction **at extraction** (charter P23) — an unredacted fact never
 reaches a downstream artifact, redacted or not.
 
+### Later, not now: sharing the project's progress
+
+A project starts with its progress on this machine, under `%USERPROFILE%\.keel\`, and that is the
+right start for every project. One that several people will work on can later move its progress
+into its own repo, under `progress/`, so each person's clone carries everyone's goals, phases, gate
+records and friction: `keel-state.ps1 share-progress`, run once by the person whose machine holds
+the state, then reviewed and committed. Each other person runs `join` in their clone. It is a
+per-project choice written into `keel.json` as `"progress": "repo"`; absent means this machine.
+
+**It is not offered here, and it is not one of the three choices.** Mention it only if the human
+says others will work on the project. It needs `git` on, and **a project with `quarantine` on
+cannot share its progress** - `share-progress` refuses, because progress files are committed and
+nothing can check that a friction note or a gate artifact quotes nothing identifying. So a "yes" to
+quarantine above is also a "no" to sharing, and the human should hear that when both come up.
+
 ## Step 3 — create it
 
 **Where does it go? Derive it, then ask.** If a project resolves from the working directory, its

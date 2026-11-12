@@ -125,7 +125,8 @@ $IterationCap = 3
 
 # How long a writing command waits for another one writing the same project, or the signal
 # store, before it stops with exit 89. The slowest measured hold of a project, a verify verdict
-# taking its binding, is about half a second, so this lets several queued writers all land. The
+# taking its binding on a state file of about 2.7 MB, is over a second, so this lets several
+# queued writers all land. The
 # signal store is held longer by 'signals-push -Apply' and 'resolve-signal -CloseIssue', across
 # their GitHub calls, about a second each (a read-only GitHub API call measured 0.7 to 1 s), so a push of more than about ten signals
 # can make a judgement or resolution started meanwhile stop with 89 - refused, never lost.
@@ -572,6 +573,11 @@ function Resolve-Project {
     while ($true) {
         $cfg = Join-Path $dir 'keel.json'
         if (Test-Path -LiteralPath $cfg) {
+            # Whether it shares its progress through its repo (see 'shared progress'). An
+            # unreadable keel.json reads as not sharing, and every verb that needs it says so.
+            $rpCfg = $null
+            try { $rpCfg = Read-Json $cfg } catch { $rpCfg = $null }
+            if ($null -ne $rpCfg -and [string](Get-Prop $rpCfg 'progress' '') -eq 'repo') { $script:SpRoots[(Split-Path -Leaf $dir)] = $dir }
             return [pscustomobject]@{
                 Slug       = (Split-Path -Leaf $dir)
                 Root       = $dir
@@ -594,7 +600,13 @@ function Resolve-ProjectOrFail {
 }
 
 function Get-StatePath { param([string]$Slug) Join-Path (Join-Path $ProjectsHome $Slug) 'state.json' }
-function Get-PhaseDir  { param([string]$Slug, [string]$PhaseId) Join-Path (Join-Path (Join-Path $ProjectsHome $Slug) 'phases') $PhaseId }
+# In a project that shares its progress the artifacts are committed with it, under
+# progress/phases/<id>/artifacts/; the per-machine phase folder stays as this machine's scratch.
+function Get-PhaseDir  {
+    param([string]$Slug, [string]$PhaseId)
+    if (Test-SharedProgress $Slug) { return (Join-Path (Join-Path (Join-Path (Get-ProgressDir $Slug) 'phases') $PhaseId) 'artifacts') }
+    Join-Path (Join-Path (Join-Path $ProjectsHome $Slug) 'phases') $PhaseId
+}
 
 # -ForWrite on every read that a Write-State follows: the lock is taken before the read, so a
 # second writer waits and then reads the first one's result. A read that misses it still cannot
@@ -603,6 +615,11 @@ function Read-State {
     param([string]$Slug, [switch]$ForWrite)
     $sp = Get-StatePath $Slug
     if ($ForWrite) { Enter-WriteLock $sp "project '$Slug'" }
+    if (Test-SharedProgress $Slug) {
+        $rsShared = Read-SharedState $Slug
+        if ($ForWrite) { [void](Get-SpWriter $Slug) }
+        return $rsShared
+    }
     if (-not (Test-Path -LiteralPath $sp)) {
         Fail 91 "No state for project '$Slug'. Expected '$sp'. Run 'init-project' first."
     }
@@ -614,9 +631,771 @@ function Write-State {
     param([string]$Slug, $State)
     $wsPath = Get-StatePath $Slug
     Enter-WriteLock $wsPath "project '$Slug'"
+    if (Test-SharedProgress $Slug) { [void](Write-SharedState $Slug $State); return }
     Set-Prop $State 'updated' (Now)
     Write-GuardedJson $wsPath $State
 }
+# --------------------------------------------------------- shared progress --
+# A project whose keel.json says "progress": "repo" keeps its progress in its own repo, under
+# progress/, one small JSON file per item and per entry, each naming its author (charter P15, as
+# amended). Read-State and Write-State are the only doors to state, so this layout sits behind
+# them: the reader builds the same object state.json holds, and the writer compares that object
+# with what was read and writes only what changed. No verb decides anything differently.
+#
+# THE FILES: project.json; people/<person id>.json; goals/<id>.json; nodes/<id>.json;
+# phases/<id>/phase.json (what the phase is) and run.json (where it got to); one file per entry
+# under phases/<id>/gates/<gate>/, friction/, questions/, corrections/ and cap-lifts/;
+# phases/<id>/artifacts/, the gate artifacts; closed/<workstream id>.json, a closed or abandoned
+# workstream's phases folded into one file; acks/, one file per version acknowledgement. Every
+# file carries 'by' (a person id), 'machine' and 'at' with a UTC offset; on a file that is
+# rewritten they name the LAST writer, and git history names the earlier ones. The fields of each
+# kind are in New-SpForm and New-SpGateForm, and nowhere else.
+#
+# WHAT A VERB CAN DO TO STATE, read in every writing arm, is what makes a comparison enough: an
+# item is rewritten in place; an entry list only grows at its end; a gate is replaced wholesale.
+# So a changed item is one rewritten file, each new list element one new entry file, and a
+# replaced gate one new gate entry. A list that SHRANK is a change this writer cannot store, and
+# it refuses rather than guess.
+#
+# AN ENTRY'S NAME is '<UTC instant>-<person id>-<4 hex>.json', so two people's entries never share
+# a name and never conflict at a merge. Where this writer already has an entry in that folder in
+# that second, the hex digits go above the highest there, so one writer's entries sort in the
+# order written; across people, one second sorts by person id. An ITEM's name is its id, so two
+# people taking one id write one name, which git reports as a conflict at the second pull.
+#
+# STAMPS. Every verb stamps with (Now), which has no offset. A stamp is given this machine's
+# offset for that moment when it is written to a file, so what is read back compares equal.
+#
+# ONE WRITE IS SEVERAL FILES, in a fixed order: every file to be replaced or removed is first
+# checked against the text this command read, and any that moved refuses with 89 before anything
+# is written; then new entries, then items (run.json after phase.json), then a fold, then the
+# files the fold replaces are removed. No transaction spans several files, so a crash part-way can
+# leave an entry whose item was not advanced, or a fold beside the files it replaces, which a
+# reader shows twice until the command is re-run.
+#
+# THE LOCK is the mutex named for the per-machine state.json path, as for a per-machine project,
+# so one lock per project per machine covers every file here and scripts/test-concurrent-writes.ps1
+# computes the same name. Read-only verbs take no lock, as before.
+#
+# FOLD FILES ARE READ ON EVERY COMMAND: 'status' prints each phase's run order and actor, finished
+# phases included, and a node's phaseStages holds only the stage. Measured on a project of 52
+# closed workstreams: the fold files read and parse in about the time its one state.json did.
+
+$SpStampPattern = '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$'
+$SpEntryKinds = [ordered]@{ friction = 'friction'; questions = 'questions'; corrections = 'corrections'; capLifts = 'cap-lifts' }
+$SpClosedStatuses = @('DELIVERED', 'ABANDONED')
+$SpPhaseKeys = @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'stage', 'waitingOn', 'reviewOn', 'iterations')
+$script:SpRoots = @{}
+$script:SpCtx = @{}
+
+function Test-SharedProgress { param([string]$SpSlug) return $script:SpRoots.ContainsKey($SpSlug) }
+function Get-ProgressDir { param([string]$SpSlug) return (Join-Path $script:SpRoots[$SpSlug] 'progress') }
+
+function Add-SpOffset {
+    param($SpVal)
+    if ($SpVal -is [datetime]) { $SpVal = $SpVal.ToString('yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) }
+    if ($SpVal -isnot [string] -or $SpVal -notmatch $SpStampPattern) { return $SpVal }
+    $spDt = [datetime]::ParseExact($SpVal, 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+    $spOff = [TimeZoneInfo]::Local.GetUtcOffset($spDt)
+    return ([DateTimeOffset]::new($spDt, $spOff)).ToString('yyyy-MM-ddTHH:mm:sszzz', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+# A stamp as an instant, for comparing - never the text, because text order and time order differ
+# across offsets. $null for anything that is not a stamp.
+function Get-SpInstant {
+    param($SpVal)
+    $spS = Add-SpOffset $SpVal
+    if ($spS -isnot [string] -or [string]::IsNullOrWhiteSpace($spS)) { return $null }
+    $spOut = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($spS, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$spOut)) { return $spOut }
+    return $null
+}
+
+function Get-SpTicks {
+    param($SpVal)
+    $spI = Get-SpInstant $SpVal
+    if ($null -eq $spI) { return [long]0 }
+    return $spI.UtcTicks
+}
+
+# A copy of a value with every offset-less stamp given its offset and every dictionary made an
+# object, so two copies of one value serialise alike whatever built them.
+function ConvertTo-SpValue {
+    param($SpVal)
+    if ($null -eq $SpVal) { return $null }
+    if ($SpVal -is [string] -or $SpVal -is [datetime]) { return (Add-SpOffset $SpVal) }
+    if ($SpVal -is [System.Collections.IDictionary]) {
+        $spOut = [ordered]@{}
+        foreach ($spK in @($SpVal.Keys)) { $spOut[[string]$spK] = ConvertTo-SpValue $SpVal[$spK] }
+        return [pscustomobject]$spOut
+    }
+    if ($SpVal -is [System.Management.Automation.PSCustomObject]) {
+        $spOut = [ordered]@{}
+        foreach ($spP in @($SpVal.PSObject.Properties)) { $spOut[$spP.Name] = ConvertTo-SpValue $spP.Value }
+        return [pscustomobject]$spOut
+    }
+    if ($SpVal -is [System.Collections.IEnumerable]) {
+        $spList = New-Object System.Collections.Generic.List[object]
+        foreach ($spE in $SpVal) { $spList.Add((ConvertTo-SpValue $spE)) }
+        return ,$spList.ToArray()
+    }
+    return $SpVal
+}
+
+function Get-SpJson { param($SpObj) return ($SpObj | ConvertTo-Json -Depth 14 -Compress) }
+
+# The fields of each kind of file, in order, built from the object a verb holds. A field the kind
+# always carries is written as null where unset. 'by', 'machine', 'at' and 'source' are added by
+# New-SpFileObj. -SpOwner is the owner a phase with none is given: its writer.
+function New-SpForm {
+    param([string]$SpKind, $SpObj, [string]$SpOwner)
+    $spF = [ordered]@{}
+    $spNames = switch ($SpKind) {
+        'project'     { @('title', 'created', 'status') }
+        'goal'        { @('id', 'text', 'status', 'statusReason', 'statusSetAt', 'created') }
+        'node'        { @('id', 'role', 'title', 'parent', 'goals') }
+        'decl'        { @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'created', 'owner', 'needs', 'continues') }
+        'run'         { @('stage', 'waitingOn', 'reviewOn', 'iterations', 'abandonedReason') }
+        'friction'    { @('kind', 'detail') }
+        'questions'   { @('question', 'answer', 'resolvedBy') }
+        'corrections' { @('text') }
+        'capLifts'    { @('rounds', 'afterIteration', 'words') }
+        'ack'         { @('from', 'to', 'detail') }
+        default       { throw "There is no progress-file form for '$SpKind'." }
+    }
+    if ($SpKind -eq 'project') { $spF['schema'] = 2 }
+    foreach ($spN in $spNames) {
+        $spV = $null
+        $spP = $SpObj.PSObject.Properties[$spN]
+        if ($null -ne $spP) { $spV = $spP.Value }
+        if ($SpKind -eq 'decl' -and $null -eq $spV -and $spN -eq 'owner') { $spV = $SpOwner }
+        if (@('goals', 'repos', 'needs') -contains $spN) {
+            if ($null -eq $spV) { $spV = @() } else { $spV = @($spV) }
+        }
+        $spF[$spN] = $spV
+    }
+    if ($SpKind -eq 'node') {
+        if ([string](Get-Prop $SpObj 'role' '') -eq 'epic') { $spF['groups'] = Get-Prop $SpObj 'groups' $null }
+        else { $spF['status'] = Get-Prop $SpObj 'status' $null }
+        foreach ($spN in @('created', 'closedAt', 'abandonedReason', 'abandonedAt')) { $spF[$spN] = Get-Prop $SpObj $spN $null }
+    }
+    if ($SpKind -eq 'run' -and [string](Get-Prop $SpObj 'stage' '') -eq 'handed-over') {
+        $spF['handedOverTo'] = Get-Prop $SpObj 'handedOverTo' $null
+        $spF['handOverReason'] = Get-Prop $SpObj 'handOverReason' $null
+    }
+    return (ConvertTo-SpValue $spF)
+}
+
+function New-SpGateForm {
+    # A gate entry: a gate's own fields only at that gate, and only where record-verdict wrote them.
+    param([string]$SpGate, $SpObj)
+    $spF = [ordered]@{ gate = $SpGate; verdict = (Get-Prop $SpObj 'verdict' $null); artifact = (Get-Prop $SpObj 'artifact' $null) }
+    $spOwn = @()
+    if ($SpGate -eq 'enact') { $spOwn = @('reversible', 'observable', 'bindingCheck') }
+    elseif ($SpGate -eq 'verify') { $spOwn = @('binding') }
+    elseif (@('human', 'record') -contains $SpGate) { $spOwn = @('bindingCheck') }
+    foreach ($spN in $spOwn) {
+        if ($null -ne $SpObj.PSObject.Properties[$spN]) { $spF[$spN] = $SpObj.PSObject.Properties[$spN].Value }
+    }
+    return (ConvertTo-SpValue $spF)
+}
+
+function Get-SpGateSig {
+    param([string]$SpGate, $SpObj)
+    return ((Get-SpJson (New-SpGateForm $SpGate $SpObj)) + '|' + [string](Add-SpOffset (Get-Prop $SpObj 'at' '')))
+}
+
+function New-SpFileObj {
+    # A file's contents: its fields, then who wrote it, from where and when.
+    param($SpForm, [string]$SpBy, [string]$SpMachine, [string]$SpAt, [bool]$SpExported)
+    $spO = [ordered]@{}
+    foreach ($spP in @($SpForm.PSObject.Properties)) { $spO[$spP.Name] = $spP.Value }
+    $spO['by'] = $SpBy
+    $spO['machine'] = $SpMachine
+    $spO['at'] = $SpAt
+    if ($SpExported) { $spO['source'] = 'export' }
+    return [pscustomobject]$spO
+}
+
+function Write-SpFile {
+    # UTF-8 with no byte-order mark, LF, one trailing newline: the same bytes on every machine, so a
+    # file nobody changed never shows in a diff.
+    param([string]$SpFull, $SpObj)
+    Ensure-Dir (Split-Path -Parent $SpFull) | Out-Null
+    $spText = (($SpObj | ConvertTo-Json -Depth 14) -replace "`r`n", "`n") -replace "`r", "`n"
+    [System.IO.File]::WriteAllText($SpFull, $spText + "`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Read-SpFile {
+    param([string]$SpFull, $SpContext)
+    $spText = $null
+    try { $spText = [System.IO.File]::ReadAllText($SpFull, [System.Text.Encoding]::UTF8) }
+    catch { Fail 90 "Could not read the progress file '$SpFull': $($_.Exception.Message)" }
+    $spObj = $null
+    try { $spObj = $spText | ConvertFrom-Json } catch { $spObj = $null }
+    if ($null -eq $spObj) { Fail 90 "The progress file '$SpFull' is not a JSON object. Restore it from the project's git history, then re-run." }
+    if ($null -ne $SpContext) { $SpContext.Texts[(Get-FullPathKey $SpFull)] = $spText }
+    return $spObj
+}
+
+function Split-SpMeta {
+    # The object a verb sees, and the writer's fields kept aside. -KeepAt leaves 'at' in the object
+    # as well, for an entry, where it is also the entry's own time.
+    param($SpObj, [string[]]$SpDrop, [switch]$KeepAt)
+    $spMeta = [ordered]@{ by = $null; machine = $null; at = $null; source = $null }
+    $spOut = [ordered]@{}
+    foreach ($spP in @($SpObj.PSObject.Properties)) {
+        if ($spMeta.Contains($spP.Name)) {
+            $spMeta[$spP.Name] = $spP.Value
+            if ($spP.Name -eq 'at' -and $KeepAt) { $spOut['at'] = $spP.Value }
+            continue
+        }
+        if (@($SpDrop) -contains $spP.Name) { continue }
+        $spOut[$spP.Name] = $spP.Value
+    }
+    return @{ Obj = [pscustomobject]$spOut; Meta = [pscustomobject]$spMeta }
+}
+
+function New-SpEntryName {
+    param([string]$SpAt, [string]$SpBy, [string]$SpFolder, [hashtable]$SpTaken)
+    $spI = Get-SpInstant $SpAt
+    if ($null -eq $spI) { $spI = [DateTimeOffset]::Now }
+    $spStem = $spI.UtcDateTime.ToString('yyyyMMddTHHmmss', [Globalization.CultureInfo]::InvariantCulture) + 'Z-' + $SpBy + '-'
+    $spMax = -1
+    $spStemKey = 'stem|' + (Get-FullPathKey (Join-Path $SpFolder $spStem))
+    if ($SpTaken.ContainsKey($spStemKey)) { $spMax = [int]$SpTaken[$spStemKey] }
+    if (Test-Path -LiteralPath $SpFolder -PathType Container) {
+        foreach ($spEx in @(Get-ChildItem -LiteralPath $SpFolder -Filter "$spStem*.json" -File)) {
+            if ($spEx.Name -match '-([0-9a-f]{4})\.json$') { $spMax = [Math]::Max($spMax, [Convert]::ToInt32($Matches[1], 16)) }
+        }
+    }
+    for ($spTry = 0; $spTry -lt 300; $spTry++) {
+        $spHex = if ($spMax -ge 0 -and $spMax -lt 65535) { $spMax + 1 + $spTry } else { Get-Random -Minimum 0 -Maximum 32768 }
+        if ($spHex -gt 65535) { $spHex = Get-Random -Minimum 0 -Maximum 65536 }
+        $spFull = Join-Path $SpFolder ($spStem + ('{0:x4}' -f $spHex) + '.json')
+        $spKey = Get-FullPathKey $spFull
+        if (-not $SpTaken.ContainsKey($spKey) -and -not (Test-Path -LiteralPath $spFull)) {
+            $SpTaken[$spKey] = $true
+            $SpTaken[$spStemKey] = $spHex
+            return $spFull
+        }
+    }
+    Fail 90 "Could not choose a free entry name under '$SpFolder'."
+}
+
+function New-SpContext {
+    param([string]$SpDir)
+    return @{
+        Dir = $SpDir; Texts = @{}; Snap = @{}; Meta = @{}; Paths = @{}; People = @()
+        GateSnap = @{}; Counts = @{}; Raw = @{}; Folded = @{}; NodeStatus = @{}; NodeExtras = @{}
+        MaxAt = $null; MaxAtText = $null
+    }
+}
+
+function Add-SpSeen {
+    # The newest stamp under progress/ is the project's revision: what a handoff is stamped with,
+    # and what 'status' compares a handoff against.
+    param($SpContext, $SpAt)
+    $spI = Get-SpInstant $SpAt
+    if ($null -eq $spI) { return }
+    if ($null -eq $SpContext.MaxAt -or $spI -gt $SpContext.MaxAt) { $SpContext.MaxAt = $spI; $SpContext.MaxAtText = [string](Add-SpOffset $SpAt) }
+}
+
+function Get-SpJsonFiles {
+    param([string]$SpFolder)
+    if (-not (Test-Path -LiteralPath $SpFolder -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $SpFolder -Filter '*.json' -File | Sort-Object Name)
+}
+
+function Get-SpOrderKey {
+    # Goals, nodes and phases in the order they were made, as state.json keeps them.
+    param($SpObj)
+    return ('{0:D20}|{1}' -f (Get-SpTicks (Get-Prop $SpObj 'created' $null)), [string](Get-Prop $SpObj 'id' ''))
+}
+
+function New-SpMemPhase {
+    # The phase object a verb sees, from a declaration and a run record (or one fold object, twice).
+    param($SpDecl, $SpRun)
+    $spP = [ordered]@{}
+    foreach ($spN in $SpPhaseKeys) {
+        $spSrc = if ($null -ne $SpDecl.PSObject.Properties[$spN]) { $SpDecl } else { $SpRun }
+        $spV = Get-Prop $spSrc $spN $null
+        if ($spN -eq 'repos') { if ($null -eq $spV) { $spV = @() } else { $spV = @($spV) } }
+        $spP[$spN] = $spV
+    }
+    if ($null -eq $spP['iterations']) { $spP['iterations'] = 0 }
+    $spP['gates'] = [pscustomobject]@{}
+    $spP['friction'] = @()
+    $spP['questions'] = @()
+    $spP['created'] = Get-Prop $SpDecl 'created' $null
+    $spP['corrections'] = @()
+    $spP['capLifts'] = @()
+    $spP['abandonedReason'] = Get-Prop $SpRun 'abandonedReason' $null
+    foreach ($spN in @('owner', 'needs', 'continues')) { $spP[$spN] = Get-Prop $SpDecl $spN $null }
+    if ($null -eq $spP['needs']) { $spP['needs'] = @() } else { $spP['needs'] = @($spP['needs']) }
+    foreach ($spN in @('handedOverTo', 'handOverReason')) {
+        if ($null -ne $SpRun.PSObject.Properties[$spN]) { $spP[$spN] = $SpRun.PSObject.Properties[$spN].Value }
+    }
+    return [pscustomobject]$spP
+}
+
+function Set-SpLatestGate {
+    # The gate's verdict is its newest entry by instant; an equal instant goes to the later name.
+    param($SpMem, [string]$SpGate, $SpEntryObj)
+    $spCur = Get-Prop $SpMem.gates $SpGate $null
+    if ($null -eq $spCur -or (Get-SpTicks (Get-Prop $SpEntryObj 'at' $null)) -ge (Get-SpTicks (Get-Prop $spCur 'at' $null))) {
+        Set-Prop $SpMem.gates $SpGate (Split-SpMeta $SpEntryObj @('gate') -KeepAt).Obj
+    }
+}
+
+function Add-SpEntries {
+    # The entry files under one phase folder, appended to the phase's lists (after any the fold
+    # already gave it) and kept raw, so a fold can carry them whole.
+    param($SpContext, $SpMem, [string]$SpPhaseDir)
+    $spId = $SpMem.id
+    if (-not $SpContext.Raw.ContainsKey($spId)) { $SpContext.Raw[$spId] = New-Object System.Collections.Generic.List[object] }
+    $spGatesDir = Join-Path $SpPhaseDir 'gates'
+    if (Test-Path -LiteralPath $spGatesDir -PathType Container) {
+        foreach ($spGd in @(Get-ChildItem -LiteralPath $spGatesDir -Directory | Sort-Object Name)) {
+            foreach ($spF in @(Get-SpJsonFiles $spGd.FullName)) {
+                $spRawObj = Read-SpFile $spF.FullName $SpContext
+                $SpContext.Raw[$spId].Add(@{ Kind = 'gate'; Path = $spF.FullName; Obj = $spRawObj; Name = $spF.Name })
+                Add-SpSeen $SpContext (Get-Prop $spRawObj 'at' $null)
+                Set-SpLatestGate $SpMem $spGd.Name $spRawObj
+            }
+        }
+    }
+    foreach ($spKind in @($SpEntryKinds.Keys)) {
+        $spSeq = New-Object System.Collections.Generic.List[object]
+        foreach ($spE in @(Get-Prop $SpMem $spKind @())) { $spSeq.Add([pscustomobject]@{ T = (Get-SpTicks (Get-Prop $spE 'at' $null)); I = $spSeq.Count; O = $spE }) }
+        foreach ($spF in @(Get-SpJsonFiles (Join-Path $SpPhaseDir $SpEntryKinds[$spKind]))) {
+            $spRawObj = Read-SpFile $spF.FullName $SpContext
+            $SpContext.Raw[$spId].Add(@{ Kind = $spKind; Path = $spF.FullName; Obj = $spRawObj; Name = $spF.Name })
+            Add-SpSeen $SpContext (Get-Prop $spRawObj 'at' $null)
+            $spSeq.Add([pscustomobject]@{ T = (Get-SpTicks (Get-Prop $spRawObj 'at' $null)); I = $spSeq.Count; O = (Split-SpMeta $spRawObj @() -KeepAt).Obj })
+        }
+        # Sort-Object is not stable on Windows PowerShell 5.1, so the position is part of the key.
+        Set-Prop $SpMem $spKind @($spSeq | Sort-Object -Property T, I | ForEach-Object { $_.O })
+    }
+}
+
+function Read-SharedState {
+    param([string]$SpSlug)
+    $spDir = Get-ProgressDir $SpSlug
+    $spProjFile = Join-Path $spDir 'project.json'
+    if (-not (Test-Path -LiteralPath $spProjFile)) {
+        Fail 91 "Project '$SpSlug' says in keel.json that it shares its progress, but '$spProjFile' does not exist. Pull the project repo, or check out the commit that added progress/."
+    }
+    $spCtx = New-SpContext $spDir
+    $script:SpCtx[$SpSlug] = $spCtx
+
+    $spPs = Split-SpMeta (Read-SpFile $spProjFile $spCtx) @('schema')
+    $spCtx.Snap['project'] = Get-SpJson (New-SpForm 'project' $spPs.Obj)
+    Add-SpSeen $spCtx $spPs.Meta.at
+
+    $spPeople = New-Object System.Collections.Generic.List[object]
+    foreach ($spF in @(Get-SpJsonFiles (Join-Path $spDir 'people'))) {
+        $spO = Read-SpFile $spF.FullName $spCtx
+        $spPeople.Add($spO)
+        Add-SpSeen $spCtx (Get-Prop $spO 'at' $null)
+    }
+    $spCtx.People = $spPeople.ToArray()
+
+    $spGoals = New-Object System.Collections.Generic.List[object]
+    foreach ($spF in @(Get-SpJsonFiles (Join-Path $spDir 'goals'))) {
+        $spS = Split-SpMeta (Read-SpFile $spF.FullName $spCtx) @()
+        $spCtx.Snap["goal|$($spS.Obj.id)"] = Get-SpJson (New-SpForm 'goal' $spS.Obj)
+        Add-SpSeen $spCtx $spS.Meta.at
+        $spGoals.Add($spS.Obj)
+    }
+
+    $spNodes = New-Object System.Collections.Generic.List[object]
+    foreach ($spF in @(Get-SpJsonFiles (Join-Path $spDir 'nodes'))) {
+        $spRawNode = Read-SpFile $spF.FullName $spCtx
+        $spS = Split-SpMeta $spRawNode @('phaseStages', 'handedOver')
+        if ($null -ne $spRawNode.PSObject.Properties['phaseStages']) {
+            $spCtx.NodeExtras[$spS.Obj.id] = @{ phaseStages = $spRawNode.phaseStages; handedOver = (Get-Prop $spRawNode 'handedOver' ([pscustomobject]@{})) }
+        }
+        $spCtx.Snap["node|$($spS.Obj.id)"] = Get-SpJson (New-SpForm 'node' $spS.Obj)
+        $spCtx.NodeStatus[$spS.Obj.id] = [string](Get-Prop $spS.Obj 'status' '')
+        Add-SpSeen $spCtx $spS.Meta.at
+        $spNodes.Add($spS.Obj)
+    }
+
+    # Closed workstreams first: each phase folded into one, then any file written for it since.
+    $spPhases = @{}
+    foreach ($spF in @(Get-SpJsonFiles (Join-Path $spDir 'closed'))) {
+        $spFold = Read-SpFile $spF.FullName $spCtx
+        Add-SpSeen $spCtx (Get-Prop $spFold 'at' $null)
+        foreach ($spFp in @(Get-Prop $spFold 'phases' @())) {
+            $spMem = New-SpMemPhase $spFp $spFp
+            $spCtx.Folded[$spMem.id] = [string](Get-Prop $spFold 'ws' '')
+            $spCtx.Meta["decl|$($spMem.id)"] = [pscustomobject]@{ by = (Get-Prop $spFp 'declaredBy' $null); machine = (Get-Prop $spFp 'declaredMachine' $null); at = (Get-Prop $spFp 'declaredAt' $null) }
+            $spCtx.Meta["run|$($spMem.id)"] = [pscustomobject]@{ by = (Get-Prop $spFp 'by' $null); machine = (Get-Prop $spFp 'machine' $null); at = (Get-Prop $spFp 'at' $null) }
+            foreach ($spGe in @(Get-Prop $spFp 'gates' @())) {
+                Add-SpSeen $spCtx (Get-Prop $spGe 'at' $null)
+                Set-SpLatestGate $spMem ([string](Get-Prop $spGe 'gate' '')) $spGe
+            }
+            foreach ($spKind in @($SpEntryKinds.Keys)) {
+                $spL = @(foreach ($spE in @(Get-Prop $spFp $spKind @())) { Add-SpSeen $spCtx (Get-Prop $spE 'at' $null); (Split-SpMeta $spE @() -KeepAt).Obj })
+                Set-Prop $spMem $spKind $spL
+            }
+            $spPhases[$spMem.id] = $spMem
+        }
+    }
+
+    $spPhRoot = Join-Path $spDir 'phases'
+    if (Test-Path -LiteralPath $spPhRoot -PathType Container) {
+        foreach ($spPd in @(Get-ChildItem -LiteralPath $spPhRoot -Directory | Sort-Object Name)) {
+            $spDeclFile = Join-Path $spPd.FullName 'phase.json'
+            $spRunFile = Join-Path $spPd.FullName 'run.json'
+            $spMem = $null
+            if (Test-Path -LiteralPath $spDeclFile) {
+                $spD = Split-SpMeta (Read-SpFile $spDeclFile $spCtx) @()
+                $spR = $null
+                if (Test-Path -LiteralPath $spRunFile) { $spR = Split-SpMeta (Read-SpFile $spRunFile $spCtx) @() }
+                $spBase = $null
+                if ($spPhases.ContainsKey($spPd.Name)) { $spBase = $spPhases[$spPd.Name] }
+                $spRunObj = if ($null -ne $spR) { $spR.Obj } elseif ($null -ne $spBase) { $spBase } else { [pscustomobject]@{ stage = 'planned'; iterations = 0 } }
+                $spMem = New-SpMemPhase $spD.Obj $spRunObj
+                if ($null -ne $spBase) {
+                    # A file written for a folded phase overrides the fold; the fold's entries stay.
+                    $spMem.gates = $spBase.gates
+                    foreach ($spKind in @($SpEntryKinds.Keys)) { Set-Prop $spMem $spKind @(Get-Prop $spBase $spKind @()) }
+                }
+                $spCtx.Meta["decl|$($spMem.id)"] = $spD.Meta
+                $spCtx.Paths["decl|$($spMem.id)"] = $spDeclFile
+                Add-SpSeen $spCtx $spD.Meta.at
+                if ($null -ne $spR) {
+                    $spCtx.Meta["run|$($spMem.id)"] = $spR.Meta
+                    $spCtx.Paths["run|$($spMem.id)"] = $spRunFile
+                    Add-SpSeen $spCtx $spR.Meta.at
+                }
+            }
+            elseif ($spPhases.ContainsKey($spPd.Name)) { $spMem = $spPhases[$spPd.Name] }
+            if ($null -eq $spMem) { continue }
+            Add-SpEntries $spCtx $spMem $spPd.FullName
+            $spPhases[$spMem.id] = $spMem
+        }
+    }
+
+    foreach ($spMem in @($spPhases.Values)) {
+        $spCtx.Snap["decl|$($spMem.id)"] = Get-SpJson (New-SpForm 'decl' $spMem)
+        $spCtx.Snap["run|$($spMem.id)"] = Get-SpJson (New-SpForm 'run' $spMem)
+        foreach ($spGp in @($spMem.gates.PSObject.Properties)) {
+            $spCtx.GateSnap["$($spMem.id)|$($spGp.Name)"] = Get-SpGateSig $spGp.Name $spGp.Value
+        }
+        foreach ($spKind in @($SpEntryKinds.Keys)) { $spCtx.Counts["$($spMem.id)|$spKind"] = @(Get-Prop $spMem $spKind @()).Count }
+    }
+
+    $spAcks = New-Object System.Collections.Generic.List[object]
+    foreach ($spF in @(Get-SpJsonFiles (Join-Path $spDir 'acks'))) {
+        $spO = Read-SpFile $spF.FullName $spCtx
+        Add-SpSeen $spCtx (Get-Prop $spO 'at' $null)
+        $spAcks.Add((Split-SpMeta $spO @() -KeepAt).Obj)
+    }
+    $spCtx.Counts['acks'] = $spAcks.Count
+
+    # plannedUnder has no file of its own: the newest acknowledgement's 'to', or, with none, the
+    # keelVersion keel.json carries, which init-project and ack-keel-version write equal to it.
+    $spPlanned = 'unknown'
+    if ($spAcks.Count -gt 0) { $spPlanned = [string](Get-Prop $spAcks[$spAcks.Count - 1] 'to' 'unknown') }
+    else {
+        $spCfgObj = Read-ProjectConfig (Join-Path $script:SpRoots[$SpSlug] 'keel.json')
+        if ($null -ne $spCfgObj) { $spPlanned = [string](Get-Prop $spCfgObj 'keelVersion' 'unknown') }
+    }
+    $spRevision = $spCtx.MaxAtText
+    if ([string]::IsNullOrWhiteSpace($spRevision)) { $spRevision = [string](Get-Prop $spPs.Obj 'created' '') }
+
+    return [pscustomobject]@{
+        schema       = 2
+        project      = $SpSlug
+        root         = $script:SpRoots[$SpSlug]
+        title        = Get-Prop $spPs.Obj 'title' ''
+        created      = Get-Prop $spPs.Obj 'created' $null
+        updated      = $spRevision
+        plannedUnder = $spPlanned
+        status       = Get-Prop $spPs.Obj 'status' 'active'
+        goals        = @($spGoals | Sort-Object -Property @{ Expression = { Get-SpOrderKey $_ } })
+        nodes        = @($spNodes | Sort-Object -Property @{ Expression = { Get-SpOrderKey $_ } })
+        phases       = @($spPhases.Values | Sort-Object -Property @{ Expression = { Get-SpOrderKey $_ } })
+        versionAcks  = $spAcks.ToArray()
+    }
+}
+
+function Get-SpLatest {
+    # The latest of several stamps, as stamp text; $null when none is one.
+    param([object[]]$SpVals)
+    $spBest = $null
+    $spBestText = $null
+    foreach ($spV in @($SpVals)) {
+        $spI = Get-SpInstant $spV
+        if ($null -ne $spI -and ($null -eq $spBest -or $spI -gt $spBest)) { $spBest = $spI; $spBestText = [string](Add-SpOffset $spV) }
+    }
+    return $spBestText
+}
+
+function Get-SpWriter {
+    # Which person this machine is: the one person file whose machines list names it. Decided at
+    # Read-State -ForWrite, before a writing verb changes anything, so a refusal writes nothing.
+    param([string]$SpSlug)
+    $spM = $env:COMPUTERNAME
+    $spMine = @($script:SpCtx[$SpSlug].People | Where-Object { @(Get-Prop $_ 'machines' @()) -contains $spM })
+    if ($spMine.Count -eq 0) {
+        Fail 95 "This machine ('$spM') is not registered in '$SpSlug', which shares its progress, so a write here would name nobody as its author. Register it first: 'join' as a new person, or 'join -As <person id>' for a person already under progress/people/. Nothing was written."
+    }
+    if ($spMine.Count -gt 1) {
+        $spWho = ($spMine | ForEach-Object { "$($_.id) ($(Get-Prop $_ 'name' '?'))" }) -join ' and '
+        Fail 90 "This machine ('$spM') is listed by two person files, $spWho, most likely after a merge, so whose entry a write would be cannot be told. Take it off the one it is not: 'join -As <person id> -Clear'. Nothing was written."
+    }
+    return [string]$spMine[0].id
+}
+
+function Write-SharedState {
+    # Writes what changed since Read-SharedState. With -SpExport it writes everything the object
+    # holds, every file marked as exported and naming the exporter, each item dated by the latest
+    # stamp it stores rather than by now. Returns how many files it wrote.
+    param([string]$SpSlug, $SpState, [switch]$SpExport, [string]$SpExporter)
+    $spCtx = $script:SpCtx[$SpSlug]
+    $spDir = $spCtx.Dir
+    $spWho = if ($SpExport) { $SpExporter } else { Get-SpWriter $SpSlug }
+    $spMachine = $env:COMPUTERNAME
+    $spNow = [string](Add-SpOffset (Now))
+    $spX = [bool]$SpExport
+    $spWrites = [ordered]@{}
+    $spRank = @{}
+    $spOwned = @{}
+    $spTaken = @{}
+    $spFresh = @{}
+    $spDeclMeta = @{}
+    $spRunMeta = @{}
+    $spDeletes = New-Object System.Collections.Generic.List[string]
+
+    # ---- project
+    $spProjForm = New-SpForm 'project' $SpState
+    if ($spX -or $spCtx.Snap['project'] -ne (Get-SpJson $spProjForm)) {
+        $spF = Join-Path $spDir 'project.json'
+        $spWrites[$spF] = New-SpFileObj $spProjForm $spWho $spMachine $spNow $spX
+        $spRank[$spF] = 1
+    }
+
+    # ---- goals
+    foreach ($spG in @(Get-GoalList $SpState)) {
+        $spForm = New-SpForm 'goal' $spG
+        if ($spX -or $spCtx.Snap["goal|$($spG.id)"] -ne (Get-SpJson $spForm)) {
+            $spAt = $spNow
+            if ($spX) { $spAt = Get-SpLatest @((Get-Prop $spG 'created' $null), (Get-Prop $spG 'statusSetAt' $null)) }
+            if (-not $spAt) { $spAt = $spNow }
+            $spF = Join-Path (Join-Path $spDir 'goals') "$($spG.id).json"
+            $spWrites[$spF] = New-SpFileObj $spForm $spWho $spMachine $spAt $spX
+            $spRank[$spF] = 1
+        }
+    }
+
+    # ---- phases: declaration, run record, and every entry added since the read
+    foreach ($spP in @(Get-Phases $SpState)) {
+        $spId = $spP.id
+        $spPd = Join-Path (Join-Path $spDir 'phases') $spId
+        $spOwned[$spId] = New-Object System.Collections.Generic.List[string]
+        $spFresh[$spId] = New-Object System.Collections.Generic.List[object]
+
+        $spDecl = New-SpForm 'decl' $spP $spWho
+        $spDeclMeta[$spId] = $spCtx.Meta["decl|$spId"]
+        if ($spX -or $spCtx.Snap["decl|$spId"] -ne (Get-SpJson $spDecl)) {
+            $spAt = $spNow
+            if ($spX) { $spAt = Get-SpLatest @((Get-Prop $spP 'revisedAt' $null)) }
+            if (-not $spAt) { $spAt = [string](Add-SpOffset (Get-Prop $spP 'created' $spNow)) }
+            if (-not $spX) { $spAt = $spNow }
+            $spF = Join-Path $spPd 'phase.json'
+            $spWrites[$spF] = New-SpFileObj $spDecl $spWho $spMachine $spAt $spX
+            $spRank[$spF] = 1
+            $spOwned[$spId].Add($spF)
+            $spDeclMeta[$spId] = [pscustomobject]@{ by = $spWho; machine = $spMachine; at = $spAt }
+        }
+
+        $spRun = New-SpForm 'run' $spP
+        $spRunMeta[$spId] = $spCtx.Meta["run|$spId"]
+        if ($spX -or $spCtx.Snap["run|$spId"] -ne (Get-SpJson $spRun)) {
+            $spAt = $spNow
+            if ($spX) {
+                $spGateAts = @(foreach ($spGp in @((Get-Prop $spP 'gates' ([pscustomobject]@{})).PSObject.Properties)) { Get-Prop $spGp.Value 'at' $null })
+                $spAt = Get-SpLatest $spGateAts
+                if (-not $spAt) { $spAt = [string](Add-SpOffset (Get-Prop $spP 'created' $spNow)) }
+            }
+            $spF = Join-Path $spPd 'run.json'
+            $spWrites[$spF] = New-SpFileObj $spRun $spWho $spMachine $spAt $spX
+            $spRank[$spF] = 2
+            $spOwned[$spId].Add($spF)
+            $spRunMeta[$spId] = [pscustomobject]@{ by = $spWho; machine = $spMachine; at = $spAt }
+        }
+
+        foreach ($spGp in @((Get-Prop $spP 'gates' ([pscustomobject]@{})).PSObject.Properties)) {
+            if (-not $spX -and $spCtx.GateSnap["$spId|$($spGp.Name)"] -eq (Get-SpGateSig $spGp.Name $spGp.Value)) { continue }
+            $spAt = [string](Add-SpOffset (Get-Prop $spGp.Value 'at' $spNow))
+            $spObj = New-SpFileObj (New-SpGateForm $spGp.Name $spGp.Value) $spWho $spMachine $spAt $spX
+            $spF = New-SpEntryName $spAt $spWho (Join-Path (Join-Path $spPd 'gates') $spGp.Name) $spTaken
+            $spWrites[$spF] = $spObj
+            $spRank[$spF] = 0
+            $spOwned[$spId].Add($spF)
+            $spFresh[$spId].Add(@{ Kind = 'gate'; Obj = $spObj; Name = (Split-Path -Leaf $spF) })
+        }
+
+        foreach ($spKind in @($SpEntryKinds.Keys)) {
+            $spArr = @(Get-Prop $spP $spKind @())
+            $spN0 = 0
+            if (-not $spX -and $spCtx.Counts.ContainsKey("$spId|$spKind")) { $spN0 = [int]$spCtx.Counts["$spId|$spKind"] }
+            if ($spArr.Count -lt $spN0) {
+                Fail 90 "Phase '$spId' now holds fewer $spKind entries than were read. Shared progress only adds entries; nothing was written."
+            }
+            for ($spI = $spN0; $spI -lt $spArr.Count; $spI++) {
+                $spE = $spArr[$spI]
+                $spAt = [string](Add-SpOffset (Get-Prop $spE 'at' $spNow))
+                $spObj = New-SpFileObj (New-SpForm $spKind $spE) $spWho $spMachine $spAt $spX
+                $spF = New-SpEntryName $spAt $spWho (Join-Path $spPd $SpEntryKinds[$spKind]) $spTaken
+                $spWrites[$spF] = $spObj
+                $spRank[$spF] = 0
+                $spOwned[$spId].Add($spF)
+                $spFresh[$spId].Add(@{ Kind = $spKind; Obj = $spObj; Name = (Split-Path -Leaf $spF) })
+            }
+        }
+    }
+
+    # ---- nodes, folding a workstream this write closed or abandoned (or, on export, every one)
+    foreach ($spNd in @(Get-Nodes $SpState)) {
+        $spForm = New-SpForm 'node' $spNd
+        $spSt = [string](Get-Prop $spNd 'status' '')
+        $spWasClosed = $SpClosedStatuses -contains [string]$spCtx.NodeStatus[$spNd.id]
+        $spFolding = ([string](Get-Prop $spNd 'role' '') -eq 'workstream') -and ($SpClosedStatuses -contains $spSt) -and ($spX -or -not $spWasClosed)
+        $spExtras = $null
+        if ($spFolding) {
+            $spExtras = Add-SpFold $spCtx $SpState $spNd $spWho $spMachine $spNow $spX $spWrites $spRank $spOwned $spFresh $spDeclMeta $spRunMeta $spDeletes
+        }
+        elseif ($spCtx.NodeExtras.ContainsKey($spNd.id)) { $spExtras = $spCtx.NodeExtras[$spNd.id] }
+        if ($spX -or $spFolding -or $spCtx.Snap["node|$($spNd.id)"] -ne (Get-SpJson $spForm)) {
+            $spAt = $spNow
+            if ($spX) { $spAt = Get-SpLatest @((Get-Prop $spNd 'created' $null), (Get-Prop $spNd 'revisedAt' $null), (Get-Prop $spNd 'closedAt' $null), (Get-Prop $spNd 'abandonedAt' $null)) }
+            if (-not $spAt) { $spAt = $spNow }
+            $spBody = [ordered]@{}
+            foreach ($spFp in @($spForm.PSObject.Properties)) { $spBody[$spFp.Name] = $spFp.Value }
+            if ($null -ne $spExtras) { $spBody['phaseStages'] = $spExtras.phaseStages; $spBody['handedOver'] = $spExtras.handedOver }
+            $spF = Join-Path (Join-Path $spDir 'nodes') "$($spNd.id).json"
+            $spWrites[$spF] = New-SpFileObj ([pscustomobject]$spBody) $spWho $spMachine $spAt $spX
+            $spRank[$spF] = 1
+        }
+    }
+
+    # ---- version acknowledgements
+    $spAcks = @(Get-Prop $SpState 'versionAcks' @())
+    $spA0 = 0
+    if (-not $spX) { $spA0 = [int]$spCtx.Counts['acks'] }
+    if ($spAcks.Count -lt $spA0) { Fail 90 "The project now holds fewer version acknowledgements than were read. Shared progress only adds them; nothing was written." }
+    for ($spI = $spA0; $spI -lt $spAcks.Count; $spI++) {
+        $spAt = [string](Add-SpOffset (Get-Prop $spAcks[$spI] 'at' $spNow))
+        $spF = New-SpEntryName $spAt $spWho (Join-Path $spDir 'acks') $spTaken
+        $spWrites[$spF] = New-SpFileObj (New-SpForm 'ack' $spAcks[$spI]) $spWho $spMachine $spAt $spX
+        $spRank[$spF] = 0
+    }
+
+    # ---- the hash check, by text, on every file this command read and now replaces or removes,
+    # all before the first write, so an 89 writes nothing
+    foreach ($spF in @(@($spWrites.Keys) + @($spDeletes))) {
+        $spKey = Get-FullPathKey $spF
+        if ($spCtx.Texts.ContainsKey($spKey)) {
+            $spNowText = $null
+            if (Test-Path -LiteralPath $spF) { $spNowText = [System.IO.File]::ReadAllText($spF, [System.Text.Encoding]::UTF8) }
+            if ($spNowText -cne $spCtx.Texts[$spKey]) {
+                Fail 89 "'$(Split-Path -Leaf $spF)' under progress/ changed after this command read it, so writing now would erase another write. $(Get-WrittenNote) Re-run the command."
+            }
+        }
+        elseif ((Test-Path -LiteralPath $spF) -and -not $spTaken.ContainsKey($spKey)) {
+            Fail 89 "'$(Split-Path -Leaf $spF)' under progress/ appeared after this command read the project, so writing now would erase another write. $(Get-WrittenNote) Re-run the command."
+        }
+    }
+    $spKeys = @($spWrites.Keys)
+    $spOrder = @(for ($spIx = 0; $spIx -lt $spKeys.Count; $spIx++) { [pscustomobject]@{ F = $spKeys[$spIx]; R = [int]$spRank[$spKeys[$spIx]]; I = $spIx } })
+    $spOrder = @($spOrder | Sort-Object -Property R, I)
+    foreach ($spW in $spOrder) {
+        Write-SpFile $spW.F $spWrites[$spW.F]
+        $script:WrittenList.Add((Split-Path -Leaf $spW.F))
+    }
+    foreach ($spF in @($spDeletes)) {
+        if (Test-Path -LiteralPath $spF) { Remove-Item -LiteralPath $spF -Force }
+    }
+    return $spWrites.Count
+}
+
+function Add-SpFold {
+    # A workstream that has just closed or been abandoned: its phases' records go into
+    # closed/<id>.json, their own files are removed in the same write, and the node gains each
+    # phase's final stage and any hand-over. The artifacts stay where they are, read as documents.
+    param($SpContext, $SpState, $SpNode, [string]$SpWho, [string]$SpMachine, [string]$SpNow, [bool]$SpX,
+          $SpWrites, $SpRank, $SpOwned, $SpFresh, $SpDeclMeta, $SpRunMeta, $SpDeletes)
+    $spStages = [ordered]@{}
+    $spHanded = [ordered]@{}
+    $spOut = New-Object System.Collections.Generic.List[object]
+    foreach ($spP in @(Get-Phases $SpState | Where-Object { $_.ws -eq $SpNode.id -and -not $SpContext.Folded.ContainsKey($_.id) })) {
+        $spId = $spP.id
+        $spO = [ordered]@{}
+        foreach ($spFp in @((New-SpForm 'decl' $spP $SpWho).PSObject.Properties)) { $spO[$spFp.Name] = $spFp.Value }
+        foreach ($spFp in @((New-SpForm 'run' $spP).PSObject.Properties)) { $spO[$spFp.Name] = $spFp.Value }
+        $spDm = $SpDeclMeta[$spId]
+        $spRm = $SpRunMeta[$spId]
+        $spO['declaredBy'] = Get-Prop $spDm 'by' $null
+        $spO['declaredMachine'] = Get-Prop $spDm 'machine' $null
+        $spO['declaredAt'] = Get-Prop $spDm 'at' $null
+        $spO['by'] = Get-Prop $spRm 'by' $null
+        $spO['machine'] = Get-Prop $spRm 'machine' $null
+        $spO['at'] = Get-Prop $spRm 'at' $null
+        $spAll = New-Object System.Collections.Generic.List[object]
+        if ($SpContext.Raw.ContainsKey($spId)) { foreach ($spR in $SpContext.Raw[$spId]) { $spAll.Add($spR); $SpDeletes.Add($spR.Path) } }
+        foreach ($spR in $SpFresh[$spId]) { $spAll.Add($spR) }
+        $spSorted = @($spAll | Sort-Object -Property @{ Expression = { $_.Name } })
+        $spO['gates'] = @($spSorted | Where-Object { $_.Kind -eq 'gate' } | ForEach-Object { $_.Obj })
+        foreach ($spKind in @($SpEntryKinds.Keys)) { $spO[$spKind] = @($spSorted | Where-Object { $_.Kind -eq $spKind } | ForEach-Object { $_.Obj }) }
+        $spOut.Add([pscustomobject]$spO)
+        foreach ($spF in @($SpOwned[$spId])) { if ($SpWrites.Contains($spF)) { $SpWrites.Remove($spF) } }
+        foreach ($spPk in @("decl|$spId", "run|$spId")) { if ($SpContext.Paths.ContainsKey($spPk)) { $SpDeletes.Add($SpContext.Paths[$spPk]) } }
+        $spStages[$spId] = Get-Prop $spP 'stage' $null
+        if ([string](Get-Prop $spP 'stage' '') -eq 'handed-over') { $spHanded[$spId] = Get-Prop $spP 'handedOverTo' $null }
+    }
+    $spF = Join-Path (Join-Path $SpContext.Dir 'closed') "$($SpNode.id).json"
+    $SpWrites[$spF] = New-SpFileObj ([pscustomobject][ordered]@{ ws = $SpNode.id; phases = $spOut.ToArray() }) $SpWho $SpMachine $SpNow $SpX
+    $SpRank[$spF] = 3
+    return @{ phaseStages = [pscustomobject]$spStages; handedOver = [pscustomobject]$spHanded }
+}
+
+function Get-SpGitName {
+    # The display name a new person file takes, from the project repo's git config, once.
+    param([string]$SpRoot)
+    $spRes = Invoke-Native -Exe 'git' -Arguments @('-C', $SpRoot, 'config', '--get', 'user.name') -NativeSplitStderr
+    if ($spRes.NotFound -or $spRes.Code -ne 0) { return '' }
+    return $spRes.Text.Trim()
+}
+
+function New-SpPersonId {
+    param([string]$SpPeopleDir)
+    for ($spTry = 0; $spTry -lt 500; $spTry++) {
+        $spCand = 'p-' + ('{0:x4}' -f (Get-Random -Minimum 0 -Maximum 65536))
+        if (-not (Test-Path -LiteralPath (Join-Path $SpPeopleDir "$spCand.json"))) { return $spCand }
+    }
+    Fail 90 "Could not choose a free person id under '$SpPeopleDir'."
+}
+
+function New-SpPersonObj {
+    param([string]$SpPid, [string]$SpDisplay, [string[]]$SpMachines, [string]$SpAt, [bool]$SpExported)
+    $spForm = [pscustomobject][ordered]@{ id = $SpPid; name = $SpDisplay; machines = @($SpMachines) }
+    return (New-SpFileObj $spForm $SpPid $env:COMPUTERNAME $SpAt $SpExported)
+}
+
+function Assert-SpUnread {
+    # The text check for a person file 'join' rewrites, which goes through no Write-SharedState.
+    param($SpContext, [string]$SpFull)
+    $spWas = $SpContext.Texts[(Get-FullPathKey $SpFull)]
+    $spIs = $null
+    if (Test-Path -LiteralPath $SpFull) { $spIs = [System.IO.File]::ReadAllText($SpFull, [System.Text.Encoding]::UTF8) }
+    if ($spIs -cne $spWas) { Fail 89 "'$(Split-Path -Leaf $SpFull)' changed after this command read it. Nothing was written. Re-run the command." }
+}
+
 
 # ------------------------------------------------------------ keel version --
 # P9/P10: read live from the plugin manifest rather than hardcoded here.
@@ -1168,6 +1947,7 @@ function Test-BindExempt {
     if ($bdR -like 'plan/handoffs/*.md') { return $true }              # gate 8: the handoff
     if ($bdR -like "plan/workstreams/$($BdWs)_*.md") { return $true }  # gate 8: record appended to the spec
     if ($bdR -like "plan/prompts/$BdWs.*-prompt.md") { return $true }  # gate 8: the next phase's prompt
+    if ($bdR -like 'progress/*') { return $true }                      # every gate: shared progress, written by the gates themselves
     return $false
 }
 
@@ -2279,7 +3059,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "keel-state.ps1 - the only writer of keel project state."
     Write-Output ""
     Write-Output "  Project:    init-project  resolve  status  tree  list  goal-coverage"
-    Write-Output "              ack-keel-version  handoff"
+    Write-Output "              ack-keel-version  handoff  share-progress  join"
     Write-Output "  Repos:      add-repo  repos"
     Write-Output "  Structure:  add-goal  set-goal-status  add-epic  add-workstream  add-phase"
     Write-Output "              revise-epic  revise-workstream  revise-phase"
@@ -2304,6 +3084,10 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  into this machine's store, so 'signals' and 'resolve-signal' work on it unchanged."
     Write-Output "  'lift-cap' raises ONE phase's iteration cap on the operator's own words; the default"
     Write-Output "  cap is $IterationCap and nothing else changes it."
+    Write-Output ""
+    Write-Output "  'share-progress' moves a project's progress from this machine into its repo, under"
+    Write-Output "  progress/, once; it commits nothing. 'join' registers this machine as a person in such"
+    Write-Output "  a project, -As <person id> as one already listed, -As <id> -Clear to take it off one."
     exit 0
 }
 
@@ -2508,6 +3292,158 @@ switch ($Command) {
 }
 
 # --------------------------------------------------------------------------- #
+# Registers this machine in a project that shares its progress: as a new person, named once from
+# the project repo's git config user.name, or with -As as a person already listed. -As <id> -Clear
+# takes this machine off that person file, which is how a machine two person files list after a
+# merge is put right; it reuses -Clear rather than adding a verb. Writes only progress/people/.
+# Deliberately NOT through Read-State -ForWrite, whose person check would refuse the one machine
+# this verb exists for: it reads the people files itself, under the same lock.
+'join' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    if (-not (Test-SharedProgress $proj.Slug)) {
+        Fail 90 "Project '$($proj.Slug)' keeps its progress on this machine, so there is nobody to join. 'join' is for a project that shares its progress through its repo (share-progress)."
+    }
+    Enter-WriteLock (Get-StatePath $proj.Slug) "project '$($proj.Slug)'"
+    [void](Read-SharedState $proj.Slug)
+    $jnCtx = $script:SpCtx[$proj.Slug]
+    $jnDir = Join-Path $jnCtx.Dir 'people'
+    $jnMachine = $env:COMPUTERNAME
+    $jnMine = @($jnCtx.People | Where-Object { @(Get-Prop $_ 'machines' @()) -contains $jnMachine })
+    $jnAt = [string](Add-SpOffset (Now))
+
+    $jnTarget = $null
+    if ($As) {
+        $jnFound = @($jnCtx.People | Where-Object { [string](Get-Prop $_ 'id' '') -ceq $As })
+        if ($jnFound.Count -eq 0) {
+            Fail 90 "No person file under progress/people/ has the id '$As'. The ids there: $(@($jnCtx.People | ForEach-Object { $_.id }) -join ', '). Nothing was written."
+        }
+        $jnTarget = $jnFound[0]
+    }
+
+    if ($Clear) {
+        if ($null -eq $jnTarget) { Fail 90 "-Clear takes this machine off ONE person file: name it with -As <person id>. Nothing was written." }
+        $jnHad = @(Get-Prop $jnTarget 'machines' @())
+        $jnLeft = @($jnHad | Where-Object { $_ -ne $jnMachine })
+        if ($jnLeft.Count -eq $jnHad.Count) {
+            Fail 90 "Person '$As' does not list this machine ('$jnMachine'), so there is nothing to take off. Nothing was written."
+        }
+        $jnFile = Join-Path $jnDir "$As.json"
+        Assert-SpUnread $jnCtx $jnFile
+        Write-SpFile $jnFile (New-SpPersonObj $As ([string](Get-Prop $jnTarget 'name' '')) $jnLeft $jnAt $false)
+        Say "Took this machine ('$jnMachine') off person $As ($(Get-Prop $jnTarget 'name' '?'))."
+        Say "  Commit progress/people/$As.json and push it, so the others see it too."
+        exit 0
+    }
+
+    if ($jnMine.Count -gt 0) {
+        Fail 90 "This machine ('$jnMachine') is already listed by $(($jnMine | ForEach-Object { "$($_.id) ($(Get-Prop $_ 'name' '?'))" }) -join ' and '). Nothing was written. To move it, take it off first: join -As <person id> -Clear."
+    }
+
+    if ($null -ne $jnTarget) {
+        $jnFile = Join-Path $jnDir "$As.json"
+        Assert-SpUnread $jnCtx $jnFile
+        Write-SpFile $jnFile (New-SpPersonObj $As ([string](Get-Prop $jnTarget 'name' '')) @(@(Get-Prop $jnTarget 'machines' @()) + @($jnMachine)) $jnAt $false)
+        Say "Added this machine ('$jnMachine') to person $As ($(Get-Prop $jnTarget 'name' '?'))."
+        Say "  Commit progress/people/$As.json and push it, so the others see it too."
+        exit 0
+    }
+
+    $jnName = Get-SpGitName $proj.Root
+    if ([string]::IsNullOrWhiteSpace($jnName)) {
+        Fail 95 "git config user.name is not set for '$($proj.Root)', and a new person is named from it, once. Set it, then re-run: git -C `"$($proj.Root)`" config user.name `"<your name>`". Nothing was written."
+    }
+    $jnId = New-SpPersonId $jnDir
+    Write-SpFile (Join-Path $jnDir "$jnId.json") (New-SpPersonObj $jnId $jnName @($jnMachine) $jnAt $false)
+    Say "Registered this machine ('$jnMachine') as person $jnId ($jnName) in '$($proj.Slug)'."
+    Say "  Every write from this machine now names $jnId as its author. Commit progress/people/$jnId.json and push it."
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# The one-time switch from progress kept on this machine to progress kept in the project repo
+# (charter P15, as amended). Writes progress/ from state.json, every file marked as exported and
+# naming the exporter as its author, since state.json records no author and on a one-person
+# project the exporter is the only person who wrote it; folds every closed or abandoned
+# workstream; copies each phase folder's top-level files into progress/phases/<id>/artifacts/
+# (its subfolders are this machine's scratch and stay); writes "progress": "repo" into keel.json;
+# and renames state.json LAST, to state.json.shared-<date>, so an older keel finds no state and
+# refuses (exit 91) rather than writing to a copy nobody reads. Commits nothing and pushes
+# nothing: the person reviews and commits, and that commit is previewed like any other (P6).
+'share-progress' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    $shCfg = Read-ProjectConfig $proj.ConfigPath
+    if ($null -eq $shCfg) { Fail 90 "Could not read '$($proj.ConfigPath)'." }
+    if ((Test-SharedProgress $proj.Slug) -or [string](Get-Prop $shCfg 'progress' '') -eq 'repo') {
+        Fail 90 "Project '$($proj.Slug)' already shares its progress: keel.json says `"progress`": `"repo`". There is nothing to export."
+    }
+    if (Test-Quarantine $shCfg) {
+        Fail 90 "Project '$($proj.Slug)' has quarantine on, so it cannot share its progress: progress files are committed, and nothing can check that a friction note, a question, a scope or a gate artifact quotes nothing identifying (charter P23). Its progress stays on this machine."
+    }
+    if (-not [bool](Get-Prop $shCfg 'git' $false)) {
+        Fail 90 "Project '$($proj.Slug)' says git: false in keel.json. Shared progress travels with the project repo, so it needs one."
+    }
+    $shSt = Invoke-Native -Exe 'git' -Arguments @('-C', $proj.Root, 'status', '--porcelain') -NativeSplitStderr
+    if ($shSt.NotFound) { Fail 90 'git was not found on PATH, so whether the project repo is clean could not be read. Nothing was written.' }
+    if ($shSt.Code -ne 0) { Fail 90 "'$($proj.Root)' is not a git work tree (git status exit $($shSt.Code)). Shared progress travels with the project repo, so it needs one." }
+    if (@($shSt.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) {
+        Fail 90 "The project repo has uncommitted changes. Commit them or put them aside first, so the export's own changes can be reviewed alone. Nothing was written."
+    }
+    $shName = Get-SpGitName $proj.Root
+    if ([string]::IsNullOrWhiteSpace($shName)) {
+        Fail 95 "git config user.name is not set for '$($proj.Root)', and the exporter is registered as a person named from it. Set it, then re-run: git -C `"$($proj.Root)`" config user.name `"<your name>`". Nothing was written."
+    }
+    $shDir = Join-Path $proj.Root 'progress'
+    if (Test-Path -LiteralPath $shDir) {
+        Fail 90 "'$shDir' already exists, and the export writes that folder from nothing. Nothing was written."
+    }
+
+    $state = Read-State $proj.Slug -ForWrite
+    $shStatePath = Get-StatePath $proj.Slug
+    Save-ReadSha $proj.ConfigPath
+
+    $script:SpRoots[$proj.Slug] = $proj.Root
+    $script:SpCtx[$proj.Slug] = New-SpContext $shDir
+    $shDone = $false
+    try {
+        $shAt = [string](Add-SpOffset (Now))
+        $shPid = New-SpPersonId (Join-Path $shDir 'people')
+        Write-SpFile (Join-Path (Join-Path $shDir 'people') "$shPid.json") (New-SpPersonObj $shPid $shName @($env:COMPUTERNAME) $shAt $true)
+        $shCount = 1 + (Write-SharedState $proj.Slug $state -SpExport -SpExporter $shPid)
+
+        $shArt = 0
+        foreach ($shP in @(Get-Phases $state)) {
+            $shSrc = Join-Path (Join-Path (Join-Path $ProjectsHome $proj.Slug) 'phases') $shP.id
+            if (-not (Test-Path -LiteralPath $shSrc -PathType Container)) { continue }
+            $shDest = Join-Path (Join-Path (Join-Path $shDir 'phases') $shP.id) 'artifacts'
+            foreach ($shF in @(Get-ChildItem -LiteralPath $shSrc -File)) {
+                Ensure-Dir $shDest | Out-Null
+                Copy-Item -LiteralPath $shF.FullName -Destination (Join-Path $shDest $shF.Name)
+                $shArt++
+            }
+        }
+
+        Set-Prop $shCfg 'progress' 'repo'
+        Write-GuardedJson $proj.ConfigPath $shCfg
+
+        Assert-Unchanged $shStatePath
+        $shRenamed = "state.json.shared-$(Today)"
+        $shN = 2
+        while (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $shStatePath) $shRenamed)) { $shRenamed = "state.json.shared-$(Today)-$shN"; $shN++ }
+        Rename-Item -LiteralPath $shStatePath -NewName $shRenamed
+        $shDone = $true
+    }
+    finally {
+        if (-not $shDone -and (Test-Path -LiteralPath $shDir)) { Remove-Item -LiteralPath $shDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Say "Exported '$($proj.Slug)' into its repo: $shCount progress file(s) and $shArt artifact(s) under progress/."
+    Say "  This machine is person $shPid ($shName); every exported file names $shPid and says source: export."
+    Say "  keel.json now says `"progress`": `"repo`". This machine's state.json is kept as $shRenamed, so an older keel finds no state here and refuses."
+    Say '  Nothing was committed or pushed. Review progress/ and keel.json, then commit them together.'
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
 'resolve' {
     $p = Resolve-Project -StartPath $Path
     if ($null -eq $p) { Fail 91 "No keel project found by walking up from '$(if ($Path) { $Path } else { (Get-Location).Path })'." }
@@ -2530,7 +3466,26 @@ switch ($Command) {
     $lsMissing = 0
     foreach ($d in $dirs) {
         $sp = Join-Path $d.FullName 'state.json'
-        if (-not (Test-Path -LiteralPath $sp)) { continue }
+        if (-not (Test-Path -LiteralPath $sp)) {
+            # A project that shares its progress keeps only scratch here, and the state.json it
+            # had, renamed by share-progress; that file still records where the project lives. A
+            # clone of a shared project that never exported from this machine has no such file
+            # and is not listed: nothing on this machine records it.
+            $lsShared = @(Get-ChildItem -LiteralPath $d.FullName -Filter 'state.json.shared-*' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc)
+            if ($lsShared.Count -eq 0) { continue }
+            $s = $null
+            try { $s = Read-Json $lsShared[$lsShared.Count - 1].FullName } catch { $s = $null }
+            if ($null -eq $s) { continue }
+            $lsRoot = Get-Prop $s 'root' ''
+            $lsTotal++
+            $lsMark = ''
+            if ([string]::IsNullOrWhiteSpace($lsRoot) -or -not (Test-Path -LiteralPath $lsRoot)) {
+                $lsMark = '   [PATH MISSING]'
+                $lsMissing++
+            }
+            Write-Output ("{0,-22} shared: its progress is in its repo   {1}{2}" -f $s.project, $lsRoot, $lsMark)
+            continue
+        }
         $s = Read-Json $sp
         $ph = @(Get-Phases $s)
         $delivered = @($ph | Where-Object { $_.stage -eq 'delivered' }).Count

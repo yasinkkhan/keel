@@ -114,6 +114,11 @@ row that would rule out an option the operator could plausibly want is put to th
 written - see "An earlier decision is a tradeoff to show, not a rule to enforce" in
 `keel-orchestrator/SKILL.md`.
 
+**In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`),
+more than one person may be "the operator", so the label names which: *Decided by the operator,
+Person A (p-1a2b)*, with the display name and person id from `progress/people/<id>.json` of the
+person who answered.
+
 **§4 Phase table.** Each phase independently deliverable, each with an **actor**, and each naming
 where its answer lands. The column and what belongs in it are defined in `SPEC_TEMPLATE.md` — a
 check can only be written against a specified artifact, so a phase whose output has no named home
@@ -378,6 +383,16 @@ is worse than one that does not, because the state file outranks the conversatio
 
 `-Due` only where a date is real. A due date invented to look diligent trains you to ignore the
 `OVERDUE:` line, and that line has to stay meaningful.
+
+**In a project that shares its progress through its repo, commit and push the approved plan at
+once** - the spec, the registered workstream and phases under `progress/`, and the prompt once Step 6
+writes it - and report the commit and the push rather than previewing them. A workstream or phase
+number is taken by whoever pushes it first, and two people planning in one week otherwise both take
+the next free number; one taken twice is a git conflict at the second pull, and the later planner
+renumbers. The push shrinks that window, it cannot close it. It is reversible in part, observable
+with `git ls-remote`, and inside what the operator has just approved, which is why it is performed
+and reported (`keel-orchestrator/SKILL.md`, "Whether to ask, or to act and report"). The wrapper
+never pushes; this step does. A project that keeps its progress on this machine is unchanged.
 
 ## Step 6 — the next phase's prompt, and only that one
 
