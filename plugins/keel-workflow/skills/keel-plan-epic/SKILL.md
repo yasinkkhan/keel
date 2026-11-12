@@ -49,6 +49,11 @@ And an inventory read twice by one vocabulary has been read once — see "A cont
 thing that could make the claim wrong" in `keel-orchestrator/SKILL.md`, whose third sentence governs
 a claim that a set is complete.
 
+**List the work already open in the project, too.** Run `tree` and name the workstreams still open,
+those serving the same goals first; in a project that shares its progress, say whose they are, by
+the `owner:` on their unfinished phases. Ask the operator whether any area needs one of them
+delivered first, and record the answer as that area's **blocked by** (below).
+
 ## The ledger is the resume mechanism
 
 Each area carries exactly one status token, greppable on purpose:
@@ -70,7 +75,8 @@ For each area you take on this session:
 1. **State what "done" means** for that area, in one or two sentences, falsifiable.
 2. **Name which goals it serves.** At least one, and be honest when it serves two — that linkage is
    what makes coverage a query rather than a feeling (charter P22).
-3. **Say whether it can finish independently**, and what it is **blocked by**.
+3. **Say whether it can finish independently**, and what it is **blocked by**: an area or open
+   workstream it cannot start without. That becomes a declared need when its phases are planned.
 4. **Allocate the number**: highest on disk + 1 — **measure it**. Numbers get skipped historically,
    so "count + 1" is wrong.
 5. **Register it**, human-confirmed:
@@ -108,6 +114,12 @@ Record both, because they are different:
 *"Everything needs the bank statements"* is a dependency. *"Do 2021 before 2022"* is a preference.
 Marking a preference as a dependency freezes a sequence that could have flexed. Marking a dependency
 as a preference produces a workstream that cannot start when its turn comes.
+
+**A blocked-by is recorded in keel's state when the blocked workstream's phases are planned, not
+here.** This skill plans no phases, so the ledger keeps it as text; `keel-plan-workstream` then puts
+it on the first phase of the blocked workstream that needs the work, as `add-phase -Needs W<n>` for
+a whole workstream or `-Needs W<n>.<p>` for one phase. From then on `status` holds that phase back
+until the work is delivered and says what it waits on.
 
 ## Checking your work before you stop
 

@@ -16,7 +16,9 @@
                  is UTF-8 with no byte-order mark and LF only, carries by (naming a person file),
                  machine and at with a UTC offset, holds exactly its kind's fields, and an entry's
                  name is <yyyyMMddTHHmmssZ>-<person id>-<4 hex>.json; all 13 kinds are produced.
-                 Control: four planted files, each with one defect, are each reported.
+                 A need is exactly { id, at }, revisedAt is null or a stamp with an offset, and a
+                 continues names a phase that has a file. Control: five planted files, each with
+                 one defect, are each reported.
       TWO        a bare remote and two clones, two machines, two people: different work on each
                  side merges with plain git pull and no conflict, and both clones show all of it.
                  Control: before one side pushes, the other is shown missing its work. One new
@@ -75,6 +77,24 @@
                  machine: -Owner and hand-over refuse at 90, and a full sequence's state.json has
                  the property paths of HEAD's wrapper's (control: a planted key is named); once the
                  change is committed that half compares the wrapper with itself, and says so.
+                 A phase's needs and revisedAt are set aside there: NEEDS owns them.
+      NEEDS      dependencies, on a per-machine project and on its own bare remote and two clones,
+                 people NA and NB; one scenario runs on both. add-phase -Needs stores { id, at },
+                 revise-phase -Needs re-dates it; a held phase is not next and status says what it
+                 waits on (control: next once the need is delivered); a DELIVERED workstream meets
+                 a need, an ABANDONED one and an abandoned phase never do, with their warning; the
+                 revised warning for a phase's scope, a workstream's title and a phase added, each
+                 cleared by re-declaring (controls: a revision before the need, a prompt path after
+                 it); revisedAt not written by a prompt path, a correction or an unchanged value;
+                 tree's needs: before owner:. Refusals at 94 and 90 write nothing (control: a valid
+                 need exits 0). Per machine, needs and revisedAt are the only paths added to HEAD's
+                 (once committed, needs alone). Shared: others: leaves a held phase out; a need
+                 follows a hand-over chain to its delivered or abandoned end (control: a hand-over
+                 in a needed workstream is no revision); after a merge, a need on an id with no file
+                 and a cycle of two needs (controls: neither before, and the missing one gone after
+                 the rest is pushed). share-progress carries a need and the revised warning
+                 (control: no revision, no warning). Control for tree: a per-machine project with no
+                 need prints what HEAD's wrapper prints. The clones' files pass LAYOUT's rules.
 
     Modes, human-invoked and not on the push path, as the other suites' comparison modes are:
       -OldRef <rev>  the wrapper at <rev>, an older copy: a state.json it wrote keeps the same
@@ -339,8 +359,8 @@ $KindFields = @{
     project    = @('schema', 'title', 'created', 'status')
     person     = @('id', 'name', 'machines')
     goal       = @('id', 'text', 'status', 'statusReason', 'statusSetAt', 'created')
-    node       = @('id', 'role', 'title', 'parent', 'goals', 'created', 'closedAt', 'abandonedReason', 'abandonedAt')
-    decl       = @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'created', 'owner', 'needs', 'continues')
+    node       = @('id', 'role', 'title', 'parent', 'goals', 'created', 'revisedAt', 'closedAt', 'abandonedReason', 'abandonedAt')
+    decl       = @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'created', 'revisedAt', 'owner', 'needs', 'continues')
     run        = @('stage', 'waitingOn', 'reviewOn', 'iterations', 'abandonedReason')
     gate       = @('gate', 'verdict', 'artifact')
     friction   = @('kind', 'detail')
@@ -400,6 +420,10 @@ function Test-ProgressFiles {
         $tpSrc = $tpObj.PSObject.Properties['source']
         if ($null -ne $tpSrc -and [string]$tpSrc.Value -ne 'export') { $tpProblems.Add("${tpRel}: 'source' is not 'export'") }
 
+        if (@('decl', 'node') -contains $tpKind) {
+            $tpRev = $tpObj.PSObject.Properties['revisedAt']
+            if ($null -ne $tpRev -and $null -ne $tpRev.Value -and [string]$tpRev.Value -notmatch $OffsetStamp) { $tpProblems.Add("${tpRel}: 'revisedAt' is neither null nor a stamp with a UTC offset") }
+        }
         $tpWant = @($KindFields[$tpKind])
         $tpMay = @()
         switch ($tpKind) {
@@ -421,8 +445,19 @@ function Test-ProgressFiles {
             'decl' {
                 $tpOwner = [string]$tpObj.owner
                 if (-not (Test-Path -LiteralPath (Join-Path $tpRoot "people\$tpOwner.json"))) { $tpProblems.Add("${tpRel}: 'owner' $tpOwner names no person file") }
-                if (@($tpObj.needs).Count -ne 0) { $tpProblems.Add("${tpRel}: 'needs' is not empty") }
-                if ($null -ne $tpObj.continues) { $tpProblems.Add("${tpRel}: 'continues' is not null") }
+                # Each need is exactly { id, at }, its at a stamp with an offset.
+                foreach ($tpNeed in @($tpObj.needs)) {
+                    $tpNeedNames = @($tpNeed.PSObject.Properties | ForEach-Object { $_.Name })
+                    if ((@($tpNeedNames | Sort-Object) -join ',') -ne 'at,id') { $tpProblems.Add("${tpRel}: a need has fields other than id and at: $($tpNeedNames -join ', ')") }
+                    elseif ([string]$tpNeed.at -notmatch $OffsetStamp) { $tpProblems.Add("${tpRel}: need $($tpNeed.id)'s 'at' has no UTC offset") }
+                }
+                # A hand-over's successor names the phase it continues, which has a file.
+                if ($null -ne $tpObj.continues) {
+                    $tpCont = [string]$tpObj.continues
+                    $tpContFile = Test-Path -LiteralPath (Join-Path $tpRoot "phases\$tpCont\phase.json")
+                    $tpContFold = @(Get-ChildItem -LiteralPath (Join-Path $tpRoot 'closed') -Filter '*.json' -ErrorAction SilentlyContinue | Where-Object { @((Read-JsonFile $_.FullName).phases | Where-Object { [string]$_.id -eq $tpCont }).Count -gt 0 }).Count -gt 0
+                    if (-not $tpContFile -and -not $tpContFold) { $tpProblems.Add("${tpRel}: 'continues' $tpCont names no phase file") }
+                }
             }
             'closed' {
                 foreach ($tpFp in @($tpObj.phases)) {
@@ -849,11 +884,14 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $plFr '20260101T000000Z-p-00aa-0003.json'), "{ $plGood, `"by`": `"p-00aa`", `"at`": `"2026-01-01T00:00:00`" }`n", $plEnc)
     [System.IO.File]::WriteAllText((Join-Path $plFr '20260101T000000Z-p-00aa-0004.json'), "{ $plGood, `"by`": `"p-00aa`", `"at`": `"2026-01-01T00:00:00+00:00`", `"extra`": 1 }`n", $plEnc)
     [System.IO.File]::WriteAllText((Join-Path $plFr '20260101T000000Z-p-00aa-0005.json'), "{ $plGood, `"by`": `"p-00aa`", `"at`": `"2026-01-01T00:00:00+00:00`" }`n", (New-Object System.Text.UTF8Encoding($true)))
+    # A declaration whose one need carries a field beside id and at.
+    $plDecl = '"id": "W1.1", "ws": "W1", "scope": "s", "actor": "agent", "runOrder": 1, "repos": [], "due": null, "promptPath": null, "created": "2026-01-01T00:00:00+00:00", "revisedAt": null, "owner": "p-00aa", "continues": null'
+    [System.IO.File]::WriteAllText((Join-Path $pl 'progress\phases\W1.1\phase.json'), "{ $plDecl, `"needs`": [ { `"id`": `"W2`", `"at`": `"2026-01-01T00:00:00+00:00`", `"extra`": 1 } ], `"by`": `"p-00aa`", `"machine`": `"M`", `"at`": `"2026-01-01T00:00:00+00:00`" }`n", $plEnc)
     $plProb = @(Test-ProgressFiles $pl)
-    $plWant = @(@('0002', "no 'by'"), @('0003', 'no UTC offset'), @('0004', 'fields its kind does not'), @('0005', 'byte-order mark'))
+    $plWant = @(@('0002', "no 'by'"), @('0003', 'no UTC offset'), @('0004', 'fields its kind does not'), @('0005', 'byte-order mark'), @('phase\.json', 'other than id and at'))
     $plHit = @($plWant | Where-Object { $plW = $_; @($plProb | Where-Object { $_ -match $plW[0] -and $_ -match [regex]::Escape($plW[1]) }).Count -gt 0 })
     $plClean = @($plProb | Where-Object { $_ -match '0001|people/' }).Count -eq 0
-    Add-Case 'LAYOUT-planted-CONTROL' (($plHit.Count -eq 4) -and $plClean) "of four planted defects $($plHit.Count) reported; the clean file and the person file reported: $(-not $plClean)"
+    Add-Case 'LAYOUT-planted-CONTROL' (($plHit.Count -eq 5) -and $plClean) "of five planted defects $($plHit.Count) reported; the clean file and the person file reported: $(-not $plClean)"
 
     # ============================================================== ORIENT ==
     # Its own bare remote and two clones, so no earlier group's state reaches it. Not added to the
@@ -1513,16 +1551,18 @@ try {
         $wPmRuns[$wSide[0]] = @{ Codes = $wpCodes.ToArray(); Paths = $wpSet; Home = $wpHome; Dir = $wpDir }
     }
     $wPmBad = @($wPmRuns['wt'].Codes | Where-Object { $_ -notmatch '=0$' })
-    $wPmA = @($wPmRuns['wt'].Paths | Where-Object { -not $wPmRuns['head'].Paths.Contains($_) })
-    $wPmB = @($wPmRuns['head'].Paths | Where-Object { -not $wPmRuns['wt'].Paths.Contains($_) })
+    # A phase's needs and a revise's revisedAt are set aside on both sides: NEEDS-machine-paths owns them.
+    $wPmAside = '^\$\.(phases|nodes)\[\]\.(revisedAt|needs)'
+    $wPmA = @($wPmRuns['wt'].Paths | Where-Object { $_ -notmatch $wPmAside -and -not $wPmRuns['head'].Paths.Contains($_) })
+    $wPmB = @($wPmRuns['head'].Paths | Where-Object { $_ -notmatch $wPmAside -and -not $wPmRuns['wt'].Paths.Contains($_) })
     $wHeadNote = if ($headSame) { ' (HEAD holds this same wrapper, so the comparison is of the wrapper with itself)' } else { '' }
-    Add-Case 'OWNER-machine-paths' (($wPmBad.Count -eq 0) -and ($wPmA.Count -eq 0) -and ($wPmB.Count -eq 0) -and ($wPmRuns['wt'].Paths.Count -gt 20)) "per machine, a full gate sequence and eight more verbs: steps not at 0 '$($wPmBad -join ',')'; paths only here '$($wPmA -join ',')'; only at HEAD '$($wPmB -join ',')'; $($wPmRuns['wt'].Paths.Count) paths$wHeadNote"
+    Add-Case 'OWNER-machine-paths' (($wPmBad.Count -eq 0) -and ($wPmA.Count -eq 0) -and ($wPmB.Count -eq 0) -and ($wPmRuns['wt'].Paths.Count -gt 20)) "per machine, a full gate sequence and eight more verbs: steps not at 0 '$($wPmBad -join ',')'; paths only here '$($wPmA -join ',')'; only at HEAD '$($wPmB -join ',')'; $($wPmRuns['wt'].Paths.Count) paths, needs and revisedAt set aside$wHeadNote"
     $wPmCopy = Read-JsonFile (Join-Path $wPmRuns['wt'].Home ".keel\projects\$(Split-Path -Leaf $wPmRuns['wt'].Dir)\state.json")
     @($wPmCopy.phases)[0] | Add-Member -NotePropertyName 'owner' -NotePropertyValue 'p-0000'
     $wPmSet2 = New-Object 'System.Collections.Generic.HashSet[string]'
     Get-JsonPaths $wPmCopy '$' $wPmSet2
-    $wPmC = @($wPmSet2 | Where-Object { -not $wPmRuns['head'].Paths.Contains($_) })
-    Add-Case 'OWNER-machine-paths-CONTROL' ((@($wPmC) -join ',') -eq '$.phases[].owner') "one key planted in a copy is named: $($wPmC -join ',')"
+    $wPmC = @($wPmSet2 | Where-Object { $_ -notmatch $wPmAside -and -not $wPmRuns['head'].Paths.Contains($_) })
+    Add-Case 'OWNER-machine-paths-CONTROL' ((@($wPmC) -join ',') -eq '$.phases[].owner') "one key planted in a copy is named, needs and revisedAt set aside: $($wPmC -join ',')"
     $wpmHome = $wPmRuns['wt'].Home; $wpmDir = $wPmRuns['wt'].Dir
     $wpmSnap = Get-WriteSnapshot $wpmDir $wpmHome
     $wpo1 = Invoke-K $wpmHome 'KSP-PM' @('add-phase', '-Path', $wpmDir, '-Phase', 'W1.3', '-Scope', 'three', '-Actor', 'agent', '-RunOrder', '3', '-Owner', 'p-0000')
@@ -1533,6 +1573,360 @@ try {
     $wpmS = Invoke-K $wpmHome 'KSP-PM' @('status', '-Path', $wpmDir)
     $wpmT = Invoke-K $wpmHome 'KSP-PM' @('tree', '-Path', $wpmDir)
     Add-Case 'OWNER-column-CONTROL' (($wpmS.Out -notmatch 'owner:') -and ($wpmT.Out -notmatch 'owner:') -and ($wpmS.Out -match '(?m)^\s+W1\.2\s+#2\s+agent\s')) "a per-machine project's status and tree print no owner: beside W1.2, which is not finished"
+
+    # =============================================================== NEEDS ==
+    # Dependencies: a phase's needs, in a per-machine project and on its own bare remote and two
+    # clones, people NA and NB. One scenario runs on both fixtures; the shared one adds hand-over
+    # chains, others:, and the two read-time checks. Uses ORIENT's helpers and its copy of HEAD's
+    # wrapper, and OWNER's Get-JsonPaths, Get-JField and Get-PhaseFile.
+    function Get-NStateFile {
+        param([string]$SfHome, [string]$SfDir)
+        return (Read-JsonFile (Join-Path $SfHome ".keel\projects\$(Split-Path -Leaf $SfDir)\state.json"))
+    }
+    function Get-NItem {
+        # A phase or a node as stored: from state.json per machine, from its file when shared.
+        param($NiFx, [string]$NiKind, [string]$NiId)
+        if ($NiFx.Shared) {
+            if ($NiKind -eq 'node') { $niF = Join-Path $NiFx.Dir "progress\nodes\$NiId.json"; if (Test-Path -LiteralPath $niF) { return (Read-JsonFile $niF) } else { return $null } }
+            return (Get-PhaseFile $NiFx.Dir $NiId 'phase.json')
+        }
+        $niState = Get-NStateFile $NiFx.Home $NiFx.Dir
+        $niList = if ($NiKind -eq 'node') { @($niState.nodes) } else { @($niState.phases) }
+        return (@($niList | Where-Object { $_.id -eq $NiId }) | Select-Object -First 1)
+    }
+    function Invoke-NK {
+        # One wrapper call on a fixture, as its person.
+        param($NkFx, [string[]]$NkArgs, [switch]$NkMustPass)
+        $nkAll = @($NkArgs[0]) + @('-Path', $NkFx.Dir) + @($NkArgs | Select-Object -Skip 1)
+        if ($NkMustPass) { return (Assert-K $NkFx.Home $NkFx.Machine $nkAll) }
+        return (Invoke-K $NkFx.Home $NkFx.Machine $nkAll)
+    }
+    function Test-NHas {
+        # Whether one line of the output matches the pattern.
+        param([string]$HsOut, [string]$HsPattern)
+        return ($HsOut -match "(?m)$HsPattern")
+    }
+
+    # ---- the per-machine fixture
+    $nmHome = New-Home 'NM'
+    $nmDir = Join-Path $scratch "permachine-needs\nm$runTag"
+    New-Repo $nmDir 'Person M'
+    $fxM = [pscustomobject]@{ Home = $nmHome; Machine = 'KSP-NM'; Dir = $nmDir; Shared = $false; Own = ''; Label = 'machine' }
+    Invoke-NK $fxM @('init-project', '-Title', 'needs per machine') -NkMustPass | Out-Null
+    Invoke-NK $fxM @('add-goal', '-Id', 'G1', '-Text', 'goal') -NkMustPass | Out-Null
+    foreach ($nw in @('W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W9')) { Invoke-NK $fxM @('add-workstream', '-Id', $nw, '-Title', "workstream $nw", '-Parent', 'root', '-Goals', 'G1') -NkMustPass | Out-Null }
+
+    # ---- the shared fixture: a bare remote, clone NA (person NA) and clone NB (person NB)
+    $nRemote = Join-Path $scratch 'nremote.git'
+    New-Item -ItemType Directory -Path $nRemote -Force | Out-Null
+    Assert-G $nRemote @('init', '-q', '--bare', '-b', 'main') | Out-Null
+    $nSlug = 'kne' + $runTag
+    $homeNA = New-Home 'NA'; $homeNB = New-Home 'NB'
+    $dirNA = Join-Path $scratch "cloneNA\$nSlug"
+    $dirNB = Join-Path $scratch "cloneNB\$nSlug"
+    New-Repo $dirNA 'Need A'
+    Assert-G $dirNA @('remote', 'add', 'origin', $nRemote) | Out-Null
+    Assert-K $homeNA 'KSP-NA' @('init-project', '-Path', $dirNA, '-Title', 'needs shared') | Out-Null
+    Assert-K $homeNA 'KSP-NA' @('add-goal', '-Path', $dirNA, '-Id', 'G1', '-Text', 'goal') | Out-Null
+    foreach ($nw in @('W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W9')) { Assert-K $homeNA 'KSP-NA' @('add-workstream', '-Path', $dirNA, '-Id', $nw, '-Title', "workstream $nw", '-Parent', 'root', '-Goals', 'G1') | Out-Null }
+    Save-Commit $dirNA 'project'
+    Assert-K $homeNA 'KSP-NA' @('share-progress', '-Path', $dirNA) | Out-Null
+    Save-Commit $dirNA 'shared'
+    Assert-G $dirNA @('push', '-q', '-u', 'origin', 'main') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $scratch 'cloneNB') -Force | Out-Null
+    Assert-G (Join-Path $scratch 'cloneNB') @('clone', '-q', $nRemote, $nSlug) | Out-Null
+    foreach ($nc in @(@('user.name', 'Need B'), @('user.email', 'suite@example.invalid'), @('pull.rebase', 'false'), @('core.autocrlf', 'false'))) { Assert-G $dirNB @('config', $nc[0], $nc[1]) | Out-Null }
+    $njb = Assert-K $homeNB 'KSP-NB' @('join', '-Path', $dirNB)
+    $nPidB = if ($njb.Out -match 'as person (p-[0-9a-f]{4}) ') { $Matches[1] } else { throw 'join on NB printed no person id.' }
+    Save-Push $dirNB 'NB joins'
+    Assert-G $dirNA @('pull', '-q', '--no-edit') | Out-Null
+    $nPidA = [string](@(Get-ChildItem -LiteralPath (Join-Path $dirNA 'progress\people') -Filter '*.json' | ForEach-Object { Read-JsonFile $_.FullName } | Where-Object { @($_.machines) -contains 'KSP-NA' })[0].id)
+    $fxS = [pscustomobject]@{ Home = $homeNA; Machine = 'KSP-NA'; Dir = $dirNA; Shared = $true; Own = ", owned by Need A \($nPidA\)"; Label = 'shared' }
+    $fxB = [pscustomobject]@{ Home = $homeNB; Machine = 'KSP-NB'; Dir = $dirNB; Shared = $true; Own = ", owned by Need B \($nPidB\)"; Label = 'shared B' }
+
+    $nStampRe = '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2})?$'
+    $nRevRe = 'which was revised after the need was declared'
+    $nRes = @{}
+    foreach ($fx in @($fxM, $fxS)) {
+        $r = @{}
+        $L = $fx.Label
+        # ---- C1: a need is stored as { id, at }; a phase added with none has no needs key (per
+        # machine) or an empty list (shared).
+        Invoke-NK $fx @('add-phase', '-Phase', 'W1.1', '-Scope', 'needed X', '-Actor', 'agent', '-RunOrder', '5') -NkMustPass | Out-Null
+        $nAdd = Invoke-NK $fx @('add-phase', '-Phase', 'W2.1', '-Scope', 'needs X', '-Actor', 'agent', '-RunOrder', '1', '-Needs', 'W1.1') -NkMustPass
+        $nY = Get-NItem $fx 'phase' 'W2.1'
+        $nX = Get-NItem $fx 'phase' 'W1.1'
+        $nYNeeds = @(Get-JField $nY 'needs')
+        $nAt1 = if ($nYNeeds.Count -eq 1) { [string]$nYNeeds[0].at } else { '' }
+        $nStoreOk = ($nYNeeds.Count -eq 1) -and ([string]$nYNeeds[0].id -ceq 'W1.1') -and ((@($nYNeeds[0].PSObject.Properties | ForEach-Object { $_.Name }) -join ',') -eq 'id,at') -and ($nAt1 -match $nStampRe)
+        $nXNoNeeds = if ($fx.Shared) { @(Get-JField $nX 'needs').Count -eq 0 } else { $null -eq $nX.PSObject.Properties['needs'] }
+        $nXNoRev = $null -eq (Get-JField $nX 'revisedAt')
+        if ($fx.Shared) { $nStoreOk = $nStoreOk -and ($nAt1 -match '[+-]\d{2}:\d{2}$') }
+        $nSayOk = $nAdd.Out -match 'needs: W1\.1\)'
+
+        # ---- C3: held; status names the needed phase as next and says what the held one waits on.
+        $s1 = Invoke-NK $fx @('status')
+        $r.held = (Test-NHas $s1.Out '^KEEL:\s+next: W1\.1 ') -and (Test-NHas $s1.Out "^KEEL:\s+W2\.1 waits on W1\.1 \(planned$($fx.Own)\)$")
+        if ($fx.Shared) {
+            Save-Push $dirNA 'held'
+            Assert-G $dirNB @('pull', '-q', '--no-edit') | Out-Null
+            $s1b = Invoke-NK $fxB @('status')
+            $r.others = Test-NHas $s1b.Out "^KEEL:\s+others: Need A \($nPidA\): W1\.1$"
+        }
+
+        # ---- D26 and C4: a prompt path is no revision; a scope change is, and re-declaring clears it.
+        Start-Sleep -Milliseconds 1200
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W1.1', '-PromptPath', 'plan/p.md') -NkMustPass | Out-Null
+        $s2 = Invoke-NK $fx @('status')
+        $nRevAfterPrompt = Get-JField (Get-NItem $fx 'phase' 'W1.1') 'revisedAt'
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W1.1', '-Scope', 'needed X') -NkMustPass | Out-Null
+        $nRevAfterSame = Get-JField (Get-NItem $fx 'phase' 'W1.1') 'revisedAt'
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W1.1', '-Scope', 'needed X, changed') -NkMustPass | Out-Null
+        $nRevAfterScope = [string](Get-JField (Get-NItem $fx 'phase' 'W1.1') 'revisedAt')
+        $s3 = Invoke-NK $fx @('status')
+        $r.nostamp = ($null -eq $nRevAfterPrompt) -and ($null -eq $nRevAfterSame) -and ($nRevAfterScope -match $nStampRe)
+        $r.revPrompt = -not (Test-NHas $s2.Out $nRevRe)
+        $r.revPhase = Test-NHas $s3.Out ("^KEEL:\s+WARNING: W2\.1 needs W1\.1, $nRevRe \(" + [regex]::Escape($nAt1) + '\)\. Check the need still holds, then re-declare it with revise-phase -Needs\.$')
+        $nRd = Invoke-NK $fx @('revise-phase', '-Phase', 'W2.1', '-Needs', 'W1.1') -NkMustPass
+        $nAt2 = [string]@(Get-JField (Get-NItem $fx 'phase' 'W2.1') 'needs')[0].at
+        $s4 = Invoke-NK $fx @('status')
+        $r.revPhaseClear = (-not (Test-NHas $s4.Out $nRevRe)) -and (Test-NHas $s4.Out '^KEEL:\s+W2\.1 waits on W1\.1 ')
+        $r.store = $nStoreOk -and $nXNoNeeds -and $nXNoRev -and $nSayOk -and ([DateTimeOffset]::Parse($nAt2) -gt [DateTimeOffset]::Parse($nAt1)) -and ($nRd.Out -match 'needs: W1\.1')
+
+        # ---- C3 control: once the needed phase is delivered, the held one is next.
+        Invoke-NK $fx @('set-stage', '-Phase', 'W1.1', '-Stage', 'delivered') -NkMustPass | Out-Null
+        $s5 = Invoke-NK $fx @('status')
+        $r.heldCtl = (Test-NHas $s5.Out '^KEEL:\s+next: W2\.1 ') -and -not (Test-NHas $s5.Out 'W2\.1 waits on')
+        $nRevBeforeCorr = Get-JField (Get-NItem $fx 'phase' 'W1.1') 'revisedAt'
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W1.1', '-Correction', 'a note') -NkMustPass | Out-Null
+        $r.nostamp = $r.nostamp -and ((Get-JField (Get-NItem $fx 'phase' 'W1.1') 'revisedAt') -eq $nRevBeforeCorr)
+
+        # ---- C3 met and never met: a DELIVERED workstream meets; an ABANDONED one and an
+        # abandoned phase never do, and a phase held so (run order 0) is not named next.
+        Invoke-NK $fx @('add-phase', '-Phase', 'W3.1', '-Scope', 'w3', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('set-stage', '-Phase', 'W3.1', '-Stage', 'delivered') -NkMustPass | Out-Null
+        Invoke-NK $fx @('close', '-Ws', 'W3') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.2', '-Scope', 'needs W3', '-Actor', 'agent', '-RunOrder', '2', '-Needs', 'W3') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W4.1', '-Scope', 'w4', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.3', '-Scope', 'needs W4', '-Actor', 'agent', '-RunOrder', '3', '-Needs', 'W4') -NkMustPass | Out-Null
+        Invoke-NK $fx @('abandon', '-Phase', 'W4.1', '-Detail', 'not needed') -NkMustPass | Out-Null
+        Invoke-NK $fx @('abandon', '-Ws', 'W4', '-Detail', 'not needed') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W5.1', '-Scope', 'w5', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.4', '-Scope', 'needs W5.1', '-Actor', 'agent', '-RunOrder', '0', '-Needs', 'W5.1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('abandon', '-Phase', 'W5.1', '-Detail', 'dropped') -NkMustPass | Out-Null
+        $s6 = Invoke-NK $fx @('status')
+        $nMet = -not (Test-NHas $s6.Out 'W2\.2 (waits on|needs)')
+        $nNeverWs = Test-NHas $s6.Out '^KEEL:\s+WARNING: W2\.3 needs workstream W4, which was abandoned, so the need can never be met\. Re-declare W2\.3''s needs without it: revise-phase -Phase W2\.3 -Needs none\.$'
+        $nNeverPh = Test-NHas $s6.Out '^KEEL:\s+WARNING: W2\.4 needs W5\.1, which was abandoned, so the need can never be met\. Re-declare W2\.4''s needs without it: revise-phase -Phase W2\.4 -Needs none\.$'
+        $nNotNext = Test-NHas $s6.Out '^KEEL:\s+next: W2\.1 '
+        $r.metNever = $nMet -and $nNeverWs -and $nNeverPh -and $nNotNext
+        $r.metNeverInfo = "DELIVERED workstream met: $nMet; ABANDONED workstream never: $nNeverWs; abandoned phase never: $nNeverPh; W2.4 at order 0 not next (W2.1 is): $nNotNext"
+
+        # ---- C4: a needed workstream revised, and a phase added to a needed workstream.
+        Invoke-NK $fx @('add-phase', '-Phase', 'W6.1', '-Scope', 'w6', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.5', '-Scope', 'needs W6', '-Actor', 'agent', '-RunOrder', '5', '-Needs', 'W6') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W7.1', '-Scope', 'w7', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.6', '-Scope', 'needs W7', '-Actor', 'agent', '-RunOrder', '6', '-Needs', 'W7') -NkMustPass | Out-Null
+        # Control: revised before the need was declared.
+        Invoke-NK $fx @('add-phase', '-Phase', 'W8.1', '-Scope', 'w8', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W8.1', '-Scope', 'w8 early') -NkMustPass | Out-Null
+        Start-Sleep -Milliseconds 1200
+        Invoke-NK $fx @('add-phase', '-Phase', 'W2.7', '-Scope', 'needs W8.1 and W6', '-Actor', 'agent', '-RunOrder', '7', '-Needs', 'W8.1,W6') -NkMustPass | Out-Null
+        $nRevW6Before = Get-JField (Get-NItem $fx 'node' 'W6') 'revisedAt'
+        # Stamps are to the second and a revision counts only when later than the need, so the
+        # retitle below must land in a later second than W2.7's need.
+        Start-Sleep -Milliseconds 1200
+        Invoke-NK $fx @('revise-workstream', '-Id', 'W6', '-Title', 'workstream W6 renamed') -NkMustPass | Out-Null
+        Invoke-NK $fx @('add-phase', '-Phase', 'W7.2', '-Scope', 'w7 more', '-Actor', 'agent', '-RunOrder', '2') -NkMustPass | Out-Null
+        $nRevW6 = [string](Get-JField (Get-NItem $fx 'node' 'W6') 'revisedAt')
+        Invoke-NK $fx @('revise-workstream', '-Id', 'W6', '-Title', 'workstream W6 renamed') -NkMustPass | Out-Null
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W8.1', '-Scope', 'w8 early') -NkMustPass | Out-Null
+        $r.nostamp = $r.nostamp -and ($null -eq $nRevW6Before) -and ($nRevW6 -match $nStampRe) -and ([string](Get-JField (Get-NItem $fx 'node' 'W6') 'revisedAt') -eq $nRevW6)
+        $s7 = Invoke-NK $fx @('status')
+        $r.revWs = Test-NHas $s7.Out "^KEEL:\s+WARNING: W2\.5 needs W6, $nRevRe \("
+        $r.revAdded = Test-NHas $s7.Out "^KEEL:\s+WARNING: W2\.6 needs W7, $nRevRe \("
+        $nCtlNone = (-not (Test-NHas $s7.Out "W2\.7 needs W8\.1, $nRevRe")) -and (Test-NHas $s7.Out '^KEEL:\s+W2\.7 waits on W8\.1 ')
+        # W2.7 also needs W6, revised after W2.7's need: named for W6 only.
+        $nCtlOther = Test-NHas $s7.Out "^KEEL:\s+WARNING: W2\.7 needs W6, $nRevRe \("
+        $r.revCtl = $nCtlNone -and $nCtlOther
+        $r.revCtlInfo = "no warning for W8.1, revised before the need: $nCtlNone; W2.7's other need, W6, retitled after it, still warned: $nCtlOther"
+        $r.wsWaits = Test-NHas $s7.Out "^KEEL:\s+W2\.5 waits on W6 \(workstream PLANNED; open: W6\.1 planned$($fx.Own)\)$"
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W2.5', '-Needs', 'W6') -NkMustPass | Out-Null
+        Invoke-NK $fx @('revise-phase', '-Phase', 'W2.6', '-Needs', 'W7') -NkMustPass | Out-Null
+        $s8 = Invoke-NK $fx @('status')
+        $r.revWsClear = (-not (Test-NHas $s8.Out "W2\.5 needs W6, $nRevRe")) -and (-not (Test-NHas $s8.Out "W2\.6 needs W7, $nRevRe"))
+
+        # ---- C10: tree names each phase's needs in declared order, before the owner.
+        $t8 = Invoke-NK $fx @('tree')
+        $nOwnT = if ($fx.Shared) { "  owner: Need A \($nPidA\)" } else { '' }
+        $r.tree = (Test-NHas $t8.Out "W2\.7 \[phase\] needs W8\.1 and W6  actor:agent  planned  needs: W8\.1, W6$nOwnT\s*$") -and (Test-NHas $t8.Out "W2\.1 \[phase\] needs X  actor:agent  planned  needs: W1\.1$nOwnT\s*$") -and (Test-NHas $t8.Out 'W8\.1 \[phase\] w8 early  actor:agent  planned(  owner: [^\r\n]*)?\s*$') -and -not (Test-NHas $t8.Out 'W8\.1 \[phase\].*needs:')
+        $nRes[$fx.Label] = $r
+    }
+
+    foreach ($nl in @('machine', 'shared')) {
+        $r = $nRes[$nl]
+        Add-Case "NEEDS-store-$nl" $r.store "add-phase -Needs stores one { id, at } need, a phase added without carries no needs and no revisedAt, and revise-phase -Needs re-dates it later: $($r.store)"
+        Add-Case "NEEDS-held-$nl" $r.held "a held phase at the lowest run order is not next and status says what it waits on, with its stage$(if ($nl -eq 'shared') { ' and owner' }): $($r.held)"
+        Add-Case "NEEDS-held-$nl-CONTROL" $r.heldCtl "once the needed phase is delivered the held one is next and no waits on line remains: $($r.heldCtl)"
+        Add-Case "NEEDS-met-never-$nl" $r.metNever $r.metNeverInfo
+        Add-Case "NEEDS-revised-phase-$nl" ($r.revPhase -and $r.revPhaseClear) "the needed phase's scope revised after the need prints the warning naming the need's at: $($r.revPhase); re-declaring clears it: $($r.revPhaseClear)"
+        Add-Case "NEEDS-revised-ws-$nl" ($r.revWs -and $r.revAdded -and $r.revWsClear -and $r.wsWaits) "a needed workstream retitled: $($r.revWs); a phase added to a needed workstream: $($r.revAdded); both cleared by re-declaring: $($r.revWsClear); the waits on line names the workstream's open phases: $($r.wsWaits)"
+        Add-Case "NEEDS-revised-$nl-CONTROL" ($r.revCtl -and $r.revPrompt) "$($r.revCtlInfo); a prompt path registered after the need prints none: $($r.revPrompt)"
+        Add-Case "NEEDS-nostamp-$nl" $r.nostamp "revisedAt is not written by a prompt path, a scope set to its current text, a correction or a title set to its current text, and is by a real scope or title change: $($r.nostamp)"
+        Add-Case "NEEDS-tree-$nl" $r.tree "tree prints needs: in declared order$(if ($nl -eq 'shared') { ', before owner:' }), and none on a phase with no needs: $($r.tree)"
+    }
+    Add-Case 'NEEDS-others-shared' $nRes['shared'].others "another person's others: line names the needed phase, not the held one at a lower run order: $($nRes['shared'].others)"
+
+    # ---- C2: refusals, per machine, each writing nothing.
+    Invoke-NK $fxM @('add-phase', '-Phase', 'W9.1', '-Scope', 'w9', '-Actor', 'agent', '-RunOrder', '1', '-Needs', 'W1') -NkMustPass | Out-Null
+    $nRefuse = @(
+        @('unknown-phase', 94, @('add-phase', '-Phase', 'W9.2', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W1.9'), 'names no phase'),
+        @('unknown-ws', 94, @('add-phase', '-Phase', 'W2.9', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W1,W0'), 'names no workstream'),
+        @('malformed', 90, @('add-phase', '-Phase', 'W2.9', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'E1'), 'not a phase or workstream id'),
+        @('itself', 90, @('add-phase', '-Phase', 'W2.9', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W2.9'), 'cannot need itself'),
+        @('own-ws', 90, @('add-phase', '-Phase', 'W2.9', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W2'), 'its own workstream'),
+        @('phase-cycle', 90, @('revise-phase', '-Phase', 'W8.1', '-Needs', 'W2.7'), 'cycle of needs: W8\.1 -> W2\.7 -> W8\.1'),
+        @('ws-cycle', 90, @('add-phase', '-Phase', 'W1.4', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '4', '-Needs', 'W9.1'), 'cycle of needs: W1\.4 -> W9\.1 -> W1\.4')
+    )
+    # unknown-ws: W1 exists and the unknown id is the second, so the whole list is read.
+    foreach ($nrf in $nRefuse) {
+        $nrSnap = Get-WriteSnapshot $nmDir $nmHome
+        $nrRes = Invoke-NK $fxM $nrf[2]
+        $nrSame = (Get-WriteSnapshot $nmDir $nmHome) -eq $nrSnap
+        Add-Case "NEEDS-refuse-$($nrf[0])" (($nrRes.Code -eq $nrf[1]) -and $nrSame -and ($nrRes.Err -match $nrf[3])) "exit $($nrRes.Code) (want $($nrf[1])), message names it: $($nrRes.Err -match $nrf[3]), wrote nothing: $nrSame"
+    }
+    $nsSnap = Get-WriteSnapshot $dirNA $homeNA
+    $nsRes = Invoke-NK $fxS @('add-phase', '-Phase', 'W9.2', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W1.9')
+    $nsSame = (Get-WriteSnapshot $dirNA $homeNA) -eq $nsSnap
+    Add-Case 'NEEDS-refuse-unknown-shared' (($nsRes.Code -eq 94) -and $nsSame -and ($nsRes.Err -match 'pull first')) "exit $($nsRes.Code), says to pull first: $($nsRes.Err -match 'pull first'), wrote nothing: $nsSame"
+    $nrCtl = Invoke-NK $fxM @('add-phase', '-Phase', 'W9.2', '-Scope', 'r', '-Actor', 'agent', '-RunOrder', '9', '-Needs', 'W1.1')
+    Add-Case 'NEEDS-refuse-CONTROL' ($nrCtl.Code -eq 0) "a need on a phase that exists, from the same add-phase, exits $($nrCtl.Code)"
+
+    # ---- C1 control: per machine, needs and revisedAt are the only paths this wrapper adds to
+    # what HEAD's writes, for one sequence run by each (HEAD's without -Needs).
+    $nPm = @{}
+    foreach ($nSide in @(@('wt', $wtWrapper), @('head', $headWrapper))) {
+        $npHome = New-Home "NP$($nSide[0])"
+        $npDir = Join-Path $scratch "permachine-needs-paths\np$($nSide[0])$runTag"
+        New-Repo $npDir 'Person P'
+        $npNeeds = if ($nSide[0] -eq 'wt') { @('-Needs', 'W1.1') } else { @() }
+        $npCodes = New-Object System.Collections.Generic.List[string]
+        foreach ($nps in @(@('init-project', '-Title', 'paths'), @('add-goal', '-Id', 'G1', '-Text', 'goal'), @('add-workstream', '-Id', 'W1', '-Title', 'one', '-Parent', 'root', '-Goals', 'G1'),
+                           @('add-workstream', '-Id', 'W2', '-Title', 'two', '-Parent', 'root', '-Goals', 'G1'), @('add-phase', '-Phase', 'W1.1', '-Scope', 'one', '-Actor', 'agent', '-RunOrder', '1'),
+                           (@('add-phase', '-Phase', 'W2.1', '-Scope', 'two', '-Actor', 'agent', '-RunOrder', '1') + $npNeeds), (@('revise-phase', '-Phase', 'W2.1', '-Scope', 'two again') + $npNeeds),
+                           @('revise-workstream', '-Id', 'W1', '-Title', 'one renamed'))) {
+            $npCodes.Add("$($nps[0])=$((Invoke-K $npHome 'KSP-NP' (@($nps[0]) + @('-Path', $npDir) + @($nps | Select-Object -Skip 1)) $nSide[1]).Code)")
+        }
+        $npSet = New-Object 'System.Collections.Generic.HashSet[string]'
+        Get-JsonPaths (Get-NStateFile $npHome $npDir) '$' $npSet
+        $nPm[$nSide[0]] = @{ Codes = $npCodes.ToArray(); Paths = $npSet }
+    }
+    $npBad = @($nPm['wt'].Codes + $nPm['head'].Codes | Where-Object { $_ -notmatch '=0$' })
+    $npA = @($nPm['wt'].Paths | Where-Object { -not $nPm['head'].Paths.Contains($_) } | Sort-Object)
+    $npB = @($nPm['head'].Paths | Where-Object { -not $nPm['wt'].Paths.Contains($_) })
+    # Once committed, HEAD's wrapper stamps revisedAt too, so only the needs, given to this side alone, differ.
+    $npWant = if ($headSame) { '$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id' } else { '$.nodes[].revisedAt,$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id,$.phases[].revisedAt' }
+    $npNote = if ($headSame) { ' (HEAD holds this same wrapper, so the comparison is of the wrapper with itself)' } else { '' }
+    Add-Case 'NEEDS-machine-paths' (($npBad.Count -eq 0) -and (($npA -join ',') -eq $npWant) -and ($npB.Count -eq 0)) "steps not at 0 '$($npBad -join ',')'; paths only here '$($npA -join ',')'; only at HEAD '$($npB -join ',')'$npNote"
+
+    # ---- shared only: hand-over chains. A need on a phase handed over follows its successor;
+    # a hand-over in a needed workstream is no revision of it.
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W9.1', '-Scope', 'w9', '-Actor', 'agent', '-RunOrder', '1') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('set-stage', '-Phase', 'W9.1', '-Stage', 'grounding') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W2.8', '-Scope', 'needs W9.1', '-Actor', 'agent', '-RunOrder', '8', '-Needs', 'W9.1') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W1.2', '-Scope', 'needs W9', '-Actor', 'agent', '-RunOrder', '6', '-Needs', 'W9') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W8.2', '-Scope', 'w8 two', '-Actor', 'agent', '-RunOrder', '2') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('set-stage', '-Phase', 'W8.2', '-Stage', 'grounding') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W1.3', '-Scope', 'needs W8.2', '-Actor', 'agent', '-RunOrder', '7', '-Needs', 'W8.2') -NkMustPass | Out-Null
+    Start-Sleep -Milliseconds 1200
+    Invoke-NK $fxS @('hand-over', '-Phase', 'W9.1', '-To', $nPidB, '-Detail', 'B takes it') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('hand-over', '-Phase', 'W8.2', '-To', $nPidB, '-Detail', 'B takes it') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('abandon', '-Phase', 'W8.2b', '-Detail', 'not needed after all') -NkMustPass | Out-Null
+    $nh1 = Invoke-NK $fxS @('status')
+    $nChain = Test-NHas $nh1.Out "^KEEL:\s+W2\.8 waits on W9\.1, handed over to W9\.1b \(planned$($fxB.Own)\)$"
+    $nChainNever = Test-NHas $nh1.Out '^KEEL:\s+WARNING: W1\.3 needs W8\.2, handed over to W8\.2b, which was abandoned, so the need can never be met\.'
+    $nChainNoRev = (-not (Test-NHas $nh1.Out "W1\.2 needs W9, $nRevRe")) -and (Test-NHas $nh1.Out '^KEEL:\s+W1\.2 waits on W9 \(workstream PLANNED; open: W9\.1b planned')
+    Save-Push $dirNA 'hand-overs'
+    Assert-G $dirNB @('pull', '-q', '--no-edit') | Out-Null
+    Invoke-NK $fxB @('set-stage', '-Phase', 'W9.1b', '-Stage', 'delivered') -NkMustPass | Out-Null
+    Save-Push $dirNB 'W9.1b delivered'
+    Assert-G $dirNA @('pull', '-q', '--no-edit') | Out-Null
+    $nh2 = Invoke-NK $fxS @('status')
+    $nChainMet = -not (Test-NHas $nh2.Out 'W2\.8 waits on')
+    Add-Case 'NEEDS-chain-shared' ($nChain -and $nChainMet -and $nChainNever) "a need on a handed-over phase waits on its successor, named with its owner: $nChain; met once the successor is delivered: $nChainMet; a chain ending in an abandoned successor never meets: $nChainNever"
+    Add-Case 'NEEDS-chain-shared-CONTROL' $nChainNoRev "a hand-over in a needed workstream after the need prints no revised warning, and the waits on line names the successor: $nChainNoRev"
+
+    # ---- C5: after a merge, a need on an id with no file, and a cycle of two needs each valid alone.
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W6.2', '-Scope', 'w6 two', '-Actor', 'agent', '-RunOrder', '2') -NkMustPass | Out-Null
+    Invoke-NK $fxS @('add-phase', '-Phase', 'W1.5', '-Scope', 'needs W6.2', '-Actor', 'agent', '-RunOrder', '8', '-Needs', 'W6.2') -NkMustPass | Out-Null
+    $nmA0 = Get-OrBoth $homeNA 'KSP-NA' $dirNA
+    Save-Part $dirNA @('progress/phases/W1.5') 'W1.5 only'
+    Assert-G $dirNB @('pull', '-q', '--no-edit') | Out-Null
+    $nmB1 = Get-OrBoth $homeNB 'KSP-NB' $dirNB
+    $nMissRe = 'WARNING: after a merge, phase W1\.5 needs W6\.2, which has no file under progress/phases/ or progress/closed/\.'
+    $nMiss = (Test-NHas $nmB1.S $nMissRe) -and (Test-NHas $nmB1.T $nMissRe)
+    $nMissPre = -not (Test-NHas ($nmA0.S + "`n" + $nmA0.T) 'after a merge')
+    Save-Push $dirNA 'the rest'
+    Assert-G $dirNB @('pull', '-q', '--no-edit') | Out-Null
+    $nmB2 = Get-OrBoth $homeNB 'KSP-NB' $dirNB
+    $nMissGone = -not (Test-NHas ($nmB2.S + "`n" + $nmB2.T) 'W1\.5 needs W6\.2, which has no file')
+    Invoke-NK $fxS @('revise-phase', '-Phase', 'W7.1', '-Needs', 'W6.2') -NkMustPass | Out-Null
+    Invoke-NK $fxB @('revise-phase', '-Phase', 'W6.2', '-Needs', 'W7.1') -NkMustPass | Out-Null
+    $nmA3 = Get-OrBoth $homeNA 'KSP-NA' $dirNA
+    $nmB3 = Get-OrBoth $homeNB 'KSP-NB' $dirNB
+    $nCycPre = -not (Test-NHas ($nmA3.S + $nmA3.T + $nmB3.S + $nmB3.T) 'in a cycle')
+    Sync-Pair $dirNA $dirNB 'two needs'
+    $nmA4 = Get-OrBoth $homeNA 'KSP-NA' $dirNA
+    $nmB4 = Get-OrBoth $homeNB 'KSP-NB' $dirNB
+    $nCycRe = 'WARNING: after a merge, phases W6\.2 and W7\.1 need each other in a cycle, so neither can be named as next\. Re-declare one''s needs with revise-phase -Phase W6\.2 -Needs'
+    $nCyc = (Test-NHas $nmA4.S $nCycRe) -and (Test-NHas $nmA4.T $nCycRe) -and (Test-NHas $nmB4.S $nCycRe) -and (Test-NHas $nmB4.T $nCycRe)
+    Add-Case 'NEEDS-merge-missing' $nMiss "a need on a phase whose files were not committed: status and tree on the other clone name it: $nMiss"
+    Add-Case 'NEEDS-merge-cycle' $nCyc "two needs each valid alone, merged into a cycle: status and tree on both clones name both phases: $nCyc"
+    Add-Case 'NEEDS-merge-CONTROL' ($nMissPre -and $nMissGone -and $nCycPre) "the writer's own copy before the partial commit prints no merge line: $nMissPre; the missing line is gone once the rest is pushed: $nMissGone; before the merge neither clone prints a cycle: $nCycPre"
+
+    # ---- C6: a need and a revision made per machine are carried by share-progress.
+    $nEx = @{}
+    foreach ($neSide in @(@('rev', $true), @('norev', $false))) {
+        $neHome = New-Home "NE$($neSide[0])"
+        $neDir = Join-Path $scratch "needs-export\ne$($neSide[0])$runTag"
+        New-Repo $neDir 'Person E'
+        $fxE = [pscustomobject]@{ Home = $neHome; Machine = 'KSP-NE'; Dir = $neDir; Shared = $false; Own = ''; Label = 'export' }
+        foreach ($nes in @(@('init-project', '-Title', 'export needs'), @('add-goal', '-Id', 'G1', '-Text', 'goal'), @('add-workstream', '-Id', 'W1', '-Title', 'one', '-Parent', 'root', '-Goals', 'G1'),
+                           @('add-workstream', '-Id', 'W2', '-Title', 'two', '-Parent', 'root', '-Goals', 'G1'), @('add-phase', '-Phase', 'W1.1', '-Scope', 'needed', '-Actor', 'agent', '-RunOrder', '2'),
+                           @('add-phase', '-Phase', 'W2.1', '-Scope', 'needs W1.1', '-Actor', 'agent', '-RunOrder', '1', '-Needs', 'W1.1'))) {
+            Invoke-NK $fxE $nes -NkMustPass | Out-Null
+        }
+        if ($neSide[1]) { Start-Sleep -Milliseconds 1200; Invoke-NK $fxE @('revise-phase', '-Phase', 'W1.1', '-Scope', 'needed, changed') -NkMustPass | Out-Null }
+        $neAt = [string]@(@((Get-NStateFile $neHome $neDir).phases) | Where-Object { $_.id -eq 'W2.1' })[0].needs[0].at
+        $neBefore = Invoke-NK $fxE @('status')
+        Save-Commit $neDir 'project'
+        Invoke-NK $fxE @('share-progress') -NkMustPass | Out-Null
+        $neAfter = Invoke-NK $fxE @('status')
+        $neDecl = Get-PhaseFile $neDir 'W2.1' 'phase.json'
+        $neNeed = @(Get-JField $neDecl 'needs')
+        $neCarried = ($neNeed.Count -eq 1) -and ([string]$neNeed[0].id -ceq 'W1.1') -and ([DateTimeOffset]::Parse([string]$neNeed[0].at) -eq [DateTimeOffset]::new([datetime]::ParseExact($neAt, 'yyyy-MM-ddTHH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)))
+        $nEx[$neSide[0]] = @{ Before = (Test-NHas $neBefore.Out "W2\.1 needs W1\.1, $nRevRe"); After = (Test-NHas $neAfter.Out "W2\.1 needs W1\.1, $nRevRe"); Carried = $neCarried }
+    }
+    Add-Case 'NEEDS-export' ($nEx['rev'].Before -and $nEx['rev'].After -and $nEx['rev'].Carried) "per machine, a need then a revision of the needed phase: the warning before share-progress: $($nEx['rev'].Before), after it: $($nEx['rev'].After); phase.json carries the need with its at, the same instant: $($nEx['rev'].Carried)"
+    Add-Case 'NEEDS-export-CONTROL' ((-not $nEx['norev'].Before) -and (-not $nEx['norev'].After) -and $nEx['norev'].Carried) "with no revision, no warning before: $(-not $nEx['norev'].Before), nor after: $(-not $nEx['norev'].After); the need carried: $($nEx['norev'].Carried)"
+
+    # ---- C10 control: a per-machine project with no need prints status and tree as HEAD's does.
+    $ntSame = $true
+    $ntDiff = New-Object System.Collections.Generic.List[string]
+    foreach ($ntV in @('status', 'tree')) {
+        $ntW = Invoke-K $homeN 'KSP-N' @($ntV, '-Path', $dirN)
+        $ntH = Invoke-K $homeN 'KSP-N' @($ntV, '-Path', $dirN) $headWrapper
+        if ($ntW.Out -cne $ntH.Out -or $ntW.Code -ne $ntH.Code) {
+            $ntSame = $false
+            $ntDiff.Add("$ntV exit $($ntW.Code)/$($ntH.Code): $(@(Compare-View $ntW.Lines $ntH.Lines | Select-Object -First 4) -join ' | ')")
+        }
+    }
+    Add-Case 'NEEDS-tree-CONTROL' $ntSame "a per-machine project with no need declared prints status and tree as HEAD's wrapper does: $ntSame$npNote$(if ($ntDiff.Count) { '; ' + ($ntDiff -join '; ') })"
+
+    # ---- the layout of every file the shared fixture wrote, needs, revisedAt and successors included.
+    $nLay = New-Object System.Collections.Generic.List[string]
+    foreach ($nld in @($dirNA, $dirNB)) { foreach ($nlp in @(Test-ProgressFiles $nld)) { $nLay.Add($nlp) } }
+    Add-Case 'NEEDS-layout' ($nLay.Count -eq 0) "problems in the two clones' progress files: $($nLay.Count)$(if ($nLay.Count) { ': ' + (@($nLay | Select-Object -First 5) -join ' / ') })"
 
     # ============================================================== modes ==
     if ($OldRef) {

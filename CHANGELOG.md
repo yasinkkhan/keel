@@ -4,6 +4,60 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.81.0 - 2026-11-12
+
+- **`keel-workflow` 0.73.0: a phase can declare the work it needs delivered first, and `status`
+  holds it back until then.** Without this, a phase that cannot start before another person's work
+  lands was named as next anyway, and nothing said what it was waiting for. It works in every
+  project, shared or kept on one machine. Keel records a need someone declared and never guesses
+  one from a scope or a run order.
+  - **Declaring needs.** `add-phase -Needs <ids>` and `revise-phase -Needs <ids>` take phase ids
+    (`W4.2`) and whole workstream ids (`W4`), comma-separated; `revise-phase -Needs none` clears
+    them. Each need is stored with the instant it was declared, and `revise-phase -Needs` replaces
+    the list whole, dating each need afresh. Refused, writing nothing: an id that names no phase or
+    workstream on this copy (exit 94; in a shared project the message says to pull first), an id
+    of neither form, a phase needing itself or its own workstream, and a need that would close a
+    cycle, whose path the message prints (each exit 90). `-Needs` cannot be combined with
+    `-Correction`.
+  - **When a need is met.** A phase need is met once that phase is delivered, or, if it was handed
+    over, once the last phase of its hand-over chain is; a workstream need once the workstream is
+    `DELIVERED`. An abandoned phase, an `ABANDONED` workstream or a chain ending in an abandoned
+    successor never meets it.
+  - **`status`.** A phase with a need not met is never named as next, for this person or on
+    `others:`. For each such need it prints `<phase> waits on <id> (<stage>)`, with the owner in a
+    shared project, or for a workstream its open phases. Two lines start `WARNING:` and so reach a
+    resuming session: needed work that was abandoned (the need can never be met; the line says how
+    to re-declare without it), and needed work revised after the need was declared (check the need
+    still holds, then re-declare it). When nothing is runnable because of a need, the `next:` line
+    says so.
+  - **What counts as a revision.** A phase is revised when `revise-phase` changes its scope, actor,
+    repos, due date, run order, owner or needs, and a workstream when `revise-workstream` changes
+    its title or goals or a phase is added to it, not counting a hand-over's successor. Registering
+    a prompt path, adding a correction, or setting a field to the value it already holds is not a
+    revision: every phase after a workstream's first has its prompt registered when its predecessor
+    delivers, and counting that would raise the warning on routine bookkeeping. Each real change is
+    stamped `revisedAt`.
+  - **What is stored.** A project kept on one machine gains `needs` on a phase only where one is
+    declared, and `revisedAt` on a phase or workstream only when a revise changes one of the fields
+    above. A shared project's `phase.json` and node files gain a `revisedAt` field, null until such
+    a change; a file is not rewritten just because the field is new. `share-progress` carries both.
+    **An older keel ignores both fields**: measured on such a state, the 0.80.0 wrapper names the
+    held phase as next and prints no `waits on` line.
+  - **`tree`** ends the line of a phase with needs with `needs: <ids>`, in declared order, before
+    any `owner:`.
+  - **Two more checks after a merge**, printed by `status`, `tree` and every write in a shared
+    project: a need on an id with no file under `progress/`, and needs that form a cycle out of two
+    writes each valid alone, naming every phase in it.
+  - Skills: `keel-plan-workstream` and `keel-plan-epic`, while grounding, list the workstreams
+    still open, those serving the same goal first and whose they are in a shared project, and ask
+    whether the new work needs any; each need goes on the first phase that needs it, and an epic's
+    "blocked by" becomes that need when the blocked workstream's phases are planned.
+    `keel-orchestrator` says what a `waits on` line, the revised warning, the abandoned warning and
+    the two new merge checks mean, and what to do about each.
+- **`scripts/test-shared-progress.ps1`** gains a group for dependencies, on a project kept on one
+  machine and on its own bare remote and two clones. It now runs 156 cases and took about nineteen
+  minutes in one run, so `check-suite-docs.ps1 -Strict` and a push take that much longer.
+
 ## marketplace 0.80.0 - 2026-11-12
 
 - **`keel-workflow` 0.72.0: in a project that shares its progress, each phase has one owner, and

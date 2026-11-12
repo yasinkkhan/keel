@@ -102,6 +102,9 @@ param(
     # hands a phase to. A project that shares its progress only.
     [string]$Owner,
     [string]$To,
+    # The phases (W<n>.<p>) and workstreams (W<n>) a phase needs delivered first, comma-separated,
+    # for 'add-phase' and 'revise-phase'; 'none' declares no needs.
+    [string]$Needs,
     [string]$Repo,
     [string]$Name,
     [string]$RepoPath,
@@ -768,7 +771,7 @@ function New-SpForm {
         'project'     { @('title', 'created', 'status') }
         'goal'        { @('id', 'text', 'status', 'statusReason', 'statusSetAt', 'created') }
         'node'        { @('id', 'role', 'title', 'parent', 'goals') }
-        'decl'        { @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'created', 'owner', 'needs', 'continues') }
+        'decl'        { @('id', 'ws', 'scope', 'actor', 'runOrder', 'repos', 'due', 'promptPath', 'created', 'revisedAt', 'owner', 'needs', 'continues') }
         'run'         { @('stage', 'waitingOn', 'reviewOn', 'iterations', 'abandonedReason') }
         'friction'    { @('kind', 'detail') }
         'questions'   { @('question', 'answer', 'resolvedBy') }
@@ -791,7 +794,7 @@ function New-SpForm {
     if ($SpKind -eq 'node') {
         if ([string](Get-Prop $SpObj 'role' '') -eq 'epic') { $spF['groups'] = Get-Prop $SpObj 'groups' $null }
         else { $spF['status'] = Get-Prop $SpObj 'status' $null }
-        foreach ($spN in @('created', 'closedAt', 'abandonedReason', 'abandonedAt')) { $spF[$spN] = Get-Prop $SpObj $spN $null }
+        foreach ($spN in @('created', 'revisedAt', 'closedAt', 'abandonedReason', 'abandonedAt')) { $spF[$spN] = Get-Prop $SpObj $spN $null }
     }
     if ($SpKind -eq 'run' -and [string](Get-Prop $SpObj 'stage' '') -eq 'handed-over') {
         $spF['handedOverTo'] = Get-Prop $SpObj 'handedOverTo' $null
@@ -953,7 +956,7 @@ function New-SpMemPhase {
     $spP['corrections'] = @()
     $spP['capLifts'] = @()
     $spP['abandonedReason'] = Get-Prop $SpRun 'abandonedReason' $null
-    foreach ($spN in @('owner', 'needs', 'continues')) { $spP[$spN] = Get-Prop $SpDecl $spN $null }
+    foreach ($spN in @('revisedAt', 'owner', 'needs', 'continues')) { $spP[$spN] = Get-Prop $SpDecl $spN $null }
     if ($null -eq $spP['needs']) { $spP['needs'] = @() } else { $spP['needs'] = @($spP['needs']) }
     foreach ($spN in @('handedOverTo', 'handOverReason')) {
         if ($null -ne $SpRun.PSObject.Properties[$spN]) { $spP[$spN] = $SpRun.PSObject.Properties[$spN].Value }
@@ -1285,8 +1288,16 @@ function Get-SpMergeProblems {
         }
     }
 
-    # A reference to an id with no file: each reference a progress file carries, other than needs.
+    # A reference to an id with no file: each reference a progress file carries.
     foreach ($mpP in $mpPhases) {
+        foreach ($mpNeedId in @(Get-NeedIds $mpP)) {
+            if ($mpNeedId -match '^W\d+$') {
+                if (-not $mpNodeIds.ContainsKey($mpNeedId)) { $mpOut.Lines.Add("phase $($mpP.id) needs $mpNeedId, which has no file under progress/nodes/. $mpPull") }
+            }
+            elseif (-not $mpPhaseIds.ContainsKey($mpNeedId)) {
+                $mpOut.Lines.Add("phase $($mpP.id) needs $mpNeedId, which has no file under progress/phases/ or progress/closed/. $mpPull")
+            }
+        }
         if (-not $mpNodeIds.ContainsKey([string]$mpP.ws)) {
             $mpOut.Lines.Add("phase $($mpP.id) names workstream $($mpP.ws), which has no file under progress/nodes/. $mpPull")
         }
@@ -1310,6 +1321,15 @@ function Get-SpMergeProblems {
                 $mpOut.Lines.Add("workstream $($mpN.id) names goal $mpGid, which has no file under progress/goals/. $mpPull")
             }
         }
+    }
+
+    # Needs that form a cycle: two writes, each valid alone, that each add one need. No phase in the
+    # cycle can be named as next, since each waits on another.
+    foreach ($mpCyc in @(Get-NeedCycles $MpState)) {
+        $mpCycIds = @($mpCyc.Ids)
+        if ($mpCycIds.Count -eq 2) { $mpCycText = "phases $($mpCycIds -join ' and ') need each other in a cycle, so neither" }
+        else { $mpCycText = "phases $(($mpCycIds[0..($mpCycIds.Count - 2)]) -join ', ') and $($mpCycIds[-1]) need each other in a cycle, so none of them" }
+        $mpOut.Lines.Add("$mpCycText can be named as next. Re-declare one's needs with revise-phase -Phase $($mpCycIds[0]) -Needs <ids, or none>.")
     }
 
     # A gate entry written by someone other than the phase's owner. The owner cannot change once work
@@ -1353,10 +1373,11 @@ function Get-SpMergeProblems {
 
 function Get-SpNextText {
     # One person's next, in a few words, for the 'others:' line: by the rule 'next:' uses.
-    param($NtPool, $NtClash)
+    param($NtPool, $NtClash, $NtHeld)
     $ntOrdered = @($NtPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
-    $ntRun = @($ntOrdered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' })
+    $ntRun = @($ntOrdered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' -and -not $NtHeld.ContainsKey([string]$_.id) })
     if ($ntRun.Count -eq 0) {
+        if (@($ntOrdered | Where-Object { $NtHeld.ContainsKey([string]$_.id) }).Count -gt 0) { return 'waiting or waits on other work' }
         if ($ntOrdered.Count -gt 0) { return 'waiting' }
         return 'no declared run order'
     }
@@ -2535,6 +2556,262 @@ function Write-BindStatusLine {
     }
 }
 
+# ------------------------------------------------------------- dependencies --
+# A phase may declare that it needs other phases, or whole workstreams, delivered before it can
+# start: 'add-phase -Needs' and 'revise-phase -Needs', in every kind of project. 'status' does not
+# name a phase as next while a need is unmet, says what it waits on, and flags needed work that was
+# abandoned (the need can never be met) or revised after the need was declared. Keel records a
+# need someone declared and never infers one from a scope or an order.
+#
+# A need is { id, at }: a phase id or a workstream id, and when the need was declared. A phase id
+# stands for that phase and each phase its hand-over chain continues into, so it is met when the
+# last of them is delivered; a workstream id is met when the workstream is DELIVERED. The needs of
+# a finished phase (delivered, abandoned, handed over) hold nothing back, so they form no cycle.
+
+function Get-NeedIndex {
+    # Every phase by id, and the phase ids of each workstream, read once per question.
+    param($NiState)
+    $niOut = @{ Phase = @{}; Ws = @{} }
+    foreach ($niP in @(Get-Phases $NiState)) {
+        $niOut.Phase[[string]$niP.id] = $niP
+        $niW = [string](Get-Prop $niP 'ws' '')
+        if (-not $niOut.Ws.ContainsKey($niW)) { $niOut.Ws[$niW] = New-Object System.Collections.Generic.List[string] }
+        $niOut.Ws[$niW].Add([string]$niP.id)
+    }
+    return $niOut
+}
+
+function Test-NeedFinished {
+    param($TfP)
+    return (@('delivered', 'abandoned', 'handed-over') -contains [string](Get-Prop $TfP 'stage' ''))
+}
+
+function Get-NeedChain {
+    # A phase and each phase its hand-over chain continues into, in order. Missing is the id of a
+    # link that names no phase, if one does.
+    param($NcIndex, [string]$NcId)
+    $ncOut = @{ Phases = (New-Object System.Collections.Generic.List[object]); Missing = $null }
+    $ncSeen = @{}
+    $ncCur = $NcId
+    while ($ncCur -and -not $ncSeen.ContainsKey($ncCur)) {
+        $ncSeen[$ncCur] = $true
+        if (-not $NcIndex.Phase.ContainsKey($ncCur)) { $ncOut.Missing = $ncCur; break }
+        $ncP = $NcIndex.Phase[$ncCur]
+        $ncOut.Phases.Add($ncP)
+        if ([string](Get-Prop $ncP 'stage' '') -ne 'handed-over') { break }
+        $ncCur = [string](Get-Prop $ncP 'handedOverTo' '')
+        if (-not $ncCur) { $ncOut.Missing = '?' }
+    }
+    return $ncOut
+}
+
+function Get-NeedTargets {
+    # The phase ids one need points at, for the cycle check: a phase id, its hand-over chain; a
+    # workstream id, every phase of it, and the phase being added when it belongs to it.
+    param($NtIndex, [string]$NtId, [string]$NtNewId, [string]$NtNewWs)
+    $ntOut = New-Object System.Collections.Generic.List[string]
+    if ($NtId -match '^W\d+$') {
+        if ($NtIndex.Ws.ContainsKey($NtId)) { foreach ($ntI in $NtIndex.Ws[$NtId]) { $ntOut.Add($ntI) } }
+        if ($NtNewId -and $NtNewWs -eq $NtId -and -not $ntOut.Contains($NtNewId)) { $ntOut.Add($NtNewId) }
+    }
+    else {
+        foreach ($ntP in (Get-NeedChain $NtIndex $NtId).Phases) { $ntOut.Add([string]$ntP.id) }
+    }
+    return @($ntOut)
+}
+
+function Get-NeedIds {
+    # The ids a phase needs, in declared order.
+    param($NdP)
+    return @(@(Get-Prop $NdP 'needs' @()) | ForEach-Object { [string](Get-Prop $_ 'id' '') } | Where-Object { $_ })
+}
+
+function Find-NeedPath {
+    # A path of needs from one phase back to itself, as 'W5.3 -> W4.1 -> W5.3', or $null. The
+    # phase's own needs are the ids given, since they are what is about to be written.
+    param($FpIndex, [string]$FpId, [string]$FpWs, [string[]]$FpNeedIds, [bool]$FpIsNew)
+    $fpNewId = if ($FpIsNew) { $FpId } else { '' }
+    $fpPrev = @{}
+    $fpQueue = New-Object System.Collections.Generic.Queue[string]
+    $fpQueue.Enqueue($FpId)
+    $fpPrev[$FpId] = ''
+    while ($fpQueue.Count -gt 0) {
+        $fpCur = $fpQueue.Dequeue()
+        if ($fpCur -eq $FpId) { $fpIds = @($FpNeedIds) }
+        else {
+            $fpP = $FpIndex.Phase[$fpCur]
+            if ($null -eq $fpP -or (Test-NeedFinished $fpP)) { continue }
+            $fpIds = @(Get-NeedIds $fpP)
+        }
+        foreach ($fpNeed in $fpIds) {
+            foreach ($fpT in @(Get-NeedTargets $FpIndex $fpNeed $fpNewId $FpWs)) {
+                if ($fpT -eq $FpId) {
+                    $fpPath = New-Object System.Collections.Generic.List[string]
+                    $fpPath.Add($FpId)
+                    $fpBack = $fpCur
+                    while ($fpBack -ne $FpId) { $fpPath.Insert(0, $fpBack); $fpBack = $fpPrev[$fpBack] }
+                    $fpPath.Insert(0, $FpId)
+                    return ($fpPath -join ' -> ')
+                }
+                if ($fpPrev.ContainsKey($fpT)) { continue }
+                $fpPrev[$fpT] = $fpCur
+                $fpQueue.Enqueue($fpT)
+            }
+        }
+    }
+    return $null
+}
+
+function Read-NeedsParam {
+    # -Needs as the list to store, or a refusal before anything is written. 'none' is no needs.
+    param($RnState, [string]$RnPhaseId, [string]$RnWsId, [string]$RnRaw, [bool]$RnIsNew, [string]$RnSlug)
+    if ($RnRaw.Trim() -eq 'none') { return @() }
+    $rnIds = New-Object System.Collections.Generic.List[string]
+    foreach ($rnI in @(Split-Csv $RnRaw)) { if (-not $rnIds.Contains($rnI)) { $rnIds.Add($rnI) } }
+    if ($rnIds.Count -eq 0) { Fail 90 "-Needs names no id. Give phase or workstream ids, comma-separated, or none for no needs. Nothing was written." }
+    $rnPull = if (Test-SharedProgress $RnSlug) { ' If someone else added it, pull first.' } else { '' }
+    $rnIndex = Get-NeedIndex $RnState
+    foreach ($rnI in $rnIds) {
+        if ($rnI -cnotmatch '^W\d+$' -and $rnI -cnotmatch '^W\d+\.\d+[a-z]?$') {
+            Fail 90 "-Needs '$rnI' is not a phase or workstream id. Expected W<n>.<p> for a phase (e.g. W4.2 or W4.5b) or W<n> for a whole workstream (e.g. W4). Nothing was written."
+        }
+        if ($rnI -ceq $RnPhaseId) { Fail 90 "Phase '$RnPhaseId' cannot need itself. Nothing was written." }
+        if ($rnI -ceq $RnWsId) { Fail 90 "Phase '$RnPhaseId' cannot need its own workstream $RnWsId`: it is part of it, so the need could never be met. Order the phases of one workstream by run order. Nothing was written." }
+        if ($rnI -match '^W\d+$') {
+            $rnNode = Find-Node $RnState $rnI
+            if ($null -eq $rnNode -or [string](Get-Prop $rnNode 'role' '') -ne 'workstream') { Fail 94 "-Needs '$rnI' names no workstream on this copy.$rnPull Nothing was written." }
+        }
+        elseif (-not $rnIndex.Phase.ContainsKey($rnI)) { Fail 94 "-Needs '$rnI' names no phase on this copy.$rnPull Nothing was written." }
+    }
+    $rnPath = Find-NeedPath $rnIndex $RnPhaseId $RnWsId @($rnIds) $RnIsNew
+    if ($rnPath) { Fail 90 "-Needs would close a cycle of needs: $rnPath. No phase in it could ever be named as next. Nothing was written." }
+    $rnAt = Now
+    return @($rnIds | ForEach-Object { [pscustomobject]@{ id = $_; at = $rnAt } })
+}
+
+function Get-NeedState {
+    # Where one need stands: met, never (the needed work was abandoned), missing (an id naming
+    # nothing on this copy) or waiting, with the text 'status' prints, and whether the needed work
+    # was revised after the need was declared, which only a waiting need reports.
+    param($NsIndex, $NsState, [string]$NsSlug, $NsNeed)
+    $nsId = [string](Get-Prop $NsNeed 'id' '')
+    $nsAt = Get-SpTicks (Get-Prop $NsNeed 'at' $null)
+    $nsShared = $NsSlug -and (Test-SharedProgress $NsSlug)
+    $nsOut = [pscustomobject]@{ Kind = 'waiting'; Text = $nsId; Revised = $false }
+    if ($nsId -match '^W\d+$') {
+        $nsNode = Find-Node $NsState $nsId
+        if ($null -eq $nsNode) { $nsOut.Kind = 'missing'; return $nsOut }
+        $nsSt = [string](Get-Prop $nsNode 'status' '')
+        if ($nsSt -eq 'DELIVERED') { $nsOut.Kind = 'met'; return $nsOut }
+        if ($nsSt -eq 'ABANDONED') { $nsOut.Kind = 'never'; $nsOut.Text = "workstream $nsId"; return $nsOut }
+        $nsOpen = New-Object System.Collections.Generic.List[string]
+        $nsWsPhases = @()
+        if ($NsIndex.Ws.ContainsKey($nsId)) { $nsWsPhases = @($NsIndex.Ws[$nsId] | ForEach-Object { $NsIndex.Phase[$_] }) }
+        foreach ($nsP in @($nsWsPhases | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
+            # A phase added since the need counts as a revision; a hand-over's successor does not,
+            # since it continues work the workstream already had.
+            if ($nsAt -gt 0 -and -not (Get-Prop $nsP 'continues' $null) -and (Get-SpTicks (Get-Prop $nsP 'created' $null)) -gt $nsAt) { $nsOut.Revised = $true }
+            if (Test-NeedFinished $nsP) { continue }
+            $nsOwn = ''
+            if ($nsShared -and (Get-Prop $nsP 'owner' '')) { $nsOwn = ", owned by $(Get-SpPersonText $NsSlug ([string]$nsP.owner))" }
+            $nsOpen.Add("$($nsP.id) $(Get-Prop $nsP 'stage' '?')$nsOwn")
+        }
+        if ($nsAt -gt 0 -and (Get-SpTicks (Get-Prop $nsNode 'revisedAt' $null)) -gt $nsAt) { $nsOut.Revised = $true }
+        $nsList = if ($nsOpen.Count -gt 0) { "open: $($nsOpen -join '; ')" } else { 'no open phases; met once the workstream is closed' }
+        $nsOut.Text = "$nsId (workstream $nsSt; $nsList)"
+        return $nsOut
+    }
+    $nsChain = Get-NeedChain $NsIndex $nsId
+    # ToArray, not @(): Windows PowerShell 5.1 throws 'Argument types do not match' wrapping this list.
+    $nsLinks = $nsChain.Phases.ToArray()
+    if ($nsChain.Missing -or $nsLinks.Count -eq 0) {
+        $nsOut.Kind = 'missing'
+        if ($nsLinks.Count -gt 0) { $nsOut.Text = "$nsId, handed over to $($nsChain.Missing)" }
+        return $nsOut
+    }
+    $nsText = (@($nsLinks | ForEach-Object { [string]$_.id })) -join ', handed over to '
+    $nsLast = $nsLinks[$nsLinks.Count - 1]
+    $nsLastSt = [string](Get-Prop $nsLast 'stage' '')
+    if ($nsLastSt -eq 'delivered') { $nsOut.Kind = 'met'; return $nsOut }
+    if ($nsLastSt -eq 'abandoned') { $nsOut.Kind = 'never'; $nsOut.Text = $nsText; return $nsOut }
+    foreach ($nsP in $nsLinks) {
+        if ($nsAt -gt 0 -and (Get-SpTicks (Get-Prop $nsP 'revisedAt' $null)) -gt $nsAt) { $nsOut.Revised = $true }
+    }
+    $nsOwn = ''
+    if ($nsShared -and (Get-Prop $nsLast 'owner' '')) { $nsOwn = ", owned by $(Get-SpPersonText $NsSlug ([string]$nsLast.owner))" }
+    $nsOut.Text = "$nsText ($nsLastSt$nsOwn)"
+    return $nsOut
+}
+
+function Get-HeldPhases {
+    # Each phase given that has a need not met, by id: the list of { Need; State }. A phase in it is
+    # never named as next.
+    param($HpState, [string]$HpSlug, $HpPhases)
+    $hpOut = @{}
+    $hpIndex = $null
+    foreach ($hpP in @($HpPhases)) {
+        $hpNeeds = @(Get-Prop $hpP 'needs' @())
+        if ($hpNeeds.Count -eq 0) { continue }
+        if ($null -eq $hpIndex) { $hpIndex = Get-NeedIndex $HpState }
+        $hpList = New-Object System.Collections.Generic.List[object]
+        foreach ($hpN in $hpNeeds) {
+            $hpSt = Get-NeedState $hpIndex $HpState $HpSlug $hpN
+            if ($hpSt.Kind -ne 'met') { $hpList.Add([pscustomobject]@{ Need = $hpN; State = $hpSt }) }
+        }
+        if ($hpList.Count -gt 0) { $hpOut[[string]$hpP.id] = $hpList }
+    }
+    return $hpOut
+}
+
+function Get-NeedCycles {
+    # The groups of unfinished phases whose needs form a cycle, each { Ids } sorted (an object, so a
+    # single group cannot unroll into its ids on the way out). Only a
+    # merge makes one: a single writer is refused at 90.
+    param($NyState)
+    $nyIndex = Get-NeedIndex $NyState
+    $nyStarts = @(@(Get-Phases $NyState) | Where-Object { @(Get-NeedIds $_).Count -gt 0 -and -not (Test-NeedFinished $_) })
+    if ($nyStarts.Count -eq 0) { return @() }
+    $nyReach = @{}
+    foreach ($nyS in $nyStarts) {
+        $nySeen = @{}
+        $nyQueue = New-Object System.Collections.Generic.Queue[string]
+        $nyQueue.Enqueue([string]$nyS.id)
+        while ($nyQueue.Count -gt 0) {
+            $nyP = $nyIndex.Phase[$nyQueue.Dequeue()]
+            if ($null -eq $nyP -or (Test-NeedFinished $nyP)) { continue }
+            foreach ($nyNeed in @(Get-NeedIds $nyP)) {
+                foreach ($nyT in @(Get-NeedTargets $nyIndex $nyNeed '' '')) {
+                    if ($nySeen.ContainsKey($nyT)) { continue }
+                    $nySeen[$nyT] = $true
+                    $nyQueue.Enqueue($nyT)
+                }
+            }
+        }
+        $nyReach[[string]$nyS.id] = $nySeen
+    }
+    $nyGroups = [ordered]@{}
+    foreach ($nyA in @($nyReach.Keys | Sort-Object)) {
+        if (-not $nyReach[$nyA].ContainsKey($nyA)) { continue }
+        $nyMembers = @(@($nyReach.Keys) | Where-Object { $nyReach[$nyA].ContainsKey($_) -and $nyReach[$_].ContainsKey($nyA) } | Sort-Object)
+        $nyGroups[$nyMembers -join '|'] = [pscustomobject]@{ Ids = $nyMembers }
+    }
+    return @($nyGroups.Values)
+}
+
+function Get-RevisionSig {
+    # What a revise must change for the phase or workstream to count as revised, for the warning a
+    # phase needing it gets: never a prompt path, and never a need re-declared unchanged.
+    param($RsObj, [string]$RsKind)
+    if ($RsKind -eq 'node') { return "$(Get-Prop $RsObj 'title' '')`n$((@(Get-Prop $RsObj 'goals' @())) -join ',')" }
+    $rsParts = @(
+        [string](Get-Prop $RsObj 'scope' ''), [string](Get-Prop $RsObj 'actor' ''),
+        ((@(Get-Prop $RsObj 'repos' @())) -join ','), [string](Get-Prop $RsObj 'due' ''),
+        [string](Get-Prop $RsObj 'runOrder' -1), [string](Get-Prop $RsObj 'owner' ''),
+        ((@(Get-NeedIds $RsObj)) -join ',')
+    )
+    return ($rsParts -join "`n")
+}
+
 # ------------------------------------------------------------------ reports --
 
 function Get-PhaseLineExtras {
@@ -3423,6 +3700,8 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              resolve-signal"
     Write-Output ""
     Write-Output "  'revise-phase -Correction' appends a dated note to a DELIVERED phase; its scope stays."
+    Write-Output "  'add-phase -Needs <ids>' and 'revise-phase -Needs <ids|none>' declare the phases (W4.2) or"
+    Write-Output "  workstreams (W4) a phase needs delivered first; status names it next only once they are."
     Write-Output "  'abandon -Ws' records a workstream that never ran, with a reason. It is one-way."
     Write-Output ""
     Write-Output "  A verify PASS or INCONCLUSIVE records a fingerprint of what it verified. The human,"
@@ -4075,8 +4354,11 @@ switch ($Command) {
     elseif ($stShared) {
         Say "  note: next: is over everyone's phases - this machine is not registered in this project (join), or is listed twice."
     }
+    # A phase with a need not yet met is held back: never named as next, here or on 'others:'.
+    $stHeld = Get-HeldPhases $state $proj.Slug $pending
     $ordered = @($stPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
-    $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' })
+    $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' -and -not $stHeld.ContainsKey([string]$_.id) })
+    $stHeldOrdered = @($ordered | Where-Object { $stHeld.ContainsKey([string]$_.id) }).Count -gt 0
     $stClashNext = $false
     if ($stShared -and $runnable.Count -gt 0) {
         $stLow0 = Get-Prop $runnable[0] 'runOrder' -1
@@ -4192,8 +4474,10 @@ switch ($Command) {
             }
         }
     }
+    elseif ($stMine -and $stHeldOrdered) { Say '  next: nothing runnable - every pending phase you own is waiting or waits on other work (see the waits on lines below).' }
     elseif ($stMine -and $ordered.Count -gt 0) { Say '  next: nothing runnable - every pending phase you own is waiting.' }
     elseif ($stMine) { Say '  next: nothing pending that you own.' }
+    elseif ($stHeldOrdered) { Say '  next: nothing runnable - every pending phase is waiting or waits on other work (see the waits on lines below).' }
     elseif ($ordered.Count -gt 0) { Say '  next: nothing runnable - every pending phase is waiting.' }
     else { Say '  next: nothing pending.' }
 
@@ -4207,9 +4491,34 @@ switch ($Command) {
             if ($stPeId -ceq $stMeId) { continue }
             $stTheirs = @($pending | Where-Object { [string](Get-Prop $_ 'owner' '') -ceq $stPeId })
             if ($stTheirs.Count -eq 0) { continue }
-            $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $(Get-SpNextText $stTheirs $stMerge.Clash)")
+            $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $(Get-SpNextText $stTheirs $stMerge.Clash $stHeld)")
         }
         if ($stOthers.Count -gt 0) { Say "  others: $($stOthers -join '; ')" }
+    }
+
+    # ---- what each held phase waits on, in table order, everyone's: one line per need not met.
+    # A need on work abandoned can never be met, and needed work revised after the need was declared
+    # may no longer give what was needed; both lines start 'WARNING:', so keel-session-start.ps1
+    # forwards them to a resuming session. Silent when no phase has a need not met.
+    foreach ($stHp in @($pending | Where-Object { $stHeld.ContainsKey([string]$_.id) } | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
+        $stHpId = [string]$stHp.id
+        foreach ($stHn in $stHeld[$stHpId]) {
+            $stHnId = [string](Get-Prop $stHn.Need 'id' '')
+            switch ($stHn.State.Kind) {
+                'waiting' {
+                    Say "  $stHpId waits on $($stHn.State.Text)"
+                    if ($stHn.State.Revised) {
+                        Say "  WARNING: $stHpId needs $stHnId, which was revised after the need was declared ($(Get-Prop $stHn.Need 'at' '?')). Check the need still holds, then re-declare it with revise-phase -Needs."
+                    }
+                }
+                'never' {
+                    $stRest = @(@(Get-NeedIds $stHp) | Where-Object { $_ -ne $stHnId })
+                    $stRestText = if ($stRest.Count -gt 0) { $stRest -join ',' } else { 'none' }
+                    Say "  WARNING: $stHpId needs $($stHn.State.Text), which was abandoned, so the need can never be met. Re-declare $stHpId's needs without it: revise-phase -Phase $stHpId -Needs $stRestText."
+                }
+                default { Say "  $stHpId waits on $($stHn.State.Text), which names no phase or workstream on this copy." }
+            }
+        }
     }
 
     # ---- the handoff the LAST session wrote for this one
@@ -4420,7 +4729,9 @@ switch ($Command) {
             else {
                 foreach ($p in @(Get-Phases $State | Where-Object { $_.ws -eq $n.id } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })) {
                     $trEx = Get-PhaseLineExtras $p $proj.Slug
-                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trEx.Owner)
+                    $trNeedIds = @(Get-NeedIds $p)
+                    $trNeeds = if ($trNeedIds.Count -gt 0) { "  needs: $($trNeedIds -join ', ')" } else { '' }
+                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}{7}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trNeeds, $trEx.Owner)
                     foreach ($cItem in @(Get-Prop $p 'corrections' @())) {
                         Write-Output ("{0}      correction {1}: {2}" -f $pad, ((Get-Prop $cItem 'at' '') -split 'T')[0], (Get-Prop $cItem 'text' ''))
                     }
@@ -4719,6 +5030,7 @@ switch ($Command) {
 
     Assert-NoDeliveredBeneath $state $Id 'workstream'
 
+    $rwSigBefore = Get-RevisionSig $rwNode 'node'
     $rwCleared = @()
     if ($Goals) {
         $rwGoalIds = @(Split-Csv $Goals)
@@ -4744,6 +5056,8 @@ switch ($Command) {
         Set-Prop $rwNode 'goals' $rwGoalIds
     }
     if ($Title) { Set-Prop $rwNode 'title' $Title }
+    # Revised, for the warning a phase needing this workstream gets, only on a real change.
+    if ((Get-RevisionSig $rwNode 'node') -cne $rwSigBefore) { Set-Prop $rwNode 'revisedAt' (Now) }
 
     Write-State $proj.Slug $state
     Say "Revised workstream $Id."
@@ -4791,6 +5105,8 @@ switch ($Command) {
 
     $repoNames = @(Split-Csv $Repos)
     Assert-ReposDeclared -Proj $proj -RepoNames $repoNames
+    $apNeeds = @()
+    if ($PSBoundParameters.ContainsKey('Needs')) { $apNeeds = @(Read-NeedsParam $state $Phase $wsId $Needs $true $proj.Slug) }
 
     $p = [pscustomobject]@{
         id = $Phase; ws = $wsId; scope = $Scope; actor = $Actor
@@ -4806,12 +5122,15 @@ switch ($Command) {
         created = (Now)
     }
     if ($apShared) { Set-Prop $p 'owner' $apOwnerId }
+    # Stored only when there is one, so a per-machine phase with no needs is what it always was.
+    if ($apNeeds.Count -gt 0) { Set-Prop $p 'needs' $apNeeds }
     $arr = @(Get-Phases $state); $arr += $p; Set-Prop $state 'phases' $arr
     Write-State $proj.Slug $state
     Ensure-Dir (Get-PhaseDir $proj.Slug $Phase) | Out-Null
 
     $apOwnerNote = if ($apShared) { ", owner: $(Get-SpPersonText $proj.Slug $apOwnerId)" } else { '' }
-    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' })$apOwnerNote)."
+    $apNeedsNote = if ($apNeeds.Count -gt 0) { ", needs: $((@($apNeeds | ForEach-Object { $_.id })) -join ', ')" } else { '' }
+    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' })$apOwnerNote$apNeedsNote)."
     if ($RunOrder -lt 0) { Say '  NOTE: no run order declared. status will refuse to guess what runs next.' }
     exit 0
 }
@@ -4836,7 +5155,7 @@ switch ($Command) {
             if ($rpStage -ne 'planned') { Assert-PhaseOwner $proj.Slug $p 'revise' }
             Fail 90 "Phase '$Phase' is not delivered, so its scope is still yours to change: use -Scope. -Correction is for a delivered or handed-over phase."
         }
-        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $Owner -or $RunOrder -ge 0) {
+        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $Owner -or $Needs -or $RunOrder -ge 0) {
             Fail 90 "-Correction stands alone. Phase '$Phase' is $rpStage and every other revise-phase parameter still refuses; nothing was stored."
         }
         $corrLog = @(Get-Prop $p 'corrections' @())
@@ -4859,6 +5178,9 @@ switch ($Command) {
         if ($rpStage -ne 'planned') { Fail 90 "Phase '$Phase' is $rpStage, so its owner can no longer change: work has started under them. If they cannot finish it, hand it over: keel-state.ps1 hand-over -Phase $Phase -To <person id> -Detail `"<why>`". Nothing was written." }
         Assert-SpPerson $proj.Slug $Owner 'Owner'
     }
+    $rpNeeds = $null
+    if ($PSBoundParameters.ContainsKey('Needs')) { $rpNeeds = @(Read-NeedsParam $state $Phase ([string]$p.ws) $Needs $false $proj.Slug) }
+    $rpSigBefore = Get-RevisionSig $p 'phase'
 
     if ($Owner) { Set-Prop $p 'owner' $Owner }
     if ($Scope) { Set-Prop $p 'scope' $Scope }
@@ -4875,9 +5197,21 @@ switch ($Command) {
         if ($clash.Count -gt 0) { Fail 92 "Run order $RunOrder is already taken in $($p.ws) by '$($clash[0].id)'." }
         Set-Prop $p 'runOrder' $RunOrder
     }
+    # The list is replaced whole, each need dated now; 'none' leaves no key, as add-phase does.
+    if ($null -ne $rpNeeds) {
+        if ($rpNeeds.Count -gt 0) { Set-Prop $p 'needs' $rpNeeds }
+        elseif ($null -ne $p.PSObject.Properties['needs']) { $p.PSObject.Properties.Remove('needs') }
+    }
+    # Revised, for the warning a phase needing this one gets, only when what it is to deliver
+    # changed: never by a prompt path alone, or by a revise that sets what was already there.
+    if ((Get-RevisionSig $p 'phase') -cne $rpSigBefore) { Set-Prop $p 'revisedAt' (Now) }
 
     Write-State $proj.Slug $state
     Say "Revised $Phase."
+    if ($null -ne $rpNeeds) {
+        $rpNeedsText = if ($rpNeeds.Count -gt 0) { (@($rpNeeds | ForEach-Object { $_.id })) -join ', ' } else { 'none' }
+        Say "  needs: $rpNeedsText"
+    }
     exit 0
 }
 

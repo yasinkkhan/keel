@@ -49,6 +49,9 @@ keel-state.ps1 status
 | `your last handoff:` | A shared project: your own newest handoff, when someone else's is newer. `handoff:` names the newest by time, with its author. |
 | `owner: <name> (<id>)` at the end of a phase line | A shared project: the person who owns that unfinished phase. Only they may work on it; see below. |
 | `handed-over -> W5.2b` in the phase table | A shared project: the phase ended unfinished and W5.2b continues it. It is finished, like a delivered phase. |
+| `W5.3 waits on W4.1 (<stage>[, owned by <name> (<id>)])` | W5.3 declared that it needs W4.1 (a phase, or a whole workstream `W4`) delivered first, so it is **never named as next** until that is delivered, by you or on `others:`. The line names where the needed work stands and, in a shared project, whose it is. Nothing to do but run other work, or ask its owner. A need on a handed-over phase follows its successor. |
+| `WARNING: W5.3 needs W4.1, which was revised after the need was declared` | The needed work's scope, actor, repos, due date, run order, owner or needs changed (or, for a workstream, its title or goals, or a phase was added to it) after the need was declared. Read what changed, check W5.3 still needs it, then re-declare: `revise-phase -Phase W5.3 -Needs <ids>`, which clears the warning. A prompt path being registered is not a revision. |
+| `WARNING: W5.3 needs W4.1, which was abandoned, so the need can never be met` | The needed phase, workstream or hand-over chain ended abandoned. W5.3 waits forever unless its needs are re-declared without it, as the line says; decide with the operator whether W5.3 still makes sense at all. |
 
 **The `handoff:` line names a document, and the stamp beside it dates that document rather than
 checking it** — a handoff whose every claim has gone false is marked fresh until an unrelated verdict
@@ -68,14 +71,18 @@ own repo, written by several people (charter P15). Five things differ when a ses
 - **`next:` is this person's.** It names the lowest-order runnable phase owned by the person this
   machine is registered as, and `others:` names everyone else's. A phase `others:` names is someone
   else's: do not run it. A machine no person file lists, or two list, is shown the whole project's
-  next and a line saying so; `join` registers it.
+  next and a line saying so; `join` registers it. A phase held by a need not yet met is named by
+  neither; its `waits on` line says what it waits for.
 - **What a read-time warning means.** Each `WARNING: after a merge,` line is one broken rule:
   - *two phases of one workstream share a run order*: neither is named as next until one moves,
     with `revise-phase -RunOrder`, agreed with whoever owns the other;
   - *a phase is open under a closed or abandoned workstream*: one person closed it while another
     added the phase; abandon that phase, or plan its work in an open workstream;
-  - *an id names no file*: the file it refers to was not committed or not pulled; pull again, or
-    have the person who wrote it commit and push it;
+  - *an id names no file*, a phase's need among them: the file it refers to was not committed or
+    not pulled; pull again, or have the person who wrote it commit and push it;
+  - *phases need each other in a cycle*: two people each declared one need, each valid alone, and
+    together no phase in the cycle can be named as next; agree which need is wrong and re-declare
+    that phase's needs with `revise-phase -Needs`;
   - *a machine is listed by two person files*: writes from it are refused until one drops it, with
     `join -As <person id> -Clear`;
   - *a gate entry is by someone other than the phase's owner*: one person changed the owner of a

@@ -69,6 +69,15 @@ could have reached.*
 If grounding contradicts the ask, **stop and say so**. That is the most valuable output this skill
 produces, and it is worth more than a spec built on the original premise.
 
+**Then look for work this needs.** Run `tree` and list the workstreams still open, those serving
+the same goal first; in a project that shares its progress, name whose they are, by the `owner:` on
+their unfinished phases, since those are the ones this person cannot see being worked on. Ask the
+operator whether the new work needs any of them delivered first. Keel records a need someone
+declared and never guesses one. Each need goes on the **first phase that needs it** (`add-phase
+-Needs`, Step 5), not on the whole workstream. A workstream that needs another's output can still
+be planned now, in outline: its first phase carries the need, and that phase's prompt is written
+after the needed work delivers, against what it actually produced.
+
 ## Step 2 — number it
 
 ```
@@ -376,8 +385,13 @@ Show the rows and have the human confirm **once**, then:
 
 ```
 keel-state.ps1 add-phase -Phase W<n>.<p> -Scope "<scope>" -Actor <agent|self|external> -RunOrder <int> `
-    [-Repos <csv>] [-Due <yyyy-MM-dd>] [-PromptPath plan/prompts/W<n>.<p>-prompt.md]
+    [-Repos <csv>] [-Due <yyyy-MM-dd>] [-PromptPath plan/prompts/W<n>.<p>-prompt.md] [-Needs <ids>]
 ```
+
+`-Needs` takes the phases (`W4.2`) or whole workstreams (`W4`) the operator said this phase needs
+delivered first, from Step 1; `status` does not name the phase as next until they are, and says
+what it waits on. A preference for what runs first inside this workstream is a run order, not a
+need.
 
 **Never auto-apply.** A spec is markdown written for people; a mis-parse landing in the state file
 is worse than one that does not, because the state file outranks the conversation.
