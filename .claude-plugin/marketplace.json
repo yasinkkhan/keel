@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "keel",
-  "version": "0.78.0",
+  "version": "0.79.0",
   "description": "Multi-project planning and delivery marketplace. Ships the keel-workflow pipeline (funnel, orchestrator, plan project/epic/workstream, run-phase, close) plus its keel-project grounding router and keel-surfaces tracker/document companions. One project per folder, siblings under a projects root of your choosing. Windows only (Windows PowerShell 5.1).",
   "owner": {
     "name": "Yasin Khan"
@@ -11,7 +11,7 @@
       "name": "keel-workflow",
       "description": "End-to-end pipeline for any keel project, software or otherwise: one gate-enforced sequence (ground -> investigate -> plan -> implement -> verify -> human -> enact -> record) driven from a plan tree in the project folder. Owns the durable per-project state under %USERPROFILE%\\.keel. A phase's actor (agent / self / external) selects which evidence a check accepts, never which gates run. Windows only.",
       "source": "./plugins/keel-workflow",
-      "version": "0.70.0",
+      "version": "0.71.0",
       "author": { "name": "Yasin Khan" },
       "category": "productivity"
     },

@@ -29,7 +29,8 @@ and never carry a project name forward from earlier in the conversation.
 
 ## Step 2 — read `keel.json` before anything else
 
-It carries the three per-project choices, and skills behave differently under each:
+It carries the three per-project choices, and a fourth once a project shares its progress, and
+skills behave differently under each:
 
 - **`git`** — whether this project's folder is a repo. Decides whether "commit" is even a step.
 - **`tracker`** — `none` / `trello` / `jira` / `github`. Decides whether there is a projection to
@@ -37,6 +38,11 @@ It carries the three per-project choices, and skills behave differently under ea
 - **`quarantine`** — whether this project has sensitive material under
   `%USERPROFILE%\.keel\quarantine\<project>\`. If true, treat every document as potentially
   identifying until proven otherwise, and redact **at extraction** (charter P23).
+- **`progress`**: if `"repo"`, the project shares its progress through its own repo, under
+  `progress/`, so several people can work on it (charter P15). A fresh clone of it needs no
+  `init-project`: its state came with the clone. Run `join` once on each machine, so its writes name
+  a person (a write from a machine no person lists is refused at exit 95, naming `join`), and pull
+  before starting: `status` says when this copy is behind the remote.
 
 Then **dispatch `keel-orchestrator`**. It owns everything from here: classification, the plan tree,
 dispatching stages, and refusing to advance when a gate is not satisfied.

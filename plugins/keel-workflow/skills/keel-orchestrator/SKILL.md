@@ -42,11 +42,43 @@ keel-state.ps1 status
 | `N open signal(s)` | Filed from this project, not yet triaged in keel. The same line states how many are **not yet pushed** — those exist only on this machine — and `signals` shows each signal's issue number. Do not infer push state from the open count; the two are independent. |
 | `N commit(s) on '<branch>' have NOT reached the remote 'origin'` | Work that exists only on this machine, with the range so a push preview can be exact. Read live from `git ls-remote` and **never** from the `origin/*` tracking ref, which is a cache reporting whatever the last fetch saw, so reading it lets unpushed commits sit unnoticed across sessions. Push them, or say in the handoff why not. A sister line reports a branch that is not on the remote at all. |
 | `COULD NOT REACH the remote 'origin'` | The reading did **not** happen. This is not "nothing to report": `status` fails open so it stays usable offline, and says so rather than reading clean. Silence means the remote was reached and there is nothing to say — or that the project has no `origin`, is not a repo, has no commits, or is on a detached HEAD, none of which can strand work. |
+| `WARNING: the remote 'origin' holds work this copy has not pulled` / `WARNING: this copy is N commit(s) behind 'origin'` | A project that shares its progress, only. Someone else's work is on the remote and not in this copy, so every other line may be out of date. **Pull, then run `status` again, before acting on anything.** A sister line says when this reading could not be taken. See "Resuming a project that shares its progress" below. |
+| `WARNING: N progress file(s) written here are not committed` | A shared project's progress written on this machine that nobody else can see yet. Commit and push it once the work is consistent. |
+| `WARNING: after a merge, ...` | A shared project: two writes, each valid alone, merged into a whole that breaks a rule the wrapper refuses for a single writer. One line per broken rule, naming the ids. See below. |
+| `others:` | A shared project: each other person's next phase, by name. There `next:` is **yours**, the lowest-order runnable phase you own. |
+| `your last handoff:` | A shared project: your own newest handoff, when someone else's is newer. `handoff:` names the newest by time, with its author. |
 
 **The `handoff:` line names a document, and the stamp beside it dates that document rather than
 checking it** — a handoff whose every claim has gone false is marked fresh until an unrelated verdict
 moves the revision. It is governed by **"Material keel produced is re-measured before you act on
 it"**, below.
+
+### Resuming a project that shares its progress
+
+A project whose `keel.json` says `"progress": "repo"` keeps its progress under `progress/` in its
+own repo, written by several people (charter P15). Three things differ when a session resumes one:
+
+- **The behind reading comes first.** If `status` says the remote holds work this copy has not
+  pulled, or that this copy is behind, pull and run `status` again before anything else: every other
+  line was computed from what this copy holds. If it says the reading was not taken, say so before
+  relying on the rest. Work someone has not pushed cannot be seen from any copy, which is why the
+  planning skills push an approved plan at once.
+- **`next:` is this person's.** It names the lowest-order runnable phase owned by the person this
+  machine is registered as, and `others:` names everyone else's. A phase `others:` names is someone
+  else's: do not run it. A machine no person file lists, or two list, is shown the whole project's
+  next and a line saying so; `join` registers it.
+- **What a read-time warning means.** Each `WARNING: after a merge,` line is one broken rule:
+  - *two phases of one workstream share a run order*: neither is named as next until one moves,
+    with `revise-phase -RunOrder`, agreed with whoever owns the other;
+  - *a phase is open under a closed or abandoned workstream*: one person closed it while another
+    added the phase; abandon that phase, or plan its work in an open workstream;
+  - *an id names no file*: the file it refers to was not committed or not pulled; pull again, or
+    have the person who wrote it commit and push it;
+  - *a machine is listed by two person files*: writes from it are refused until one drops it, with
+    `join -As <person id> -Clear`.
+
+  Other writes go on, so a clash in one workstream does not stop work in another. A repair is a
+  write like any other, committed and pushed.
 
 ### Signals cross machines; improvements cross back
 

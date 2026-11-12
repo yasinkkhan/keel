@@ -5,7 +5,9 @@
 
     Runs in a scratch home ONLY. USERPROFILE and COMPUTERNAME are set for every wrapper call, so one
     machine stands in for several; HOME and GIT_CONFIG_GLOBAL point at an empty scratch file and
-    GIT_CONFIG_NOSYSTEM is set, so no real git identity is read; KEEL_OUTWARD is 'block'. The suite
+    GIT_CONFIG_NOSYSTEM is set, so no real git identity is read; KEEL_OUTWARD is 'block', except for
+    ORIENT's status calls that must read the remote, which run with 'allow' only after the suite has
+    checked that the clone's origin is a bare repository inside the scratch home. The suite
     refuses to start (exit 90) unless its scratch home resolves inside %TEMP%, and after the run
     the real state home must hold no project of this run.
 
@@ -40,6 +42,22 @@
                  uncommitted changes and already shared, at 95 with no user.name; each with the
                  condition removed exports at 0. After a full gate sequence, git ls-files holds
                  nothing kept per machine; control: one such file staged is listed.
+      ORIENT     orientation, on its own bare remote and two clones, two people:
+                   NEXT       next: is this person's and others: names the other's; a tie is the
+                              ambiguity warning; an unregistered machine sees everyone's. Control: a
+                              per-machine project's status and tree are HEAD's, with no others: line.
+                   BEHIND     not pulled, then N commit(s) behind, then neither after a pull; the
+                              reading not taken says so. Controls: an unpushed commit, a per-machine
+                              project behind its remote.
+                   UNCOMMITTED  the count of progress files not committed, files and not folders,
+                              artifact subfolders aside; gone after a commit. Control: per machine.
+                   MERGE      after a merge: a run-order clash (never named next, 92 on a further
+                              add-phase, other writes go on), a phase open under a closed or
+                              abandoned workstream, a reference with no file (ws, parent, goal,
+                              owner, continues), a machine in two person files. Each with a control.
+                   HANDOFF    authored handoffs, named per person; the newest by instant with its
+                              author, your last handoff, STALE; a stamp later as an instant and
+                              smaller as text is named. Control: without it, the earlier one is.
 
     Modes, human-invoked and not on the push path, as the other suites' comparison modes are:
       -OldRef <rev>  the wrapper at <rev>, an older copy: a state.json it wrote keeps the same
@@ -116,14 +134,17 @@ function Get-Sha {
 
 function Invoke-K {
     # One wrapper call in its own powershell.exe, as one machine: its scratch home and its name.
-    param([string]$KHome, [string]$KMachine, [string[]]$KArgs, [string]$KWrapper = '')
+    # -KOutward 'allow' for one call only, restored to 'block' after it.
+    param([string]$KHome, [string]$KMachine, [string[]]$KArgs, [string]$KWrapper = '', [string]$KOutward = '')
     if (-not $KWrapper) { $KWrapper = $wtWrapper }
     $env:USERPROFILE = $KHome
     $env:COMPUTERNAME = $KMachine
+    if ($KOutward) { $env:KEEL_OUTWARD = $KOutward }
     $kPrior = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $global:LASTEXITCODE = -1
-    $kRaw = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $KWrapper @KArgs 2>&1
+    try { $kRaw = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $KWrapper @KArgs 2>&1 }
+    finally { $env:KEEL_OUTWARD = 'block' }
     $kCode = $LASTEXITCODE
     $ErrorActionPreference = $kPrior
     $kOut = New-Object System.Collections.Generic.List[string]
@@ -233,6 +254,9 @@ function Get-View {
         $vAll.Add("== $($vCall -join ' ') exit $($vRes.Code)")
         foreach ($vLine in $vRes.Lines) {
             if ($vLine -match '^KEEL:\s+root: ') { continue }
+            # Lines only a shared project prints about this copy's git state, which an export and a
+            # fold move by design: the uncommitted count, and a reading not taken.
+            if ($vLine -match 'progress file\(s\) written here are not committed|was NOT checked \(') { continue }
             $vAll.Add(($vLine -replace '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})[+-]\d{2}:\d{2}', '$1'))
         }
     }
@@ -808,6 +832,405 @@ try {
     $plHit = @($plWant | Where-Object { $plW = $_; @($plProb | Where-Object { $_ -match $plW[0] -and $_ -match [regex]::Escape($plW[1]) }).Count -gt 0 })
     $plClean = @($plProb | Where-Object { $_ -match '0001|people/' }).Count -eq 0
     Add-Case 'LAYOUT-planted-CONTROL' (($plHit.Count -eq 4) -and $plClean) "of four planted defects $($plHit.Count) reported; the clean file and the person file reported: $(-not $plClean)"
+
+    # ============================================================== ORIENT ==
+    # Its own bare remote and two clones, so no earlier group's state reaches it. Not added to the
+    # LAYOUT sweep: MERGE plants defects in it on purpose.
+    function Save-Push {
+        param([string]$SuDir, [string]$SuMsg)
+        Save-Commit $SuDir $SuMsg
+        Assert-G $SuDir @('push', '-q') | Out-Null
+    }
+    function Sync-Pair {
+        # Both sides commit what they wrote offline; the second pushes first, the first merges it
+        # with plain git pull and pushes, and the second pulls that back.
+        param([string]$SyFirst, [string]$SySecond, [string]$SyMsg)
+        Save-Commit $SyFirst "$SyMsg (first)"
+        Save-Commit $SySecond "$SyMsg (second)"
+        Assert-G $SySecond @('push', '-q') | Out-Null
+        Assert-G $SyFirst @('pull', '-q', '--no-edit') | Out-Null
+        Assert-G $SyFirst @('push', '-q') | Out-Null
+        Assert-G $SySecond @('pull', '-q', '--no-edit') | Out-Null
+    }
+    function Save-Part {
+        # A partial commit, pushed: only the paths named, as a person who stages by hand might.
+        param([string]$PtDir, [string[]]$PtPaths, [string]$PtMsg)
+        foreach ($ptP in $PtPaths) { Assert-G $PtDir @('add', '--', $ptP) | Out-Null }
+        $ptRes = Invoke-G $PtDir @('-c', 'user.name=Suite Committer', 'commit', '-q', '-m', $PtMsg)
+        if ($ptRes.Code -ne 0) { throw "Setup partial commit failed: $($ptRes.Out)" }
+        Assert-G $PtDir @('push', '-q') | Out-Null
+    }
+    function Assert-LocalOrigin {
+        # The fence for every call this group makes with the outward block lifted.
+        param([string]$LoDir)
+        $loUrl = (Invoke-G $LoDir @('config', '--get', 'remote.origin.url')).Out.Trim()
+        $loFull = [System.IO.Path]::GetFullPath($loUrl).TrimEnd('\', '/')
+        if (-not $loFull.StartsWith($scratch + '\', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'An ORIENT clone''s origin is not inside the scratch home, so the outward block stays on.' }
+    }
+    function Get-OrStatus {
+        # status as a person sees it, reading the bare remote.
+        param([string]$OsHome, [string]$OsMachine, [string]$OsDir)
+        Assert-LocalOrigin $OsDir
+        return (Invoke-K $OsHome $OsMachine @('status', '-Path', $OsDir) '' 'allow')
+    }
+    function Get-OrBoth {
+        # status and tree, joined, for the read-time check (no remote reading needed).
+        param([string]$ObHome, [string]$ObMachine, [string]$ObDir)
+        $obS = Invoke-K $ObHome $ObMachine @('status', '-Path', $ObDir)
+        $obT = Invoke-K $ObHome $ObMachine @('tree', '-Path', $ObDir)
+        return [pscustomobject]@{ S = $obS.Out; T = $obT.Out }
+    }
+    function Get-PorcelainCount {
+        param([string]$PcDir, [switch]$PcAll)
+        $pcArgs = @('status', '--porcelain')
+        if ($PcAll) { $pcArgs += '--untracked-files=all' }
+        $pcArgs += @('--', 'progress')
+        return @((Invoke-G $PcDir $pcArgs).Out -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+    }
+    function Get-LatestAt {
+        # The latest 'at' anywhere under progress/, every "at" field of every file, as an instant;
+        # returned as the stamp text that holds it.
+        param([string]$LaDir)
+        $laBest = $null; $laText = ''
+        foreach ($laF in @(Get-ChildItem -LiteralPath (Join-Path $LaDir 'progress') -Recurse -File -Filter '*.json')) {
+            foreach ($laM in [regex]::Matches([System.IO.File]::ReadAllText($laF.FullName), '"at"\s*:\s*"([^"]+)"')) {
+                $laI = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse($laM.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$laI)) {
+                    if ($null -eq $laBest -or $laI -gt $laBest) { $laBest = $laI; $laText = $laM.Groups[1].Value }
+                }
+            }
+        }
+        return $laText
+    }
+
+    $oRemote = Join-Path $scratch 'oremote.git'
+    New-Item -ItemType Directory -Path $oRemote -Force | Out-Null
+    Assert-G $oRemote @('init', '-q', '--bare', '-b', 'main') | Out-Null
+    $oSlug = 'kor' + $runTag
+    $homeP = New-Home 'P'; $homeQ = New-Home 'Q'; $homeU = New-Home 'U'; $homeR3 = New-Home 'R3'; $homeY = New-Home 'Y'; $homeZ = New-Home 'Z'
+    $dirP = Join-Path $scratch "cloneP\$oSlug"
+    $dirQ = Join-Path $scratch "cloneQ\$oSlug"
+    New-Repo $dirP 'Person P'
+    Assert-G $dirP @('remote', 'add', 'origin', $oRemote) | Out-Null
+    Assert-K $homeP 'KSP-P' @('init-project', '-Path', $dirP, '-Title', 'orientation') | Out-Null
+    Assert-K $homeP 'KSP-P' @('add-goal', '-Path', $dirP, '-Id', 'G1', '-Text', 'first goal') | Out-Null
+    foreach ($ow in @('W1', 'W2', 'W3', 'W5', 'W6', 'W7', 'W8', 'W9')) {
+        Assert-K $homeP 'KSP-P' @('add-workstream', '-Path', $dirP, '-Id', $ow, '-Title', "workstream $ow", '-Parent', 'root', '-Goals', 'G1') | Out-Null
+    }
+    foreach ($opl in @(@('W1.1', 1), @('W1.2', 2))) {
+        Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', $opl[0], '-Scope', "phase $($opl[0])", '-Actor', 'agent', '-RunOrder', "$($opl[1])") | Out-Null
+    }
+    Save-Commit $dirP 'project'
+    Assert-K $homeP 'KSP-P' @('share-progress', '-Path', $dirP) | Out-Null
+    Save-Commit $dirP 'shared'
+    Assert-G $dirP @('push', '-q', '-u', 'origin', 'main') | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $scratch 'cloneQ') -Force | Out-Null
+    Assert-G (Join-Path $scratch 'cloneQ') @('clone', '-q', $oRemote, $oSlug) | Out-Null
+    foreach ($oc in @(@('user.name', 'Person Q'), @('user.email', 'suite@example.invalid'), @('pull.rebase', 'false'), @('core.autocrlf', 'false'))) { Assert-G $dirQ @('config', $oc[0], $oc[1]) | Out-Null }
+    $ojq = Assert-K $homeQ 'KSP-Q' @('join', '-Path', $dirQ)
+    $pidQ = if ($ojq.Out -match 'as person (p-[0-9a-f]{4}) ') { $Matches[1] } else { throw 'join on Q printed no person id.' }
+    $pidP = [string](@(Get-ChildItem -LiteralPath (Join-Path $dirP 'progress\people') -Filter '*.json' | ForEach-Object { Read-JsonFile $_.FullName } | Where-Object { @($_.machines) -contains 'KSP-P' })[0].id)
+    foreach ($opl in @(@('W2.1', 1), @('W2.2', 2))) {
+        Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', $opl[0], '-Scope', "phase $($opl[0])", '-Actor', 'agent', '-RunOrder', "$($opl[1])") | Out-Null
+    }
+    Save-Push $dirQ 'Q joins and plans'
+    Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+
+    # ---- NEXT: next per person, and others:
+    $nP = Get-OrStatus $homeP 'KSP-P' $dirP
+    $nQ = Get-OrStatus $homeQ 'KSP-Q' $dirQ
+    $nPok = ($nP.Out -match '(?m)^KEEL:\s+next: W1\.1 ') -and ($nP.Out -match "(?m)^KEEL:\s+others: Person Q \($pidQ\): W2\.1$") -and ($nP.Out -notmatch 'next is ambiguous')
+    $nQok = ($nQ.Out -match '(?m)^KEEL:\s+next: W2\.1 ') -and ($nQ.Out -match "(?m)^KEEL:\s+others: Person P \($pidP\): W1\.1$") -and ($nQ.Out -notmatch 'next is ambiguous')
+    Add-Case 'ORIENT-next-per-person' ($nPok -and $nQok) "P's next W1.1 and others names Person Q with W2.1: $nPok; Q's next W2.1 and others names Person P with W1.1: $nQok (a whole-project rule would print the ambiguity, W1.1 and W2.1 both #1)"
+    Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', 'W3.1', '-Scope', 'phase W3.1', '-Actor', 'agent', '-RunOrder', '1') | Out-Null
+    Save-Push $dirP 'W3.1'
+    Assert-G $dirQ @('pull', '-q', '--no-edit') | Out-Null
+    $nP2 = Get-OrStatus $homeP 'KSP-P' $dirP
+    $nQ2 = Get-OrStatus $homeQ 'KSP-Q' $dirQ
+    $nTieOk = ($nP2.Out -match 'WARNING: next is ambiguous - 2 phases share the lowest run order 1, across 2 workstream') -and ($nP2.Out -match '(?m)^KEEL:\s+W1\.1  ') -and ($nP2.Out -match '(?m)^KEEL:\s+W3\.1  ') -and ($nP2.Out -notmatch '(?m)^KEEL:\s+next: W')
+    $nTieQ = $nQ2.Out -match "(?m)^KEEL:\s+others: Person P \($pidP\): ambiguous, W1\.1 or W3\.1$"
+    Add-Case 'ORIENT-next-tie' ($nTieOk -and $nTieQ) "P's own lowest order shared across two workstreams prints the ambiguity warning: $nTieOk; Q's others says ambiguous: $nTieQ"
+    $nU = Get-OrStatus $homeU 'KSP-U' $dirP
+    $nUok = ($nU.Out -match "note: next: is over everyone's phases") -and ($nU.Out -match 'next is ambiguous - 3 phases share the lowest run order 1, across 3 workstream') -and ($nU.Out -notmatch 'others:')
+    Add-Case 'ORIENT-next-unregistered' $nUok "a machine no person file lists is told next is everyone's and sees the whole project's tie of W1.1, W2.1 and W3.1: $nUok"
+    Assert-K $homeP 'KSP-P' @('abandon', '-Path', $dirP, '-Phase', 'W3.1', '-Detail', 'tie case done') | Out-Null
+    Save-Push $dirP 'W3.1 abandoned'
+    Assert-G $dirQ @('pull', '-q', '--no-edit') | Out-Null
+
+    # Control: a project kept per machine prints what HEAD's wrapper prints, and no others: line.
+    $headW = Join-Path $scratch 'headw\plugins\keel-workflow'
+    New-Item -ItemType Directory -Path (Join-Path $headW 'skills\keel-orchestrator\wrappers') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $headW '.claude-plugin') -Force | Out-Null
+    $headText = (Invoke-G $repoRoot @('show', "HEAD:$wrapperRel")).Out
+    $headWrapper = Join-Path $headW 'skills\keel-orchestrator\wrappers\keel-state.ps1'
+    [System.IO.File]::WriteAllText($headWrapper, (($headText -replace "`r`n", "`n") -replace "`n", "`r`n") + "`r`n")
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'plugins\keel-workflow\.claude-plugin\plugin.json') -Destination (Join-Path $headW '.claude-plugin\plugin.json')
+    $headSame = (($headText -replace "`r`n", "`n").TrimEnd()) -eq ((([System.IO.File]::ReadAllText($wtWrapper)) -replace "`r`n", "`n").TrimEnd())
+    $homeN = New-Home 'N'
+    $dirN = Join-Path $scratch "permachine\pn$runTag"
+    New-Repo $dirN 'Person N'
+    Assert-K $homeN 'KSP-N' @('init-project', '-Path', $dirN, '-Title', 'per machine next') | Out-Null
+    Assert-K $homeN 'KSP-N' @('add-goal', '-Path', $dirN, '-Id', 'G1', '-Text', 'goal') | Out-Null
+    foreach ($ow in @('W1', 'W2')) { Assert-K $homeN 'KSP-N' @('add-workstream', '-Path', $dirN, '-Id', $ow, '-Title', "ws $ow", '-Parent', 'root', '-Goals', 'G1') | Out-Null }
+    Assert-K $homeN 'KSP-N' @('add-phase', '-Path', $dirN, '-Phase', 'W1.1', '-Scope', 'phase W1.1', '-Actor', 'agent', '-RunOrder', '1') | Out-Null
+    Assert-K $homeN 'KSP-N' @('add-phase', '-Path', $dirN, '-Phase', 'W2.1', '-Scope', 'phase W2.1', '-Actor', 'agent', '-RunOrder', '2') | Out-Null
+    $mnSame = $true
+    $mnLit = $true
+    foreach ($mnRound in @(1, 2)) {
+        if ($mnRound -eq 2) { Assert-K $homeN 'KSP-N' @('add-phase', '-Path', $dirN, '-Phase', 'W2.2', '-Scope', 'phase W2.2', '-Actor', 'agent', '-RunOrder', '1') | Out-Null }
+        foreach ($mnV in @('status', 'tree')) {
+            $mnW = Invoke-K $homeN 'KSP-N' @($mnV, '-Path', $dirN)
+            $mnH = Invoke-K $homeN 'KSP-N' @($mnV, '-Path', $dirN) $headWrapper
+            if ($mnW.Out -cne $mnH.Out -or $mnW.Code -ne $mnH.Code) { $mnSame = $false }
+            if ($mnV -eq 'status') {
+                if ($mnW.Out -match 'others:') { $mnLit = $false }
+                if ($mnRound -eq 1 -and $mnW.Out -notmatch '(?m)^KEEL:\s+next: W1\.1  \(phase W1\.1\)$') { $mnLit = $false }
+                if ($mnRound -eq 2 -and $mnW.Out -notmatch 'WARNING: next is ambiguous - 2 phases share the lowest run order 1, across 2 workstream') { $mnLit = $false }
+            }
+        }
+    }
+    Add-Case 'ORIENT-next-per-machine-CONTROL' ($mnSame -and $mnLit) "per machine: status and tree equal HEAD's wrapper's: $mnSame$(if ($headSame) { " (HEAD holds this same wrapper, so that half compares it with itself)" }); next: W1.1, then the tie warning, and no others: line: $mnLit"
+
+    # ---- BEHIND
+    Assert-K $homeQ 'KSP-Q' @('note-friction', '-Path', $dirQ, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', 'behind one') | Out-Null
+    Save-Commit $dirQ 'behind one'
+    Assert-K $homeQ 'KSP-Q' @('note-friction', '-Path', $dirQ, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', 'behind two') | Out-Null
+    Save-Commit $dirQ 'behind two'
+    # Control first: committed and not pushed, so the other copy has nothing to pull.
+    $bNo = Get-OrStatus $homeP 'KSP-P' $dirP
+    $bNoOk = ($bNo.Out -notmatch 'has not pulled|commit\(s\) behind|was NOT checked \(')
+    Add-Case 'ORIENT-behind-unpushed-CONTROL' $bNoOk "with Q's commits not pushed, P prints no behind, not-pulled or not-checked line: $bNoOk"
+    Assert-G $dirQ @('push', '-q') | Out-Null
+    $qSha = (Invoke-G $dirQ @('rev-parse', 'HEAD')).Out.Trim()
+    $bUn = Get-OrStatus $homeP 'KSP-P' $dirP
+    $bUnOk = ($bUn.Out -match "WARNING: the remote 'origin' holds work this copy has not pulled \($($qSha.Substring(0, 7)) on 'main'\)\. Pull before acting on what follows\.") -and ($bUn.Out -notmatch 'which is not in this clone') -and ($bUn.Out -notmatch 'commit\(s\) behind')
+    Add-Case 'ORIENT-behind-not-pulled' $bUnOk "Q pushed and P has not fetched: P names Q's sha as not pulled, and not the old unpushed-count line: $bUnOk"
+    $bBlk = Invoke-K $homeP 'KSP-P' @('status', '-Path', $dirP)
+    $bBlkOk = ($bBlk.Out -match "WARNING: whether this copy is behind 'origin' was NOT checked \(KEEL_OUTWARD is set to 'block'\)") -and ($bBlk.Out -notmatch 'has not pulled|commit\(s\) behind')
+    Add-Case 'ORIENT-behind-not-checked' $bBlkOk "with the outward block on, P says the behind reading was not taken and prints no behind line: $bBlkOk"
+    Assert-G $dirP @('fetch', '-q') | Out-Null
+    $bF = Get-OrStatus $homeP 'KSP-P' $dirP
+    $bFOk = ($bF.Out -match "WARNING: this copy is 2 commit\(s\) behind 'origin'\. Pull before acting on what follows\.") -and ($bF.Out -notmatch 'has not pulled')
+    Add-Case 'ORIENT-behind-fetched' $bFOk "fetched and not merged: P is 2 commit(s) behind, the number Q pushed: $bFOk"
+    Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+    $bP = Get-OrStatus $homeP 'KSP-P' $dirP
+    $bPOk = ($bP.Out -notmatch 'has not pulled|commit\(s\) behind|was NOT checked \(')
+    Add-Case 'ORIENT-behind-pulled' $bPOk "after a pull P prints neither line: $bPOk"
+    # Control: a project kept per machine whose remote is two commits ahead prints neither line.
+    $mRemote = Join-Path $scratch 'mremote.git'
+    New-Item -ItemType Directory -Path $mRemote -Force | Out-Null
+    Assert-G $mRemote @('init', '-q', '--bare', '-b', 'main') | Out-Null
+    $homeM2 = New-Home 'M2'
+    $dirM1 = Join-Path $scratch "pmA\pmb$runTag"
+    New-Repo $dirM1 'Person M'
+    Assert-G $dirM1 @('remote', 'add', 'origin', $mRemote) | Out-Null
+    Assert-K $homeM2 'KSP-M2' @('init-project', '-Path', $dirM1, '-Title', 'per machine behind') | Out-Null
+    Save-Commit $dirM1 'project'
+    Assert-G $dirM1 @('push', '-q', '-u', 'origin', 'main') | Out-Null
+    $dirM2 = Join-Path $scratch "pmB\pmb$runTag"
+    New-Item -ItemType Directory -Path (Join-Path $scratch 'pmB') -Force | Out-Null
+    Assert-G (Join-Path $scratch 'pmB') @('clone', '-q', $mRemote, "pmb$runTag") | Out-Null
+    foreach ($oc in @(@('user.name', 'Person M2'), @('user.email', 'suite@example.invalid'), @('core.autocrlf', 'false'))) { Assert-G $dirM2 @('config', $oc[0], $oc[1]) | Out-Null }
+    foreach ($mi in @(1, 2)) { [System.IO.File]::WriteAllText((Join-Path $dirM2 "f$mi.txt"), "$mi`n"); Save-Commit $dirM2 "m2 $mi" }
+    Assert-G $dirM2 @('push', '-q') | Out-Null
+    $mU = Get-OrStatus $homeM2 'KSP-M2' $dirM1
+    Assert-G $dirM1 @('fetch', '-q') | Out-Null
+    $mF = Get-OrStatus $homeM2 'KSP-M2' $dirM1
+    $mOk = ($mU.Out -match 'which is not in this clone') -and ($mU.Out -notmatch 'has not pulled|commit\(s\) behind|progress file') -and ($mF.Out -notmatch 'has not pulled|commit\(s\) behind|progress file')
+    Add-Case 'ORIENT-behind-per-machine-CONTROL' $mOk "per machine, remote 2 ahead: unfetched it prints the old not-in-this-clone line (so the remote was read) and no behind, not-pulled or uncommitted line, nor fetched: $mOk"
+
+    # ---- UNCOMMITTED
+    $uClean = Get-OrStatus $homeP 'KSP-P' $dirP
+    Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', 'W1.3', '-Scope', 'phase W1.3', '-Actor', 'agent', '-RunOrder', '3') | Out-Null
+    $uAll = Get-PorcelainCount $dirP -PcAll
+    $uPlain = Get-PorcelainCount $dirP
+    $uS = Get-OrStatus $homeP 'KSP-P' $dirP
+    $uN = if ($uS.Out -match 'WARNING: (\d+) progress file\(s\) written here are not committed, so nobody else can see them\.') { [int]$Matches[1] } else { -1 }
+    Add-Case 'ORIENT-uncommitted-count' (($uClean.Out -notmatch 'progress file\(s\)') -and ($uN -eq 2) -and ($uAll -eq 2) -and ($uPlain -eq 1)) "clean: no line; after add-phase the line says $uN, files listed $uAll (a new folder of two files), folders listed plainly $uPlain"
+    $uPlant = Join-Path $dirP 'progress\phases\W1.1\artifacts\scratch'
+    New-Item -ItemType Directory -Path $uPlant -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $uPlant 'copy.json'), '{}')
+    $uS2 = Get-OrStatus $homeP 'KSP-P' $dirP
+    $uN2 = if ($uS2.Out -match 'WARNING: (\d+) progress file\(s\) written here') { [int]$Matches[1] } else { -1 }
+    Remove-Item -LiteralPath $uPlant -Recurse -Force
+    Save-Push $dirP 'W1.3'
+    Assert-G $dirQ @('pull', '-q', '--no-edit') | Out-Null
+    $uS3 = Get-OrStatus $homeP 'KSP-P' $dirP
+    Add-Case 'ORIENT-uncommitted-scratch-and-commit' (($uN2 -eq 2) -and ($uS3.Out -notmatch 'progress file\(s\)')) "a file in an artifacts subfolder leaves the count at $uN2; after the commit the line is gone: $($uS3.Out -notmatch 'progress file\(s\)')"
+    New-Item -ItemType Directory -Path (Join-Path $dirN 'progress') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dirN 'progress\x.json'), '{}')
+    $uM = Invoke-K $homeN 'KSP-N' @('status', '-Path', $dirN)
+    Add-Case 'ORIENT-uncommitted-per-machine-CONTROL' (($uM.Code -eq 0) -and ($uM.Out -notmatch 'progress file\(s\)|has not pulled|commit\(s\) behind')) "a project kept per machine with an untracked progress/ file prints none of the three lines"
+
+    # ---- HANDOFF
+    $hoDirP = Join-Path $dirP 'plan\handoffs'
+    $hSnap = Get-TreeHash $hoDirP
+    $hU = Invoke-K $homeU 'KSP-U' @('handoff', '-Path', $dirP, '-Next', 'same text', '-Detail', 'unregistered')
+    Add-Case 'ORIENT-handoff-unregistered-95' (($hU.Code -eq 95) -and ($hU.Err -match "'join'") -and ((Get-TreeHash $hoDirP) -eq $hSnap)) "handoff from an unregistered machine exits $($hU.Code), names join, writes nothing"
+    Assert-K $homeP 'KSP-P' @('note-friction', '-Path', $dirP, '-Phase', 'W1.1', '-Kind', 'gap', '-Detail', 'before P hands off') | Out-Null
+    Assert-K $homeP 'KSP-P' @('handoff', '-Path', $dirP, '-Next', 'same text', '-Detail', 'from P') | Out-Null
+    $hFileP = Join-Path $hoDirP "$pidP-same-text.md"
+    $hTextP = if (Test-Path -LiteralPath $hFileP) { [System.IO.File]::ReadAllText($hFileP) } else { '' }
+    $hLatestP = Get-LatestAt $dirP
+    $hStampP = if ($hTextP -match '(?m)^State revision:[ \t]*(\S+)') { $Matches[1] } else { '' }
+    Save-Push $dirP 'P hands off'
+    Assert-G $dirQ @('pull', '-q', '--no-edit') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('note-friction', '-Path', $dirQ, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', 'before Q hands off') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('handoff', '-Path', $dirQ, '-Next', 'same text', '-Detail', 'from Q') | Out-Null
+    $hFileQ = Join-Path $dirQ "plan\handoffs\$pidQ-same-text.md"
+    $hTextQ = if (Test-Path -LiteralPath $hFileQ) { [System.IO.File]::ReadAllText($hFileQ) } else { '' }
+    $hLatestQ = Get-LatestAt $dirQ
+    $hStampQ = if ($hTextQ -match '(?m)^State revision:[ \t]*(\S+)') { $Matches[1] } else { '' }
+    Save-Push $dirQ 'Q hands off'
+    Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+    $hFilesOk = (Test-Path -LiteralPath $hFileP) -and (Test-Path -LiteralPath (Join-Path $hoDirP "$pidQ-same-text.md")) -and
+        ($hTextP -match "(?m)^Author: Person P \($pidP\)\r?$") -and ($hTextP -match '(?m)^Machine: KSP-P\r?$') -and
+        ($hTextQ -match "(?m)^Author: Person Q \($pidQ\)\r?$") -and ($hTextQ -match '(?m)^Machine: KSP-Q\r?$') -and
+        ($hStampP -ne '') -and ($hStampP -ceq $hLatestP) -and ($hStampQ -ceq $hLatestQ) -and ($hStampP -cne $hStampQ)
+    Add-Case 'ORIENT-handoff-files' $hFilesOk "two people with one -Next wrote two files, each with Author and Machine; stamps $hStampP and $hStampQ, each the latest at under progress/ ($hLatestP, $hLatestQ)"
+    # P's own file is made the last written, so the tie rule alone would pick it: only the instant
+    # comparison names Q's.
+    (Get-Item -LiteralPath $hFileP).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddHours(1)
+    $hSP = Invoke-K $homeP 'KSP-P' @('status', '-Path', $dirP)
+    $hSQ = Invoke-K $homeQ 'KSP-Q' @('status', '-Path', $dirQ)
+    $hLinesP = @($hSP.Lines | Where-Object { $_ -match '^KEEL:\s+(handoff:|your last handoff:|STALE)' })
+    $hNamedOk = ($hLinesP.Count -eq 3) -and ($hLinesP[0] -match "handoff: plan\\handoffs\\$pidQ-same-text\.md  \(by Person Q, $pidQ\)$") -and
+        ($hLinesP[1] -match "your last handoff: plan\\handoffs\\$pidP-same-text\.md$") -and ($hLinesP[2] -match 'STALE - written at state revision')
+    $hQOk = ($hSQ.Out -match "handoff: plan\\handoffs\\$pidQ-same-text\.md  \(by Person Q, $pidQ\)") -and ($hSQ.Out -notmatch 'your last handoff:')
+    Add-Case 'ORIENT-handoff-named' ($hNamedOk -and $hQOk) "P is shown Q's (newest by instant, not STALE) with its author and its own as your last handoff (STALE): $hNamedOk; Q is shown its own and no your-last line: $hQOk"
+    Assert-K $homeP 'KSP-P' @('note-friction', '-Path', $dirP, '-Phase', 'W1.1', '-Kind', 'gap', '-Detail', 'after both handoffs') | Out-Null
+    $hSP2 = Invoke-K $homeP 'KSP-P' @('status', '-Path', $dirP)
+    $hStale2 = @($hSP2.Lines | Where-Object { $_ -match '^KEEL:\s+STALE - written at state revision' }).Count
+    Add-Case 'ORIENT-handoff-stale' ($hStale2 -eq 2) "after one more write both named handoffs are STALE: $hStale2 STALE line(s)"
+    # A stamp three hours behind this machine's offset, an hour later as an instant than Q's: later
+    # as an instant, smaller as text. Planted: the fixture cannot set a child's time zone.
+    $hQI = [DateTimeOffset]::Parse($hStampQ, [Globalization.CultureInfo]::InvariantCulture)
+    $hOff = [TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).Subtract([TimeSpan]::FromHours(3))
+    $hPlantI = $hQI.AddHours(1).ToOffset($hOff)
+    $hPlantText = $hPlantI.ToString('yyyy-MM-ddTHH:mm:sszzz', [Globalization.CultureInfo]::InvariantCulture)
+    if (-not ([string]::CompareOrdinal($hPlantText, $hStampQ) -lt 0 -and $hPlantI -gt $hQI)) { throw "The planted handoff stamp $hPlantText is not later than $hStampQ as an instant and smaller as text." }
+    $hPlant = Join-Path $hoDirP 'p-0abc-planted.md'
+    [System.IO.File]::WriteAllText($hPlant, "# Handoff - planted`r`n`r`nState revision: $hPlantText`r`nAuthor: Person Planted (p-0abc)`r`nMachine: KSP-FAR`r`n")
+    (Get-Item -LiteralPath $hPlant).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddHours(-5)
+    $hSP3 = Invoke-K $homeP 'KSP-P' @('status', '-Path', $dirP)
+    Remove-Item -LiteralPath $hPlant
+    $hSP4 = Invoke-K $homeP 'KSP-P' @('status', '-Path', $dirP)
+    Add-Case 'ORIENT-handoff-by-instant' ($hSP3.Out -match 'handoff: plan\\handoffs\\p-0abc-planted\.md  \(by Person Planted, p-0abc\)') "a stamp later as an instant and smaller as text ($hPlantText against $hStampQ) is named"
+    Add-Case 'ORIENT-handoff-by-instant-CONTROL' ($hSP4.Out -match "handoff: plan\\handoffs\\$pidQ-same-text\.md") "with the planted handoff removed, Q's is named again"
+    Save-Push $dirP 'handoffs'
+    Assert-G $dirQ @('pull', '-q', '--no-edit') | Out-Null
+
+    # ---- MERGE: a run-order clash. Control first: the same two writes at different orders.
+    Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', 'W6.1', '-Scope', 'phase W6.1', '-Actor', 'agent', '-RunOrder', '0') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', 'W6.2', '-Scope', 'phase W6.2', '-Actor', 'agent', '-RunOrder', '7') | Out-Null
+    Sync-Pair $dirP $dirQ 'W6'
+    $mc = Get-OrBoth $homeP 'KSP-P' $dirP
+    Add-Case 'ORIENT-merge-clash-CONTROL' (($mc.S -notmatch 'after a merge') -and ($mc.T -notmatch 'after a merge') -and ($mc.S -match '(?m)^KEEL:\s+next: W6\.1 ')) "W6.1 #0 and W6.2 #7 merged: no after-a-merge line, and P's next is the lower, W6.1"
+    Assert-K $homeP 'KSP-P' @('abandon', '-Path', $dirP, '-Phase', 'W6.1', '-Detail', 'control done') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('abandon', '-Path', $dirQ, '-Phase', 'W6.2', '-Detail', 'control done') | Out-Null
+    Sync-Pair $dirP $dirQ 'W6 done'
+    Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', 'W5.1', '-Scope', 'phase W5.1', '-Actor', 'agent', '-RunOrder', '0') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', 'W5.2', '-Scope', 'phase W5.2', '-Actor', 'agent', '-RunOrder', '0') | Out-Null
+    Sync-Pair $dirP $dirQ 'W5'
+    $mClash = 'WARNING: after a merge, W5\.1 and W5\.2 share run order 0 in W5, so neither is named as next\.'
+    $mcP = Get-OrBoth $homeP 'KSP-P' $dirP
+    $mcQ = Get-OrBoth $homeQ 'KSP-Q' $dirQ
+    $mcWarn = ($mcP.S -match $mClash) -and ($mcP.T -match $mClash) -and ($mcQ.S -match $mClash) -and ($mcQ.T -match $mClash)
+    $mcNext = ($mcP.S -match '(?m)^KEEL:\s+next: none named - W5\.1 shares run order 0 in W5 with W5\.2') -and ($mcQ.S -match '(?m)^KEEL:\s+next: none named - W5\.2 shares run order 0 in W5 with W5\.1') -and ($mcP.S -notmatch '(?m)^KEEL:\s+next: W5') -and ($mcQ.S -notmatch '(?m)^KEEL:\s+next: W5')
+    Add-Case 'ORIENT-merge-clash' ($mcWarn -and $mcNext) "status and tree in both clones name W5.1, W5.2, order 0 and W5: $mcWarn; neither is named as next in either clone: $mcNext"
+    $mc92 = Invoke-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', 'W5.3', '-Scope', 'phase W5.3', '-Actor', 'agent', '-RunOrder', '0')
+    $mcOther = Invoke-K $homeP 'KSP-P' @('note-friction', '-Path', $dirP, '-Phase', 'W1.1', '-Kind', 'gap', '-Detail', 'a write in another workstream')
+    Add-Case 'ORIENT-merge-clash-writes' (($mc92.Code -eq 92) -and ($mcOther.Code -eq 0) -and ($mcOther.Out -match $mClash)) "a further add-phase at order 0 in W5 exits $($mc92.Code); a write in W1 exits $($mcOther.Code) and prints the warning first: $($mcOther.Out -match $mClash)"
+    Assert-K $homeQ 'KSP-Q' @('revise-phase', '-Path', $dirQ, '-Phase', 'W5.2', '-RunOrder', '9') | Out-Null
+    Sync-Pair $dirP $dirQ 'W5 repaired'
+    $mcFix = Get-OrBoth $homeP 'KSP-P' $dirP
+    Add-Case 'ORIENT-merge-clash-repaired' (($mcFix.S -notmatch 'share run order') -and ($mcFix.S -match '(?m)^KEEL:\s+next: W5\.1 ')) "with W5.2 moved to 9 the line is gone and P's next is W5.1"
+    Assert-K $homeP 'KSP-P' @('abandon', '-Path', $dirP, '-Phase', 'W5.1', '-Detail', 'clash case done') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('abandon', '-Path', $dirQ, '-Phase', 'W5.2', '-Detail', 'clash case done') | Out-Null
+    Sync-Pair $dirP $dirQ 'W5 done'
+
+    # ---- MERGE: a phase open under a workstream another person closed or abandoned.
+    foreach ($ow in @('W7.1', 'W8.1', 'W9.1')) { Assert-K $homeP 'KSP-P' @('add-phase', '-Path', $dirP, '-Phase', $ow, '-Scope', "phase $ow", '-Actor', 'agent', '-RunOrder', '1') | Out-Null }
+    Sync-Pair $dirP $dirQ 'W7 to W9'
+    foreach ($oa in @(@('abandon', '-Phase', 'W7.1', '-Detail', 'x'), @('abandon', '-Ws', 'W7', '-Detail', 'x'), @('abandon', '-Phase', 'W8.1', '-Detail', 'x'), @('close', '-Ws', 'W8'),
+                      @('abandon', '-Phase', 'W9.1', '-Detail', 'x'), @('abandon', '-Ws', 'W9', '-Detail', 'x'))) {
+        Assert-K $homeP 'KSP-P' (@($oa[0]) + @('-Path', $dirP) + @($oa | Select-Object -Skip 1)) | Out-Null
+    }
+    Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', 'W7.2', '-Scope', 'phase W7.2', '-Actor', 'agent', '-RunOrder', '2') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', 'W8.2', '-Scope', 'phase W8.2', '-Actor', 'agent', '-RunOrder', '2') | Out-Null
+    Assert-K $homeQ 'KSP-Q' @('note-friction', '-Path', $dirQ, '-Phase', 'W2.1', '-Kind', 'gap', '-Detail', 'nothing in W9') | Out-Null
+    Sync-Pair $dirP $dirQ 'closed under'
+    $mu = Get-OrBoth $homeP 'KSP-P' $dirP
+    $muA = 'WARNING: after a merge, phase W7\.2 is planned under W7, which is ABANDONED\.'
+    $muD = 'WARNING: after a merge, phase W8\.2 is planned under W8, which is DELIVERED\.'
+    Add-Case 'ORIENT-merge-open-under-closed' (($mu.S -match $muA) -and ($mu.T -match $muA) -and ($mu.S -match $muD) -and ($mu.T -match $muD)) "status and tree name W7.2 under ABANDONED W7 and W8.2 under DELIVERED W8"
+    Add-Case 'ORIENT-merge-open-under-closed-CONTROL' (($mu.S -notmatch 'under W9') -and ($mu.T -notmatch 'under W9')) "W9 abandoned while the other side wrote elsewhere: no line names W9"
+
+    # ---- MERGE: a reference to an id with no file, each by a partial commit, then completed.
+    # Ids of two digits are assembled at run time: the product's history check refuses a
+    # workstream id of 10 or more written into any file of the product, this one included.
+    $wsTen = 'W' + '10'; $wsEleven = 'W' + '11'; $wsTwelve = 'W' + '12'
+    $refCases = @(
+        @{ Label = 'ws'; Setup = { Assert-K $homeQ 'KSP-Q' @('add-workstream', '-Path', $dirQ, '-Id', $wsTen, '-Title', 'ws ten', '-Parent', 'root', '-Goals', 'G1') | Out-Null
+                                   Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', "$wsTen.1", '-Scope', 'phase ten one', '-Actor', 'agent', '-RunOrder', '1') | Out-Null }
+           Part = @("progress/phases/$wsTen.1"); Line = "WARNING: after a merge, phase $wsTen\.1 names workstream $wsTen, which has no file under progress/nodes/\." }
+        @{ Label = 'parent'; Setup = { Assert-K $homeQ 'KSP-Q' @('add-epic', '-Path', $dirQ, '-Id', 'E1', '-Title', 'an epic', '-Parent', 'root', '-Groups', 'the parent case') | Out-Null
+                                       Assert-K $homeQ 'KSP-Q' @('add-workstream', '-Path', $dirQ, '-Id', $wsEleven, '-Title', 'ws eleven', '-Parent', 'E1', '-Goals', 'G1') | Out-Null }
+           Part = @("progress/nodes/$wsEleven.json"); Line = "WARNING: after a merge, workstream $wsEleven names parent E1, which has no file under progress/nodes/\." }
+        @{ Label = 'goal'; Setup = { Assert-K $homeQ 'KSP-Q' @('add-goal', '-Path', $dirQ, '-Id', 'G5', '-Text', 'goal five') | Out-Null
+                                     Assert-K $homeQ 'KSP-Q' @('add-workstream', '-Path', $dirQ, '-Id', $wsTwelve, '-Title', 'ws twelve', '-Parent', 'root', '-Goals', 'G5') | Out-Null }
+           Part = @("progress/nodes/$wsTwelve.json"); Line = "WARNING: after a merge, workstream $wsTwelve names goal G5, which has no file under progress/goals/\." }
+    )
+    foreach ($rc in $refCases) {
+        & $rc.Setup
+        Save-Part $dirQ $rc.Part "partial $($rc.Label)"
+        Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+        $rcBroken = Get-OrBoth $homeP 'KSP-P' $dirP
+        Save-Push $dirQ "rest of $($rc.Label)"
+        Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+        $rcWhole = Get-OrBoth $homeP 'KSP-P' $dirP
+        Add-Case "ORIENT-merge-missing-$($rc.Label)" (($rcBroken.S -match $rc.Line) -and ($rcBroken.T -match $rc.Line)) "pulled without the file it names: status and tree say so"
+        Add-Case "ORIENT-merge-missing-$($rc.Label)-CONTROL" (($rcWhole.S -notmatch $rc.Line) -and ($rcWhole.T -notmatch $rc.Line)) "with the rest committed and pulled the line is gone"
+    }
+    # The owner: a third person joins on Q's clone and plans a phase, committing the phase but not
+    # the person file.
+    $ojr = Assert-K $homeR3 'KSP-R3' @('join', '-Path', $dirQ)
+    $pidR = if ($ojr.Out -match 'as person (p-[0-9a-f]{4}) ') { $Matches[1] } else { throw 'join from R3 printed no person id.' }
+    Assert-K $homeR3 'KSP-R3' @('add-phase', '-Path', $dirQ, '-Phase', 'W2.3', '-Scope', 'phase W2.3', '-Actor', 'agent', '-RunOrder', '3') | Out-Null
+    Save-Part $dirQ @('progress/phases/W2.3') 'partial owner'
+    Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+    $roBroken = Get-OrBoth $homeP 'KSP-P' $dirP
+    Save-Push $dirQ 'rest of owner'
+    Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+    $roWhole = Get-OrBoth $homeP 'KSP-P' $dirP
+    $roLine = "WARNING: after a merge, phase W2\.3 names owner $pidR, which has no file under progress/people/\."
+    Add-Case 'ORIENT-merge-missing-owner' (($roBroken.S -match $roLine) -and ($roBroken.T -match $roLine)) "a phase owned by a person whose file was not committed: status and tree say so"
+    Add-Case 'ORIENT-merge-missing-owner-CONTROL' (($roWhole.S -notmatch $roLine) -and ($roWhole.T -notmatch $roLine)) "with the person file committed and pulled the line is gone"
+    # continues: no verb writes one yet, so it is planted, as an unknown id and then a known one.
+    Assert-K $homeQ 'KSP-Q' @('add-phase', '-Path', $dirQ, '-Phase', 'W2.4', '-Scope', 'phase W2.4', '-Actor', 'agent', '-RunOrder', '4') | Out-Null
+    $rcFile = Join-Path $dirQ 'progress\phases\W2.4\phase.json'
+    $rcLine = 'WARNING: after a merge, phase W2\.4 continues W2\.9, which has no file under progress/phases/ or progress/closed/\.'
+    $rcSeen = @{}
+    foreach ($rcTo in @('W2.9', 'W2.1')) {
+        $rcObj = Read-JsonFile $rcFile
+        $rcObj.continues = $rcTo
+        [System.IO.File]::WriteAllText($rcFile, (($rcObj | ConvertTo-Json -Depth 8) -replace "`r`n", "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        Save-Push $dirQ "continues $rcTo"
+        Assert-G $dirP @('pull', '-q', '--no-edit') | Out-Null
+        $rcSeen[$rcTo] = Get-OrBoth $homeP 'KSP-P' $dirP
+    }
+    Add-Case 'ORIENT-merge-missing-continues' (($rcSeen['W2.9'].S -match $rcLine) -and ($rcSeen['W2.9'].T -match $rcLine)) "a phase continuing an id with no file: status and tree say so"
+    Add-Case 'ORIENT-merge-missing-continues-CONTROL' (($rcSeen['W2.1'].S -notmatch 'continues W2') -and ($rcSeen['W2.1'].T -notmatch 'continues W2')) "continuing a phase that exists prints no such line"
+
+    # ---- MERGE: one machine in two person files. Control first: a machine joining on one side only.
+    Assert-K $homeZ 'KSP-Z' @('join', '-Path', $dirP) | Out-Null
+    Assert-K $homeY 'KSP-Y' @('join', '-Path', $dirP) | Out-Null
+    Assert-K $homeY 'KSP-Y' @('join', '-Path', $dirQ) | Out-Null
+    Sync-Pair $dirP $dirQ 'Y and Z'
+    $my = Get-OrBoth $homeP 'KSP-P' $dirP
+    $myLine ='WARNING: after a merge, machine KSP-Y is listed by two person files, p-[0-9a-f]{4} \([^)]*\) and p-[0-9a-f]{4} \([^)]*\), so writes from it are refused'
+    Add-Case 'ORIENT-merge-machine-twice' (($my.S -match $myLine) -and ($my.T -match $myLine)) "a machine that joined on both clones offline: status and tree name it and both person files"
+    Add-Case 'ORIENT-merge-machine-twice-CONTROL' (($my.S -notmatch 'machine KSP-Z') -and ($my.T -notmatch 'machine KSP-Z')) "a machine that joined on one clone only is not named"
 
     # ============================================================== modes ==
     if ($OldRef) {

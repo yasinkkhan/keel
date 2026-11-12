@@ -4,6 +4,55 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.79.0 - 2026-11-11
+
+**The first release that carries shared progress.** 0.78.0, which added it, was never released on
+its own: it waited for the warnings below, so that no installed copy could share a project's
+progress without them. Updating to this release brings both.
+
+- **`keel-workflow` 0.71.0: in a project that shares its progress, `status`, `tree` and handoffs
+  say what this copy can and cannot see.** Several people now write one project's progress, so a
+  copy can lack someone's pushed work, a merge can join two writes into a whole the wrapper would
+  have refused from one writer, and two people's handoffs can collide. A project that keeps its
+  progress on one machine prints exactly what it did.
+  - **The behind reading.** Before anything else, `status` prints `WARNING: the remote 'origin'
+    holds work this copy has not pulled` when the remote's commit is not in this clone, and
+    `WARNING: this copy is <n> commit(s) behind 'origin'` once it is fetched and not merged, each
+    saying to pull before acting on what follows. Both come from the `git ls-remote` reading
+    `status` already took, so there is no new network call. When that reading cannot be taken (the
+    remote cannot be reached, outward acts are blocked, the copy is on a detached HEAD, or git is
+    missing) it says so rather than staying silent.
+  - **The uncommitted count:** `WARNING: <n> progress file(s) written here are not committed, so
+    nobody else can see them`. It counts files, so a new folder counts every file in it. It leaves
+    out files in a subfolder of a phase's artifacts folder, where only scratch belongs, and that
+    scratch should be kept in the per-machine phase folder instead: nothing stops a commit from
+    taking it.
+  - **The check after a merge.** `status`, `tree` and every write print one `WARNING: after a merge,
+    ...` line per broken rule: two phases of one workstream at one run order (neither is then named
+    as next, and another phase at that order is still refused, exit 92); a phase still open under a
+    closed or abandoned workstream; a phase's workstream, a node's parent, a workstream's goal, a
+    phase's owner or the phase it continues naming no file; and one machine listed by two person
+    files. Other writes go on, so a clash in one workstream does not stop work in another.
+  - **`next:` is this person's**: the lowest-order runnable phase owned by the person this machine is
+    registered as. A new `others:` line names each other person's next, by name. A machine no
+    person file lists, or two do, is shown the whole project's next and told so.
+  - **Authored handoffs.** `handoff` names its file `<person id>-<slug>.md` and adds `Author:` and
+    `Machine:` lines, so two people ending with the same words no longer overwrite each other. Like
+    every other write in a shared project it is refused, writing nothing, from a machine no person
+    file lists (exit 95, naming `join`) or two do (exit 90). `status` names the newest handoff by
+    time compared as an instant, not as text, so one written in a time zone behind this one is not
+    passed over, with its author; and names your own newest too, as `your last handoff:`, when it
+    is a different file. Each is marked STALE once the project's progress has moved past it.
+  - **Until a later release, a shared project records each phase's owner without enforcing it:**
+    `next:` reads the owner, but nothing yet refuses one person's gates on another person's phase.
+  - Skills: `keel-orchestrator` says that resuming a shared project starts with the behind reading
+    (pull first), that `next:` is this person's, and what each warning after a merge means and how
+    to repair it; `using-keel` says a fresh clone of a shared project needs no `init-project`, that
+    each machine runs `join`, and that `status` says when the copy is behind.
+- **`scripts/test-shared-progress.ps1`** gains a group for all of this, on its own bare remote and
+  two clones, with controls that must behave differently. It now takes about nine minutes, so
+  `check-suite-docs.ps1 -Strict` and a push take that much longer.
+
 ## marketplace 0.78.0 - 2026-11-11
 
 **Not yet released.** This is on `main` only: no installed copy gets it until the release that also

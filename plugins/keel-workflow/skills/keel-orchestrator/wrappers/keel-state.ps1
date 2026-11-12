@@ -617,7 +617,14 @@ function Read-State {
     if ($ForWrite) { Enter-WriteLock $sp "project '$Slug'" }
     if (Test-SharedProgress $Slug) {
         $rsShared = Read-SharedState $Slug
-        if ($ForWrite) { [void](Get-SpWriter $Slug) }
+        if ($ForWrite) {
+            # The read-time check runs before every write too, so a person writing into a broken
+            # whole hears about it. Written to the console directly, never through Say: Say is
+            # Write-Output, and every writing arm assigns this function's result to $state, which
+            # would then hold the warning lines as well as the state.
+            foreach ($rsLine in @((Get-SpMergeProblems $Slug $rsShared).Lines)) { [Console]::Out.WriteLine("KEEL:   WARNING: after a merge, $rsLine") }
+            [void](Get-SpWriter $Slug)
+        }
         return $rsShared
     }
     if (-not (Test-Path -LiteralPath $sp)) {
@@ -1149,6 +1156,134 @@ function Get-SpWriter {
         Fail 90 "This machine ('$spM') is listed by two person files, $spWho, most likely after a merge, so whose entry a write would be cannot be told. Take it off the one it is not: 'join -As <person id> -Clear'. Nothing was written."
     }
     return [string]$spMine[0].id
+}
+
+function Get-SpMe {
+    # Which person this machine is, for READING: the one person file whose machines list names it,
+    # or $null when none does or two do. It never refuses; Get-SpWriter is the version that does.
+    param([string]$SmSlug)
+    $smM = $env:COMPUTERNAME
+    $smMine = @($script:SpCtx[$SmSlug].People | Where-Object { @(Get-Prop $_ 'machines' @()) -contains $smM })
+    if ($smMine.Count -ne 1) { return $null }
+    return $smMine[0]
+}
+
+# THE READ-TIME CHECK AFTER A MERGE. Git merges two files without asking keel, so two writes each
+# valid alone can merge into a whole that breaks a rule the wrapper refuses for a single writer.
+# Run on what Read-SharedState built, which holds every phase, folded ones included, and on the
+# person files. Returns one line of text per broken rule (each printed after 'WARNING: after a
+# merge, ') and the phases in a run-order clash, which 'status' never names as next. Read by
+# 'status', 'tree' and every write; it refuses nothing itself - a write that would add to a broken
+# rule is refused by the code that refuses it for one writer (92 for a run order).
+function Get-SpMergeProblems {
+    param([string]$MpSlug, $MpState)
+    $mpOut = @{ Lines = (New-Object System.Collections.Generic.List[string]); Clash = @{} }
+    $mpPhases = @(Get-Phases $MpState)
+    $mpNodes = @(Get-Nodes $MpState)
+    $mpNodeIds = @{}
+    foreach ($mpN in $mpNodes) { $mpNodeIds[[string]$mpN.id] = $mpN }
+    $mpGoalIds = @{}
+    foreach ($mpG in @(Get-GoalList $MpState)) { $mpGoalIds[[string]$mpG.id] = $true }
+    $mpPhaseIds = @{}
+    foreach ($mpP in $mpPhases) { $mpPhaseIds[[string]$mpP.id] = $true }
+    $mpPeople = @($script:SpCtx[$MpSlug].People)
+    $mpPersonIds = @{}
+    foreach ($mpPe in $mpPeople) { $mpPersonIds[[string](Get-Prop $mpPe 'id' '')] = $true }
+    $mpPull = 'Pull again, or have whoever wrote it commit and push that file.'
+
+    # Two phases of one workstream at one run order: the rule add-phase and revise-phase refuse at
+    # 92, every stage counted as they count it. A handed-over phase is set aside, since the phase
+    # that continues it takes its place in the order.
+    $mpGroups = @{}
+    foreach ($mpP in $mpPhases) {
+        $mpRo = Get-Prop $mpP 'runOrder' -1
+        if ($mpRo -lt 0 -or [string](Get-Prop $mpP 'stage' '') -eq 'handed-over') { continue }
+        $mpKey = "$($mpP.ws)|$mpRo"
+        if (-not $mpGroups.ContainsKey($mpKey)) { $mpGroups[$mpKey] = New-Object System.Collections.Generic.List[object] }
+        $mpGroups[$mpKey].Add($mpP)
+    }
+    foreach ($mpKey in @($mpGroups.Keys | Sort-Object)) {
+        $mpSet = @($mpGroups[$mpKey] | Sort-Object -Property id)
+        if ($mpSet.Count -lt 2) { continue }
+        $mpIds = @($mpSet | ForEach-Object { [string]$_.id })
+        $mpWsId = [string]$mpSet[0].ws
+        $mpRo = Get-Prop $mpSet[0] 'runOrder' -1
+        $mpNone = if ($mpIds.Count -eq 2) { 'neither is' } else { 'none of them is' }
+        $mpOut.Lines.Add("$($mpIds -join ' and ') share run order $mpRo in $mpWsId, so $mpNone named as next. Move one with revise-phase -RunOrder, agreed with whoever owns the other.")
+        foreach ($mpI in $mpIds) { $mpOut.Clash[$mpI] = [pscustomobject]@{ Order = $mpRo; Ws = $mpWsId; Others = @($mpIds | Where-Object { $_ -ne $mpI }) } }
+    }
+
+    # A phase still open under a workstream that one person closed or abandoned while another
+    # added the phase.
+    foreach ($mpP in $mpPhases) {
+        $mpSt = [string](Get-Prop $mpP 'stage' '')
+        if (@('delivered', 'abandoned', 'handed-over') -contains $mpSt) { continue }
+        $mpW = $mpNodeIds[[string]$mpP.ws]
+        if ($null -eq $mpW) { continue }
+        $mpWsSt = [string](Get-Prop $mpW 'status' '')
+        if ($SpClosedStatuses -contains $mpWsSt) {
+            $mpOut.Lines.Add("phase $($mpP.id) is $mpSt under $($mpP.ws), which is $mpWsSt. Abandon the phase, or plan its work in an open workstream.")
+        }
+    }
+
+    # A reference to an id with no file: each reference a progress file carries, other than needs.
+    foreach ($mpP in $mpPhases) {
+        if (-not $mpNodeIds.ContainsKey([string]$mpP.ws)) {
+            $mpOut.Lines.Add("phase $($mpP.id) names workstream $($mpP.ws), which has no file under progress/nodes/. $mpPull")
+        }
+        $mpOwner = [string](Get-Prop $mpP 'owner' '')
+        if ($mpOwner -and -not $mpPersonIds.ContainsKey($mpOwner)) {
+            $mpOut.Lines.Add("phase $($mpP.id) names owner $mpOwner, which has no file under progress/people/. $mpPull")
+        }
+        $mpCont = [string](Get-Prop $mpP 'continues' '')
+        if ($mpCont -and -not $mpPhaseIds.ContainsKey($mpCont)) {
+            $mpOut.Lines.Add("phase $($mpP.id) continues $mpCont, which has no file under progress/phases/ or progress/closed/. $mpPull")
+        }
+    }
+    foreach ($mpN in $mpNodes) {
+        $mpPar = [string](Get-Prop $mpN 'parent' '')
+        if ($mpPar -and $mpPar -ne 'root' -and -not $mpNodeIds.ContainsKey($mpPar)) {
+            $mpOut.Lines.Add("$($mpN.role) $($mpN.id) names parent $mpPar, which has no file under progress/nodes/. $mpPull")
+        }
+        if ([string](Get-Prop $mpN 'role' '') -ne 'workstream') { continue }
+        foreach ($mpGid in @(Get-Prop $mpN 'goals' @())) {
+            if (-not $mpGoalIds.ContainsKey([string]$mpGid)) {
+                $mpOut.Lines.Add("workstream $($mpN.id) names goal $mpGid, which has no file under progress/goals/. $mpPull")
+            }
+        }
+    }
+
+    # One machine in two person files: every write from it refuses (Get-SpWriter) until one drops it.
+    $mpMach = @{}
+    foreach ($mpPe in $mpPeople) {
+        foreach ($mpM in @(Get-Prop $mpPe 'machines' @())) {
+            $mpMk = [string]$mpM
+            if (-not $mpMach.ContainsKey($mpMk)) { $mpMach[$mpMk] = New-Object System.Collections.Generic.List[object] }
+            $mpMach[$mpMk].Add($mpPe)
+        }
+    }
+    foreach ($mpMk in @($mpMach.Keys | Sort-Object)) {
+        if ($mpMach[$mpMk].Count -lt 2) { continue }
+        $mpWho = (@($mpMach[$mpMk] | ForEach-Object { "$(Get-Prop $_ 'id' '?') ($(Get-Prop $_ 'name' '?'))" })) -join ' and '
+        $mpOut.Lines.Add("machine $mpMk is listed by two person files, $mpWho, so writes from it are refused until one drops it: join -As <person id> -Clear.")
+    }
+    return $mpOut
+}
+
+function Get-SpNextText {
+    # One person's next, in a few words, for the 'others:' line: by the rule 'next:' uses.
+    param($NtPool, $NtClash)
+    $ntOrdered = @($NtPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
+    $ntRun = @($ntOrdered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' })
+    if ($ntRun.Count -eq 0) {
+        if ($ntOrdered.Count -gt 0) { return 'waiting' }
+        return 'no declared run order'
+    }
+    $ntLow = Get-Prop $ntRun[0] 'runOrder' -1
+    $ntTied = @($ntRun | Where-Object { (Get-Prop $_ 'runOrder' -1) -eq $ntLow } | Sort-Object -Property id)
+    if ($ntTied.Count -gt 1) { return ('ambiguous, ' + ((@($ntTied | ForEach-Object { [string]$_.id })) -join ' or ')) }
+    if ($NtClash.ContainsKey([string]$ntRun[0].id)) { return "none named (run-order clash in $($ntRun[0].ws))" }
+    return [string]$ntRun[0].id
 }
 
 function Write-SharedState {
@@ -2628,10 +2763,28 @@ function Get-HandoffDir {
 # variable names are case-insensitive and this script's param() block declares
 # [string]$Branch, so a local called $branch IS that parameter, and
 # check-suite-docs.ps1 section 6 refuses the commit.
+#
+# THE READING IS TAKEN ONCE AND PRINTED WHERE IT BELONGS. Get-UnpushedReading does the work and
+# returns the lines this has always printed, in the same order and words, so a project that keeps
+# its progress on this machine prints exactly what it did. A project that shares its progress
+# through its repo also needs the reverse reading - a colleague's pushed work this copy lacks - and
+# 'status' prints that at the TOP, before anything a reader might act on; so the reading is taken
+# there, kept in $script:UpReading, and the bottom line reuses it rather than making a second
+# ls-remote. In a shared project the reading also says when it could not be taken (NotChecked),
+# because silence there reads as "this copy is up to date".
+$script:UpReading = $null
 function Write-UnpushedCommitsLine {
     param($UpProj, $UpCfg)
+    $upR = $script:UpReading
+    if ($null -eq $upR) { $upR = Get-UnpushedReading $UpProj $UpCfg $false }
+    foreach ($upLine in @($upR.Lines)) { Say $upLine }
+}
 
-    if (-not (Get-Prop $UpCfg 'git' $false)) { return }
+function Get-UnpushedReading {
+    param($UpProj, $UpCfg, [bool]$UpShared)
+    $upOut = [pscustomobject]@{ Lines = New-Object System.Collections.Generic.List[string]; NotPulled = $null; Behind = 0; NotChecked = $null }
+
+    if (-not (Get-Prop $UpCfg 'git' $false)) { return $upOut }
 
     $upRoot = $UpProj.Root
 
@@ -2639,16 +2792,25 @@ function Write-UnpushedCommitsLine {
     # Fail open, as for an unreachable remote, but say the reading did not happen: silence here
     # reads as "nothing unpushed".
     if ($upRp.NotFound) {
-        Say "  git NOT FOUND on PATH, so whether this project's commits have reached the remote 'origin' was NOT checked. Install Git for Windows, or put git on PATH."
-        return
+        $upOut.Lines.Add("  git NOT FOUND on PATH, so whether this project's commits have reached the remote 'origin' was NOT checked. Install Git for Windows, or put git on PATH.")
+        $upOut.NotChecked = 'git not found'
+        return $upOut
     }
-    if ($upRp.Code -ne 0) { return }
+    if ($upRp.Code -ne 0) { return $upOut }
 
     $upLines = @($upRp.Output | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    if ($upLines.Count -lt 2) { return }
+    if ($upLines.Count -lt 2) { return $upOut }
     $upLocalSha = $upLines[0]
     $upRef      = $upLines[1]
-    if ($upRef -notlike 'refs/heads/*') { return }
+    if ($upRef -notlike 'refs/heads/*') {
+        # Only a shared project hears about it: a detached HEAD cannot strand work on this machine,
+        # but it does leave a colleague's pushed work unread. Only where there is an origin to read.
+        if ($UpShared) {
+            $upUrl0 = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'config', '--get', 'remote.origin.url')
+            if ($upUrl0.Code -eq 0) { $upOut.NotChecked = 'a detached HEAD has no branch to compare' }
+        }
+        return $upOut
+    }
     $upBranch = $upRef.Substring('refs/heads/'.Length)
 
     # THE OUTWARD GUARD, site 5 of 5 - the only one that is not a gh call, and the
@@ -2673,10 +2835,14 @@ function Write-UnpushedCommitsLine {
     #      is what makes the guard testable without a network at all.
     $upBlocked = Test-OutwardBlocked
     if ($null -ne $upBlocked) {
-        Say ("  " + (Get-OutwardBlockedMessage -OwReason $upBlocked `
+        $upOut.Lines.Add("  " + (Get-OutwardBlockedMessage -OwReason $upBlocked `
             -OwCommands @("git -C $upRoot ls-remote origin $upRef") `
             -OwAssurance 'No reading of the remote was attempted, so this says NOTHING about whether local commits have been pushed.'))
-        return
+        if ($UpShared) {
+            $upUrl1 = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'config', '--get', 'remote.origin.url')
+            if ($upUrl1.Code -eq 0) { $upOut.NotChecked = $upBlocked }
+        }
+        return $upOut
     }
 
     # GIT_TERMINAL_PROMPT=0 so a remote that wants credentials FAILS instead of blocking
@@ -2697,9 +2863,10 @@ function Write-UnpushedCommitsLine {
         # Only NOW is it worth asking whether there is a remote at all - the answer costs
         # a process and is needed on this path only.
         $upUrl = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'config', '--get', 'remote.origin.url')
-        if ($upUrl.Code -ne 0) { return }
-        Say "  COULD NOT REACH the remote 'origin' (git ls-remote exit $($upLs.Code)). This says NOTHING about whether local commits have been pushed - it is not a clean reading."
-        return
+        if ($upUrl.Code -ne 0) { return $upOut }
+        $upOut.Lines.Add("  COULD NOT REACH the remote 'origin' (git ls-remote exit $($upLs.Code)). This says NOTHING about whether local commits have been pushed - it is not a clean reading.")
+        $upOut.NotChecked = "the remote 'origin' could not be reached"
+        return $upOut
     }
 
     $upRemoteSha = ''
@@ -2708,18 +2875,22 @@ function Write-UnpushedCommitsLine {
     if ($upRemoteSha -eq '') {
         $upAll = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'rev-list', '--count', 'HEAD')
         $upAllN = if ($upAll.Code -eq 0) { $upAll.Text.Trim() } else { 'an unknown number of' }
-        Say "  branch '$upBranch' is NOT on the remote 'origin': all $upAllN local commit(s) on it exist only on this machine."
-        return
+        $upOut.Lines.Add("  branch '$upBranch' is NOT on the remote 'origin': all $upAllN local commit(s) on it exist only on this machine.")
+        return $upOut
     }
 
-    if ($upRemoteSha -eq $upLocalSha) { return }
+    if ($upRemoteSha -eq $upLocalSha) { return $upOut }
 
     $upShort = if ($upRemoteSha.Length -ge 7) { $upRemoteSha.Substring(0, 7) } else { $upRemoteSha }
 
     $upCount = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'rev-list', '--count', "$upRemoteSha..HEAD")
     if ($upCount.Code -ne 0) {
-        Say "  the remote 'origin' holds $upShort on '$upBranch', which is not in this clone, so the unpushed count could not be computed. Fetch, then re-run."
-        return
+        # The remote's sha is not in this clone. A shared project says so at the top, as work
+        # this copy has not pulled, which is the reading that matters there; the line below would
+        # repeat it in other words.
+        if ($UpShared) { $upOut.NotPulled = "$upShort on '$upBranch'" }
+        else { $upOut.Lines.Add("  the remote 'origin' holds $upShort on '$upBranch', which is not in this clone, so the unpushed count could not be computed. Fetch, then re-run.") }
+        return $upOut
     }
 
     $upN = 0
@@ -2728,8 +2899,45 @@ function Write-UnpushedCommitsLine {
         # The RANGE and not only the count. The range is what makes charter P6's preview
         # exact for a push, and it costs nothing: the remote sha is already in hand from the
         # call that produced the count.
-        Say "  $upN commit(s) on '$upBranch' have NOT reached the remote 'origin' ($upShort..HEAD), read live from git ls-remote. They exist only on this machine."
+        $upOut.Lines.Add("  $upN commit(s) on '$upBranch' have NOT reached the remote 'origin' ($upShort..HEAD), read live from git ls-remote. They exist only on this machine.")
     }
+
+    # The reverse count, a shared project's only: commits the remote holds that HEAD does not
+    # reach, read locally, since the remote's sha is already in this clone (fetched, not merged).
+    if ($UpShared) {
+        $upBehind = Invoke-Native -Exe 'git' -Arguments @('-C', $upRoot, 'rev-list', '--count', "HEAD..$upRemoteSha")
+        $upB = 0
+        if ($upBehind.Code -eq 0 -and [int]::TryParse($upBehind.Text.Trim(), [ref]$upB)) { $upOut.Behind = $upB }
+    }
+    return $upOut
+}
+
+# The top of 'status' in a project that shares its progress: whether this copy lacks pushed work,
+# whether the reading could be taken at all, and how many progress files here are not committed.
+# Each line begins WARNING:, so keel-session-start.ps1 forwards it to a resuming session. Silent
+# when there is nothing to say (charter P16).
+function Write-SpRemoteLines {
+    param($SrProj, $SrCfg)
+    $script:UpReading = Get-UnpushedReading $SrProj $SrCfg $true
+    $srR = $script:UpReading
+    if ($srR.NotPulled) { Say "  WARNING: the remote 'origin' holds work this copy has not pulled ($($srR.NotPulled)). Pull before acting on what follows." }
+    if ($srR.Behind -gt 0) { Say "  WARNING: this copy is $($srR.Behind) commit(s) behind 'origin'. Pull before acting on what follows." }
+    if ($srR.NotChecked) { Say "  WARNING: whether this copy is behind 'origin' was NOT checked ($($srR.NotChecked)), so what follows may lack others' pushed work." }
+
+    if (-not (Get-Prop $SrCfg 'git' $false)) { return }
+    # --untracked-files=all, because plain porcelain lists a new folder as ONE path however many
+    # files it holds. A file in a SUBFOLDER of a phase's artifacts folder is not counted: by the
+    # layout only top-level files are artifacts, and a subfolder there can only hold scratch that
+    # belongs in the per-machine phase folder. Nothing stops a commit from taking such a file, so
+    # this count is not a promise that one will not be committed.
+    $srSt = Invoke-Native -Exe 'git' -Arguments @('-C', $SrProj.Root, 'status', '--porcelain', '--untracked-files=all', '--', 'progress') -NativeSplitStderr
+    if ($srSt.NotFound) { Say '  WARNING: whether progress files here are committed was NOT checked (git not found).'; return }
+    if ($srSt.Code -ne 0) { return }
+    $srN = @($srSt.Output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Where-Object {
+        $srPath = ([string]$_).Substring([Math]::Min(3, ([string]$_).Length)).Trim('"')
+        $srPath -notmatch '^progress/phases/[^/]+/artifacts/[^/]+/'
+    }).Count
+    if ($srN -gt 0) { Say "  WARNING: $srN progress file(s) written here are not committed, so nobody else can see them." }
 }
 
 # Reports the handoff the LAST session wrote for this one, and whether state has moved
@@ -2744,6 +2952,7 @@ function Write-HandoffLine {
     param($HoProj, $HoState)
     $hoDir = Get-HandoffDir $HoProj (Read-ProjectConfig $HoProj.ConfigPath)
     if (-not (Test-Path -LiteralPath $hoDir)) { return }
+    if (Test-SharedProgress $HoProj.Slug) { Write-SpHandoffLines $HoProj $HoState $hoDir; return }
 
     $hoBest  = $null
     $hoStamp = ''
@@ -2792,6 +3001,54 @@ function Write-HandoffLine {
     }
 }
 
+# A shared project's handoffs. Several people write them, from machines that may sit in different
+# time zones, so the newest is chosen by INSTANT: as text, a later stamp from a zone behind this
+# one sorts first. A stamp with no offset, from before the project shared its progress, is read as
+# this machine's local time. The newest is named with its author, read from its Author: line; when
+# this machine's person wrote a different newest one of their own, that is named too, since it is
+# usually the one their next session continues. Each is STALE when the revision - the newest 'at'
+# under progress/ - is a later instant than its stamp. Same wording rule as above: no token
+# keel-session-start.ps1 filters on.
+function Write-SpHandoffLines {
+    param($HsProj, $HsState, [string]$HsDir)
+    $hsLiveText = Format-StateStamp (Get-Prop $HsState 'updated' '')
+    $hsLive = Get-SpInstant $hsLiveText
+    $hsMe = Get-SpMe $HsProj.Slug
+    $hsMeId = if ($null -ne $hsMe) { [string](Get-Prop $hsMe 'id' '') } else { '' }
+    $hsBest = $null
+    $hsMine = $null
+    foreach ($hsFile in @(Get-ChildItem -LiteralPath $HsDir -Filter '*.md' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc)) {
+        $hsText = Get-Content -LiteralPath $hsFile.FullName -Raw -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($hsText)) { continue }
+        if ($hsText -notmatch '(?m)^State revision:[ \t]*(\S+)[ \t\r]*$') { continue }
+        $hsStamp = $Matches[1]
+        $hsI = Get-SpInstant $hsStamp
+        if ($null -eq $hsI) { continue }
+        $hsAName = ''
+        $hsAId = ''
+        if ($hsText -match '(?m)^Author:[ \t]*(.*?)[ \t]*\((p-[0-9a-f]{4})\)[ \t\r]*$') { $hsAName = $Matches[1]; $hsAId = $Matches[2] }
+        $hsEntry = [pscustomobject]@{ File = $hsFile; Stamp = $hsStamp; I = $hsI; AName = $hsAName; AId = $hsAId }
+        # -ge over files ordered by write time, so a tie goes to the file written last, as above.
+        if ($null -eq $hsBest -or $hsI -ge $hsBest.I) { $hsBest = $hsEntry }
+        if ($hsMeId -and $hsAId -ceq $hsMeId -and ($null -eq $hsMine -or $hsI -ge $hsMine.I)) { $hsMine = $hsEntry }
+    }
+    if ($null -eq $hsBest) { return }
+
+    # The leading comma keeps each row a pair: @(@(a, b)) would flatten into two rows.
+    $hsRows = @(, @('handoff', $hsBest))
+    if ($null -ne $hsMine -and $hsMine.File.FullName -ne $hsBest.File.FullName) { $hsRows += , @('your last handoff', $hsMine) }
+    foreach ($hsRow in $hsRows) {
+        $hsE = $hsRow[1]
+        $hsRel = $hsE.File.FullName
+        if ($hsRel.StartsWith($HsProj.Root)) { $hsRel = $hsRel.Substring($HsProj.Root.Length).TrimStart('\', '/') }
+        $hsBy = if ($hsE.AId) { "  (by $($hsE.AName), $($hsE.AId))" } else { '  (author not recorded)' }
+        if ($hsRow[0] -eq 'handoff') { Say "  handoff: $hsRel$hsBy" } else { Say "  your last handoff: $hsRel" }
+        if ($null -ne $hsLive -and $hsLive -gt $hsE.I) {
+            Say "           STALE - written at state revision $($hsE.Stamp); state has since moved to $hsLiveText."
+        }
+    }
+}
+
 # gh can be installed at "C:\Program Files\GitHub CLI\gh.exe" without being on PATH.
 # Resolving by PATH alone would then report it missing.
 function Resolve-Gh {
@@ -2820,7 +3077,7 @@ function Resolve-Gh {
 # destination is still a sandboxed run. An AST parse of this whole file finds FIVE
 # process invocations across FOUR verbs that leave this machine - the four gh calls in
 # signals-push, adopt-signal and resolve-signal -CloseIssue (two of them), and
-# the git ls-remote in Write-UnpushedCommitsLine reached from 'status'. 'gh'
+# the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
 # never appears as a command name here, because Invoke-Native applies the call
 # operator to a variable, so a name-based search cannot enumerate this surface.
 #
@@ -2838,7 +3095,7 @@ function Resolve-Gh {
 #   block   - outward acts refused wherever the state home resolves
 # Any other value is treated as absent and SAID SO on stderr rather than guessed
 # at. KEEL_OUTWARD is read and never written, so it needs none of the
-# save-and-restore GIT_TERMINAL_PROMPT gets in Write-UnpushedCommitsLine.
+# save-and-restore GIT_TERMINAL_PROMPT gets in Get-UnpushedReading.
 #
 # IT FAILS OPEN IF TEMP CANNOT BE RESOLVED, and that is deliberate but is the
 # weakest point here, so it is stated rather than buried: with no readable TEMP
@@ -3565,11 +3822,25 @@ switch ($Command) {
     $hoStamp = Format-StateStamp (Get-Prop $state 'updated' '')
     $hoPath  = Join-Path $hoDir "$hoSlug.md"
 
+    # In a project that shares its progress several people write handoffs, so each is named for
+    # its author's person id - two people ending with the same -Next no longer overwrite each other -
+    # and says who wrote it and from where. The author is the writer every other write here names,
+    # so a machine no person file lists is refused at 95, and one two list at 90, writing nothing.
+    $hoAuthorLines = @()
+    if (Test-SharedProgress $proj.Slug) {
+        $hoPid = Get-SpWriter $proj.Slug
+        $hoPerson = @($script:SpCtx[$proj.Slug].People | Where-Object { [string](Get-Prop $_ 'id' '') -ceq $hoPid })
+        $hoAuthorName = if ($hoPerson.Count -gt 0) { [string](Get-Prop $hoPerson[0] 'name' '?') } else { '?' }
+        $hoPath = Join-Path $hoDir "$hoPid-$hoSlug.md"
+        $hoAuthorLines = @("Author: $hoAuthorName ($hoPid)", "Machine: $env:COMPUTERNAME")
+    }
+
     $hoBody = @(
         "# Handoff - $hoSlug"
         ''
         "Written: $(Now)"
         "State revision: $hoStamp"
+        $hoAuthorLines
         "Project: $($proj.Slug)"
         ''
         '## Next'
@@ -3645,6 +3916,19 @@ switch ($Command) {
         Say "           Check the CHANGELOG between them, then: ack-keel-version -Detail '<what you checked>'"
     }
 
+    # ---- a project that shares its progress: what this copy may lack, then what a merge broke.
+    # First, because every line below is computed from what this copy holds. Nothing here runs for
+    # a project that keeps its progress on this machine.
+    $stShared = Test-SharedProgress $proj.Slug
+    $stMerge = $null
+    $stMe = $null
+    if ($stShared) {
+        Write-SpRemoteLines $proj $cfg
+        $stMerge = Get-SpMergeProblems $proj.Slug $state
+        foreach ($stLine in @($stMerge.Lines)) { Say "  WARNING: after a merge, $stLine" }
+        $stMe = Get-SpMe $proj.Slug
+    }
+
     if (-not $Brief) {
         Say "  goals: $($goalList.Count)   nodes: $($nodes.Count)   phases: $($phases.Count)"
     }
@@ -3673,15 +3957,37 @@ switch ($Command) {
     Write-Output ''
 
     # ---- what runs next, by DECLARED order only
-    $pending = @($phases | Where-Object { @('delivered', 'abandoned') -notcontains (Get-Prop $_ 'stage' '') })
-    $noOrder = @($pending | Where-Object { (Get-Prop $_ 'runOrder' -1) -lt 0 })
+    $pending = @($phases | Where-Object { @('delivered', 'abandoned', 'handed-over') -notcontains (Get-Prop $_ 'stage' '') })
+    $noOrder =@($pending | Where-Object { (Get-Prop $_ 'runOrder' -1) -lt 0 })
     if ($noOrder.Count -gt 0) {
         Say "  WARNING: $($noOrder.Count) pending phase(s) have no declared run order: $(($noOrder | ForEach-Object { $_.id }) -join ', ')"
         Say '           Run order is declared data. This script will not guess it.'
     }
-    $ordered = @($pending | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
+    # In a project that shares its progress, next is THIS person's: the phases they own. Everyone
+    # else's goes on the 'others:' line below. A machine no person file lists, or two list, has no
+    # person to be, so it is shown the whole project's next, and told so. A phase in a run-order
+    # clash after a merge is never named (see Get-SpMergeProblems).
+    $stPool = $pending
+    $stMine = $stShared -and ($null -ne $stMe)
+    if ($stMine) {
+        $stPool = @($pending | Where-Object { [string](Get-Prop $_ 'owner' '') -ceq [string](Get-Prop $stMe 'id' '') })
+    }
+    elseif ($stShared) {
+        Say "  note: next: is over everyone's phases - this machine is not registered in this project (join), or is listed twice."
+    }
+    $ordered = @($stPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
     $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' })
-    if ($runnable.Count -gt 0) {
+    $stClashNext = $false
+    if ($stShared -and $runnable.Count -gt 0) {
+        $stLow0 = Get-Prop $runnable[0] 'runOrder' -1
+        $stTied0 = @($runnable | Where-Object { (Get-Prop $_ 'runOrder' -1) -eq $stLow0 })
+        $stClashNext = ($stTied0.Count -eq 1) -and $stMerge.Clash.ContainsKey([string]$runnable[0].id)
+    }
+    if ($stClashNext) {
+        $stC = $stMerge.Clash[[string]$runnable[0].id]
+        Say "  next: none named - $($runnable[0].id) shares run order $($stC.Order) in $($stC.Ws) with $($stC.Others -join ', ') after a merge (see the warning above)."
+    }
+    elseif ($runnable.Count -gt 0) {
         # Run order is unique per WORKSTREAM (add-phase / revise-phase, exit 92), so two
         # workstreams can each hold a phase at the same order and this state cannot express
         # which of them runs first. When the lowest runnable tier holds more than one phase,
@@ -3786,8 +4092,25 @@ switch ($Command) {
             }
         }
     }
+    elseif ($stMine -and $ordered.Count -gt 0) { Say '  next: nothing runnable - every pending phase you own is waiting.' }
+    elseif ($stMine) { Say '  next: nothing pending that you own.' }
     elseif ($ordered.Count -gt 0) { Say '  next: nothing runnable - every pending phase is waiting.' }
     else { Say '  next: nothing pending.' }
+
+    # ---- everyone else's next, in a project that shares its progress: one line, each other person
+    # who owns a pending phase, by name, by the same rule. Silent when nobody else does.
+    if ($stMine) {
+        $stOthers = New-Object System.Collections.Generic.List[string]
+        $stMeId = [string](Get-Prop $stMe 'id' '')
+        foreach ($stPe in @($script:SpCtx[$proj.Slug].People | Sort-Object -Property @{ Expression = { [string](Get-Prop $_ 'name' '') } }, id)) {
+            $stPeId = [string](Get-Prop $stPe 'id' '')
+            if ($stPeId -ceq $stMeId) { continue }
+            $stTheirs = @($pending | Where-Object { [string](Get-Prop $_ 'owner' '') -ceq $stPeId })
+            if ($stTheirs.Count -eq 0) { continue }
+            $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $(Get-SpNextText $stTheirs $stMerge.Clash)")
+        }
+        if ($stOthers.Count -gt 0) { Say "  others: $($stOthers -join '; ')" }
+    }
 
     # ---- the handoff the LAST session wrote for this one
     Write-HandoffLine $proj $state
@@ -3958,6 +4281,11 @@ switch ($Command) {
     $nodes = @(Get-Nodes $state)
 
     Say "$($state.project) - $($state.title)"
+    # The read-time check after a merge, as 'status' prints it: a tree drawn from a broken whole
+    # says so above the tree.
+    if (Test-SharedProgress $proj.Slug) {
+        foreach ($trLine in @((Get-SpMergeProblems $proj.Slug $state).Lines)) { Say "  WARNING: after a merge, $trLine" }
+    }
     foreach ($g in @(Get-GoalList $state)) {
         $mark = if ((Get-Prop $g 'status' 'OPEN') -eq 'UNADDRESSED') { '  [UNADDRESSED]' } else { '' }
         Write-Output ("  {0}  {1}{2}" -f $g.id, $g.text, $mark)

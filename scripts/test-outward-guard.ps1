@@ -487,7 +487,7 @@ function Invoke-Cases {
                "exit $($OgG3Reason.Code), wanted '$OgNoTarget' PRESENT and the guard's text ABSENT"
 
     # =====================================================================
-    # GROUP 4 - status / Write-UnpushedCommitsLine (row 5)
+    # GROUP 4 - status / Get-UnpushedReading (row 5)
     # =====================================================================
     $OgG4Case = Invoke-Wrapper -OgHome $OgHome -OgArgs @('status', '-Path', $OgGit)
 
