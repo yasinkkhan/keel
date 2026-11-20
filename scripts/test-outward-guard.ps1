@@ -1,4 +1,4 @@
-# test-outward-guard.ps1 - the suite for the FIVE outward code points: the process
+# test-outward-guard.ps1 - the suite for the SIX outward code points: the process
 # invocations in keel-state.ps1 that leave the machine.
 #
 # WHY THIS EXISTS AND WHY IT IS A SIBLING rather than three more cases inside
@@ -11,14 +11,16 @@
 # from it would need an argument that this reason does not apply, and there is none - the
 # outward guard shares no machinery with quarantine either.
 #
-# WHAT IT COVERS. Five process invocations across four verbs, found by an AST parse of the
-# whole wrapper:
+# WHAT IT COVERS. Six process invocations across five verbs, found by an AST parse of the
+# whole wrapper - the parse Group 0 below runs on every run, so a seventh call added without a
+# row here fails this suite rather than going unnoticed:
 #
 #   1  signals-push -Apply           gh api --method POST repos/<slug>/issues      exit 90
 #   2  adopt-signal                  gh issue view <n> --repo <slug>               exit 90
 #   3  resolve-signal -CloseIssue    gh api --method POST .../issues/<n>/comments  exit 0
 #   4  resolve-signal -CloseIssue    gh issue close <n> --repo <slug>              exit 0
 #   5  status                        git -C <root> ls-remote origin <ref>          exit 0
+#   6  signals-relink                gh issue view <n> --repo <slug>               exit 90
 #
 # Rows 3 and 4 are TWO CALLS INSIDE ONE VERB. A case that exercises the verb once and
 # asserts one declined command covers row 3 and leaves row 4 untested, which is why the
@@ -41,7 +43,7 @@
 #                        by any limb passes for the wrong reason.
 #
 # THE REASON CONTROL'S STRING DIFFERS BY VERB, and getting that wrong is an easy trap. The
-# three gh verbs share one: each refuses, or at resolve-signal declines, with 'No report
+# four gh verbs share one: each refuses, or at resolve-signal declines, with 'No report
 # destination is chosen' when no destination was chosen, and that is a real non-guard
 # outcome on the same path. status resolves no gh and no destination at all - its
 # false-reason string is "COULD NOT REACH the remote". Each is asserted against the group
@@ -74,6 +76,13 @@
 # check-suite-docs.ps1 section 14 reports as a problem. Without the fake, a broken guard
 # would post fixture issues with the operator's own credentials.
 #
+# GROUP 0 IS THE COUNT ITSELF. It parses the wrapper under test, counts the Invoke-Native calls
+# whose -Exe names gh or that run ls-remote, and asserts that count equals $OgDeclaredOutward,
+# the number of rows the table above lists. Its control proves the filter discriminates.
+#
+# -AgainstWrapper <path> runs every row against another copy of keel-state.ps1, to show a row
+# able to fail; the push path runs this suite with no switches.
+#
 # GROUP 6 IS NOT AN OUTWARD POINT. It pins the shape check on a per-call -Repo with a case
 # and a control on one open signal, and it lives here because the value it checks is the
 # destination every outward row above depends on.
@@ -93,7 +102,8 @@
 # collide the same way.
 
 param(
-    [switch]$Quiet
+    [switch]$Quiet,
+    [string]$AgainstWrapper = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,6 +111,10 @@ Set-StrictMode -Version Latest
 
 $OgRepoRoot     = Split-Path -Parent $PSScriptRoot
 $OgStateWrapper = Join-Path $OgRepoRoot 'plugins\keel-workflow\skills\keel-orchestrator\wrappers\keel-state.ps1'
+if ($AgainstWrapper -ne '') { $OgStateWrapper = (Resolve-Path -LiteralPath $AgainstWrapper).Path }
+
+# The outward invocations the header table lists. Group 0 compares the wrapper's AST against it.
+$OgDeclaredOutward = 6
 
 # By full path, deliberately: the reason-control limb empties PATH, and a bare
 # 'powershell.exe' would then fail to launch at all.
@@ -246,7 +260,7 @@ function New-Fixture {
 # move is already made by New-Fixture in test-quarantine.ps1, which writes its fixture's
 # keel.json directly because the wrapper writes no 'docs' key.
 function New-SignalWithIssue {
-    param([string]$OgRepo, [string]$OgHome, [int]$OgIssueNum)
+    param([string]$OgRepo, [string]$OgHome, [int]$OgIssueNum, [string]$OgLink = '')
 
     $OgFiled = Invoke-Wrapper -OgHome $OgHome -OgArgs @(
         'signal', '-Kind', 'gap', '-Phase', 'W1.1',
@@ -269,6 +283,7 @@ function New-SignalWithIssue {
     if ($null -eq $OgSig) { throw "fixture signal record at $OgSigPath parsed to null" }
     Add-Member -InputObject $OgSig -NotePropertyName 'issue' -NotePropertyValue $OgIssueNum -Force
     Add-Member -InputObject $OgSig -NotePropertyName 'pushedAt' -NotePropertyValue '2026-01-01T00:00:00' -Force
+    if ($OgLink -ne '') { Add-Member -InputObject $OgSig -NotePropertyName 'issueUrl' -NotePropertyValue $OgLink -Force }
     [System.IO.File]::WriteAllText($OgSigPath, ($OgSig | ConvertTo-Json -Depth 14), (New-Object System.Text.UTF8Encoding($false)))
 
     return $OgSid
@@ -310,6 +325,32 @@ function Clear-FixtureTarget {
 }
 
 # ---------------------------------------------------------------------------
+# Group 0's instrument: the outward Invoke-Native calls in a parsed script
+# ---------------------------------------------------------------------------
+# A call is outward when its -Exe text names gh (every gh site passes a variable holding gh's
+# resolved path, named for it) or when its text runs ls-remote. 'gh' never appears as a command
+# name in the wrapper, which is why a name search cannot count this and a parse must.
+function Get-OutwardCount {
+    param($OgAst)
+    $OgCalls = @($OgAst.FindAll({
+        param($OgNode)
+        ($OgNode -is [System.Management.Automation.Language.CommandAst]) -and ($OgNode.GetCommandName() -eq 'Invoke-Native')
+    }, $true))
+    $OgOut = 0
+    foreach ($OgCall in $OgCalls) {
+        $OgExe = ''
+        $OgEls = @($OgCall.CommandElements)
+        for ($OgI = 0; $OgI -lt ($OgEls.Count - 1); $OgI++) {
+            if (($OgEls[$OgI] -is [System.Management.Automation.Language.CommandParameterAst]) -and ($OgEls[$OgI].ParameterName -eq 'Exe')) {
+                $OgExe = $OgEls[$OgI + 1].Extent.Text
+            }
+        }
+        if (($OgExe -match 'gh') -or ($OgCall.Extent.Text -match 'ls-remote')) { $OgOut++ }
+    }
+    return [pscustomobject]@{ All = $OgCalls.Count; Outward = $OgOut }
+}
+
+# ---------------------------------------------------------------------------
 # The cases
 # ---------------------------------------------------------------------------
 function Invoke-Cases {
@@ -332,6 +373,28 @@ function Invoke-Cases {
 
     # Every guarded row needs a destination to get as far as the guard.
     Set-FixtureTarget -OgHome $OgHome
+
+    # =====================================================================
+    # GROUP 0 - the wrapper has exactly the outward calls this suite lists
+    # =====================================================================
+    $OgTokens = $null
+    $OgErrors = $null
+    $OgAst = [System.Management.Automation.Language.Parser]::ParseFile($OgStateWrapper, [ref]$OgTokens, [ref]$OgErrors)
+    $OgCount = Get-OutwardCount -OgAst $OgAst
+    Add-Result 'G0-ast-outward-count-equals-declared' `
+               ((@($OgErrors).Count -eq 0) -and ($OgCount.Outward -eq $OgDeclaredOutward)) `
+               "parse errors $(@($OgErrors).Count), outward calls $($OgCount.Outward), declared $OgDeclaredOutward - a call added or removed needs its row here"
+    # The control: the filter must reject the wrapper's local Invoke-Native calls, and on a
+    # one-line script holding one gh call and one local git call it must count exactly one.
+    $OgFixTokens = $null
+    $OgFixErrors = $null
+    $OgFixAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        "Invoke-Native -Exe `$gh -Arguments @('issue','view','1'); Invoke-Native -Exe 'git' -Arguments @('status')",
+        [ref]$OgFixTokens, [ref]$OgFixErrors)
+    $OgFixCount = Get-OutwardCount -OgAst $OgFixAst
+    Add-Result 'G0-CONTROL-filter-discriminates' `
+               (($OgCount.All -gt $OgCount.Outward) -and ($OgFixCount.All -eq 2) -and ($OgFixCount.Outward -eq 1)) `
+               "wrapper: $($OgCount.All) Invoke-Native calls, $($OgCount.Outward) outward; fixture: $($OgFixCount.All) calls, $($OgFixCount.Outward) outward (wanted 2 and 1)"
 
     # =====================================================================
     # GROUP 1 - signals-push -Apply (row 1)
@@ -581,6 +644,39 @@ function Invoke-Cases {
     Add-Result 'G6-control-good-repo-passes-the-check' `
                (($OgG6Ctl.Code -eq 0) -and (-not ($OgG6Ctl.Text -like '*is not owner/name*')) -and ($OgG6CtlState -ne 'OPEN')) `
                "exit $($OgG6Ctl.Code), state $OgG6CtlState; wanted 0, no shape refusal, and the signal resolved"
+
+    # =====================================================================
+    # GROUP 7 - signals-relink (row 6)
+    # =====================================================================
+    # A record linked to the repo the issues moved from, so the route has something to read and
+    # reaches its guard. The scope control names a repo no record links to: that path exits 0
+    # before any outward call, so it must not be guarded.
+    [void](New-SignalWithIssue -OgRepo $OgRepo -OgHome $OgHome -OgIssueNum 717171 -OgLink 'https://github.com/example/fixture-old/issues/717171')
+    $OgG7Args = @('signals-relink', '-From', 'example/fixture-old', '-Path', $OgRepo)
+
+    $OgG7Case = Invoke-Wrapper -OgHome $OgHome -OgArgs $OgG7Args
+    Add-Result 'G7-case-signals-relink-refused-90' `
+               (($OgG7Case.Code -eq 90) -and ($OgG7Case.Text -like "*$OgGuardText*")) `
+               "exit $($OgG7Case.Code), wanted 90 with the guard's text"
+    Add-Result 'G7-case-names-the-declined-command' `
+               ($OgG7Case.Text -like "*gh issue view*--repo $OgFixtureTarget*") `
+               'wanted the literal declined command named in the message'
+    # UNCONTROLLED BY DESIGN - see the header, as G1's above.
+    Add-Result 'G7-case-does-NOT-claim-gh-missing-UNCONTROLLED' `
+               (-not ($OgG7Case.Text -like "*$OgGhMissing*")) `
+               "wanted '$OgGhMissing' ABSENT"
+
+    $OgG7Scope = Invoke-Wrapper -OgHome $OgHome -OgArgs @('signals-relink', '-From', 'example/fixture-none', '-Path', $OgRepo)
+    Add-Result 'G7-scope-control-nothing-to-repoint-not-guarded' `
+               (($OgG7Scope.Code -eq 0) -and ($OgG7Scope.Text -like '*Nothing to re-point*') -and (-not ($OgG7Scope.Text -like "*$OgGuardText*"))) `
+               "exit $($OgG7Scope.Code), wanted 0, 'Nothing to re-point' and NO guard text"
+
+    Clear-FixtureTarget -OgHome $OgHome
+    $OgG7Reason = Invoke-Wrapper -OgHome $OgHome -OgArgs $OgG7Args -OgOutward 'allow' -OgBlindDir $OgBlind
+    Set-FixtureTarget -OgHome $OgHome
+    Add-Result 'G7-reason-control-other-refusal-still-produced' `
+               (($OgG7Reason.Text -like "*$OgNoTarget*") -and (-not ($OgG7Reason.Text -like "*$OgGuardText*"))) `
+               "exit $($OgG7Reason.Code), wanted '$OgNoTarget' PRESENT and the guard's text ABSENT"
 
     # No row in this suite may run gh. A non-empty log means one got past the guard or the
     # destination check - throw, so the run ends with no summary line and is reported.

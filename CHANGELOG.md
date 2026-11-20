@@ -4,6 +4,59 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.82.0 - 2026-11-20
+
+- **`keel-workflow` 0.74.0: a signal's GitHub issue is its repo and its number, and a new verb
+  re-points records whose issues moved.** A record used to be matched by its issue number alone, so
+  the same number on two repos read as one issue. Two things went wrong: `adopt-signal` refused a
+  report filed on another repo because a record here held the same number on this machine's own,
+  and `resolve-signal -CloseIssue` commented on and closed that number on this machine's
+  destination, whatever repo the record's issue was on, which could be an unrelated issue.
+  - **Where the repo comes from.** The link a record already stores, `issueUrl`
+    (`https://github.com/<owner>/<name>/issues/<n>`). No field is added. A record with an issue
+    and no link of that shape is read as on the destination the call uses (`-Repo` for that call,
+    else the one chosen with `signals-target`), which is how every record was read before, so it
+    behaves exactly as it did.
+  - **`adopt-signal`** refuses only an issue held here on the same repo and number; the same number
+    from another repo is adopted. The refusal now names the repo.
+  - **`resolve-signal -CloseIssue`** comments on and closes the issue on the repo the record's link
+    names. A destination must still be chosen before anything is sent. **A `-Repo` that names a
+    different repo from the record's link is now refused at exit 90**, before the resolution is
+    written, so nothing is written and nothing is sent; the message names the `signals-relink`
+    command to run if the issue really moved. A `-Repo` that agrees with the link, or one given for
+    a record with no link, works as before. Without `-CloseIssue`, `-Repo` is not checked.
+  - **`signals-relink -From <owner/name> [-Repo <owner/name>] [-Id <ids>] [-Apply]`**, new. For
+    every record linked to an issue on the `-From` repo it reads the issue with the same number on
+    the new repo (`-Repo`, else the chosen destination) with `gh issue view`, and lists the old
+    link, the new link and MATCH, MISMATCH or NOT READ, comparing the issue's title with the title
+    `signals-push` builds for the record, whitespace collapsed. Without `-Apply` it writes
+    nothing. With `-Apply` it rewrites `issueUrl` alone on each MATCH record, and on a MISMATCH
+    record only when it is named with `-Id` (comma-separated ids); a NOT READ record is never
+    rewritten. It takes the signal store's write lock on every run, the preview included, so a
+    signal written meanwhile waits and may stop at exit 89. It honours `KEEL_OUTWARD` like the other
+    signal verbs, refuses at 90 with no repo to point at, and exits 99 if any issue could not be read.
+  - **What a machine owes after updating.** If this machine's reports were moved from one GitHub
+    repo to another keeping their numbers, its records still link to the old repo, and the old
+    repo's numbers now mean whatever that repo holds. Run
+    `keel-state.ps1 signals-relink -From <old owner/name> -Repo <new owner/name>`, read the
+    preview, run it again with `-Apply`, and for each MISMATCH you have checked by hand run it
+    with `-Id <that id> -Apply`. A machine whose reports never moved has nothing to do: the
+    preview says no record links to the old repo.
+  - The wrapper's help text, `keel-orchestrator`'s section on signals crossing machines,
+    `GETTING-STARTED.md`'s list of what leaves your machine and the README's requirements row
+    say so.
+- **`scripts/test-signal-judgement.ps1`** gains group LINK: seven pairs of a case, a control and a
+  row asserting they differ, for adopting, closing and re-pointing, run against a fake `gh` that
+  answers, plus a harness row. It now runs 117 cases. `-AgainstWrapper <path>` runs it against
+  another copy of the wrapper, and `-LinkOnly` runs the new group alone.
+- **`scripts/test-outward-guard.ps1`** covers six outward calls, with a group for
+  `signals-relink`, and now parses the wrapper on every run and fails if its count of outward
+  calls differs from the six it lists. It runs 36 cases and takes `-AgainstWrapper <path>`.
+- **`scripts/test-shared-progress.ps1`**: the row comparing the state a project kept on one machine
+  gets from this wrapper and from the committed one no longer fails on every uncommitted change to
+  the wrapper. Whether `revisedAt` should differ is now read from the committed wrapper's own
+  output, not from whether the two wrappers are the same file.
+
 ## marketplace 0.81.0 - 2026-11-12
 
 - **`keel-workflow` 0.73.0: a phase can declare the work it needs delivered first, and `status`

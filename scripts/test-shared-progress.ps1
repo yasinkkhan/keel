@@ -1824,8 +1824,12 @@ try {
     $npBad = @($nPm['wt'].Codes + $nPm['head'].Codes | Where-Object { $_ -notmatch '=0$' })
     $npA = @($nPm['wt'].Paths | Where-Object { -not $nPm['head'].Paths.Contains($_) } | Sort-Object)
     $npB = @($nPm['head'].Paths | Where-Object { -not $nPm['wt'].Paths.Contains($_) })
-    # Once committed, HEAD's wrapper stamps revisedAt too, so only the needs, given to this side alone, differ.
-    $npWant = if ($headSame) { '$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id' } else { '$.nodes[].revisedAt,$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id,$.phases[].revisedAt' }
+    # Only the needs, given to this side alone, differ - and revisedAt too, but only while HEAD's
+    # wrapper is one that never stamps it. That is read from HEAD's own paths, not from whether HEAD
+    # equals this wrapper: keyed on equality, this row failed every uncommitted change to the
+    # wrapper once a wrapper that stamps revisedAt had been committed.
+    $npWant = '$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id'
+    if (-not $nPm['head'].Paths.Contains('$.phases[].revisedAt')) { $npWant = '$.nodes[].revisedAt,$.phases[].needs,$.phases[].needs[].at,$.phases[].needs[].id,$.phases[].revisedAt' }
     $npNote = if ($headSame) { ' (HEAD holds this same wrapper, so the comparison is of the wrapper with itself)' } else { '' }
     Add-Case 'NEEDS-machine-paths' (($npBad.Count -eq 0) -and (($npA -join ',') -eq $npWant) -and ($npB.Count -eq 0)) "steps not at 0 '$($npBad -join ',')'; paths only here '$($npA -join ',')'; only at HEAD '$($npB -join ',')'$npNote"
 

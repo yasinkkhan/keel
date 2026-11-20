@@ -106,6 +106,9 @@ param(
     # for 'add-phase' and 'revise-phase'; 'none' declares no needs.
     [string]$Needs,
     [string]$Repo,
+    # The repo a signal record's issues moved FROM, for 'signals-relink'. The repo they moved to is
+    # -Repo, or the stored destination.
+    [string]$From,
     [string]$Name,
     [string]$RepoPath,
     [string]$Branch,
@@ -137,8 +140,8 @@ $IterationCap = 3
 # store, before it stops with exit 89. The slowest measured hold of a project, a verify verdict
 # taking its binding on a state file of about 2.7 MB, is over a second, so this lets several
 # queued writers all land. The
-# signal store is held longer by 'signals-push -Apply' and 'resolve-signal -CloseIssue', across
-# their GitHub calls, about a second each (a read-only GitHub API call measured 0.7 to 1 s), so a push of more than about ten signals
+# signal store is held longer by 'signals-push -Apply', 'resolve-signal -CloseIssue' and
+# 'signals-relink' (its preview too, which reads one issue per record), across their GitHub calls, about a second each (a read-only GitHub API call measured 0.7 to 1 s), so a push of more than about ten signals
 # can make a judgement or resolution started meanwhile stop with 89 - refused, never lost.
 $LockWaitSeconds = 10
 
@@ -3186,10 +3189,10 @@ function Get-UnpushedReading {
     }
     $upBranch = $upRef.Substring('refs/heads/'.Length)
 
-    # THE OUTWARD GUARD, site 5 of 5 - the only one that is not a gh call, and the
+    # THE OUTWARD GUARD, site 5 of 6 - the only one that is not a gh call, and the
     # one reached from 'status', the verb every session in every project runs first.
     # Its behaviour is DERIVED under four constraints rather than designed, because
-    # the guard's design was made for the four gh sites:
+    # the guard's design was made for the five gh sites:
     #
     #   1. PLACEMENT is here, immediately before the ls-remote. There is no resolver
     #      pair to sit after, so the gh sites' ordering argument does not apply and
@@ -3204,7 +3207,7 @@ function Get-UnpushedReading {
     #      trains the reader to distrust it, and the same principle applies to this
     #      different false claim - which is why the assurance clause below is about the reading and
     #      not about gh, a program this site never resolves.
-    #   4. IT NAMES THE COMMAND IT DECLINED, as the four gh sites do, because that
+    #   4. IT NAMES THE COMMAND IT DECLINED, as the five gh sites do, because that
     #      is what makes the guard testable without a network at all.
     $upBlocked = Test-OutwardBlocked
     if ($null -ne $upBlocked) {
@@ -3447,14 +3450,14 @@ function Resolve-Gh {
 # would reach the real keel repository. The destination is therefore
 # $SignalsTargetFile, under $KeelHome, so a scratch home has none unless its fixture
 # sets one, and with none nothing is sent. The guard stays: a fixture that DOES set a
-# destination is still a sandboxed run. An AST parse of this whole file finds FIVE
-# process invocations across FOUR verbs that leave this machine - the four gh calls in
-# signals-push, adopt-signal and resolve-signal -CloseIssue (two of them), and
+# destination is still a sandboxed run. An AST parse of this whole file finds SIX
+# process invocations across FIVE verbs that leave this machine - the five gh calls in
+# signals-push, adopt-signal, signals-relink and resolve-signal -CloseIssue (two of them), and
 # the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
 # never appears as a command name here, because Invoke-Native applies the call
 # operator to a variable, so a name-based search cannot enumerate this surface.
 #
-# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the five
+# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the six
 # call sites ask it and report what it says. A run is sandboxed when $KeelHome
 # resolves inside $env:TEMP, compared as FULL paths, ordinal and
 # case-insensitive. On a default Windows install TEMP is <USERPROFILE>\AppData\Local\Temp,
@@ -3494,9 +3497,9 @@ function Resolve-Gh {
 # continues the loop and exits 99 - so a guard there would change that verb's
 # exit code AND put the words 'gh exited' in front of a reader when gh never
 # ran, which is the same false statement the guard's own message is written to
-# avoid, arriving by another route. A backstop there IN ADDITION to these five is
+# avoid, arriving by another route. A backstop there IN ADDITION to these six is
 # rejected under P13: a second enforcement mechanism for one rule, with no cited
-# failure behind it. What would make it correct is a cited instance of a sixth
+# failure behind it. What would make it correct is a cited instance of a seventh
 # outward call site being added to this wrapper without the guard.
 function Test-OutwardBlocked {
     $owOverride = $env:KEEL_OUTWARD
@@ -3527,8 +3530,8 @@ function Test-OutwardBlocked {
     return $null
 }
 
-# The message has one home too, for the same reason the rule does: four call
-# sites wording the same refusal four ways is how three of them drift.
+# The message has one home too, for the same reason the rule does: five call
+# sites wording the same refusal five ways is how four of them drift.
 #
 # THREE THINGS EVERY MESSAGE CARRIES, and each earns its place. The GUARD as the
 # reason, in the first clause, because a guard that lies about its own
@@ -3618,6 +3621,40 @@ function Format-IssueTitle {
     return $t
 }
 
+# A RECORD'S ISSUE IS ITS REPO AND ITS NUMBER. A number alone names a different issue on every
+# repo, so a record read by number alone is read against whichever repo the call happens to use:
+# adopt-signal refused an issue on one repo because a record held the same number on another, and
+# resolve-signal -CloseIssue closed the number on the destination whatever repo the record's issue
+# was on. The repo is read from the link the record already stores, so no second field holds the
+# fact (charter P10). A record with an issue and no link of this shape is read as on the
+# destination the call resolves - -Repo for that call, else the stored one - which is what every
+# such record was read as before, so it behaves exactly as it did (charter P24).
+function Get-IssueUrlRepo {
+    param([string]$IuLink)
+    if ([string]::IsNullOrWhiteSpace($IuLink)) { return $null }
+    if ($IuLink.Trim() -match '^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)/issues/\d+/?$') { return $Matches[1] }
+    return $null
+}
+
+function Get-SignalIssueRepo {
+    param($IrSig, [string]$IrFallback)
+    $irLinked = Get-IssueUrlRepo ([string](Get-Prop $IrSig 'issueUrl' ''))
+    if ($null -ne $irLinked) { return $irLinked }
+    return $IrFallback
+}
+
+# GitHub compares owner and repo names without regard to case.
+function Test-SameRepo {
+    param([string]$SrA, [string]$SrB)
+    if ([string]::IsNullOrWhiteSpace($SrA) -or [string]::IsNullOrWhiteSpace($SrB)) { return $false }
+    return [string]::Equals($SrA.Trim(), $SrB.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Format-IssueLink {
+    param([string]$IlRepo, $IlNumber)
+    return "https://github.com/$IlRepo/issues/$IlNumber"
+}
+
 function Format-IssueBody {
     param($Sig)
     $lines = @()
@@ -3697,7 +3734,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  hand-over"
     Write-Output "              close"
     Write-Output "  Signals:    signal  signals  signals-target  signals-push  adopt-signal  judge-signal"
-    Write-Output "              resolve-signal"
+    Write-Output "              resolve-signal  signals-relink"
     Write-Output ""
     Write-Output "  'revise-phase -Correction' appends a dated note to a DELIVERED phase; its scope stays."
     Write-Output "  'add-phase -Needs <ids>' and 'revise-phase -Needs <ids|none>' declare the phases (W4.2) or"
@@ -3715,6 +3752,10 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  ONLY - a path plus a short description, never pasted content."
     Write-Output "  'adopt-signal' is the return half: it brings an issue filed by ANOTHER keel instance"
     Write-Output "  into this machine's store, so 'signals' and 'resolve-signal' work on it unchanged."
+    Write-Output "  A record's issue is its repo and number, the repo read from its stored link."
+    Write-Output "  'resolve-signal -CloseIssue' acts on that repo and refuses a -Repo naming another."
+    Write-Output "  'signals-relink -From owner/name [-Repo owner/name]' re-points records whose issues moved"
+    Write-Output "  under the same numbers, checked by title: a preview, then -Apply; -Id adds a mismatch."
     Write-Output "  'lift-cap' raises ONE phase's iteration cap on the operator's own words; the default"
     Write-Output "  cap is $IterationCap and nothing else changes it."
     Write-Output ""
@@ -6057,10 +6098,14 @@ switch ($Command) {
     # one test: re-adopting an issue already adopted, and adopting an issue keel ITSELF pushed
     # from a local signal - which would otherwise let two different resolutions be written for
     # one issue, with nothing to say which is keel's answer.
+    #
+    # ONE ISSUE IS ONE REPO AND ONE NUMBER (Get-SignalIssueRepo). The same number on another repo
+    # is another issue, and comparing numbers alone refused a report filed on another repo because
+    # a record here held that number on this machine's own.
     foreach ($adExisting in @(Get-Signals -Slug '' -FilterKind '')) {
-        if ((Get-Prop $adExisting 'issue' $null) -eq $Issue) {
-            Fail 90 "Issue #$Issue is already held here as signal $($adExisting.id) (project $($adExisting.project), state $($adExisting.state)). One issue, one local record - adopting it again would let two resolutions be written for it."
-        }
+        if ((Get-Prop $adExisting 'issue' $null) -ne $Issue) { continue }
+        if (-not (Test-SameRepo (Get-SignalIssueRepo $adExisting $adSlug) $adSlug)) { continue }
+        Fail 90 "Issue #$Issue on $adSlug is already held here as signal $($adExisting.id) (project $($adExisting.project), state $($adExisting.state)). One issue, one local record - adopting it again would let two resolutions be written for it."
     }
 
     # Read through Invoke-Native so the EXIT CODE decides. gh writes progress and even success
@@ -6139,6 +6184,139 @@ switch ($Command) {
     Say "  It is excluded from 'signals-push' - it already has an issue and was never pushed from here."
     Say "  Triage it as any other signal: keel-state.ps1 resolve-signal -Id $adId -As <PROMOTED|REJECTED|UNREPRODUCIBLE> -Detail '<why>' -CloseIssue"
     Say "  A PROMOTED verdict also needs -Addresses defect|instance. 'instance' leaves it OPEN and does not close the issue."
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+'signals-relink' {
+    # RE-POINTS STORED LINKS WHOSE ISSUES MOVED to another repo under the same numbers. A record's
+    # issue is its repo and number (Get-SignalIssueRepo), so a record still linked to the repo its
+    # issue left is read as on that repo: adopt-signal compares against it, and resolve-signal
+    # -CloseIssue would comment on and close that number there, which may by then be someone
+    # else's issue. Nothing else rewrites a link, and a hand edit of the store is what P15 rules out.
+    #
+    # EACH RECORD IS CHECKED AGAINST THE ISSUE IT WOULD POINT AT, BY TITLE, because a link
+    # pointing at the wrong issue is the defect being repaired: re-pointing by number alone could
+    # not tell a moved issue from an unrelated one with the same number. The title compared is the
+    # one signals-push builds (Format-IssueTitle), with runs of whitespace collapsed on both sides,
+    # since GitHub keeps a title on one line. A record that does not match is listed and left alone
+    # unless it is named with -Id, by someone who has read both titles.
+    #
+    # PREVIEW BY DEFAULT, and -Apply rewrites issueUrl ALONE, onto a fresh read, the way
+    # signals-push records its call. The store lock is taken on every run, the preview's included,
+    # before the store is read, so what a preview lists is what -Apply would have acted on then.
+    # The cost: a command writing a signal meanwhile waits, and stops at 89 if this outlasts the
+    # wait, since each record costs one GitHub read.
+    Require-Param $From 'From'
+    $rlFrom = $From.Trim()
+    if (-not (Test-RepoSlug $rlFrom)) {
+        Fail 90 "-From '$From' is not owner/name (for example octo-org/keel-reports). Nothing was written and nothing was sent."
+    }
+    # The repo the issues moved TO is -Repo, or this machine's destination; with neither there is
+    # nothing to compare against, and nothing is read.
+    $rlTo = Get-SignalsDestination
+    if ([string]::IsNullOrWhiteSpace($rlTo)) { Fail 90 $NoDestinationText }
+    if (Test-SameRepo $rlFrom $rlTo) {
+        Fail 90 "-From and the repo to re-point to are both $rlTo. Name the repo the issues moved FROM with -From and the one they moved to with -Repo. Nothing was written and nothing was sent."
+    }
+    $rlNamed = @()
+    if (-not [string]::IsNullOrWhiteSpace($Id)) {
+        foreach ($rlPart in ($Id -split ',')) {
+            $rlOne = $rlPart.Trim()
+            if ($rlOne -notmatch '^S\d{4}$') {
+                Fail 90 "-Id '$rlOne' is not a signal id. Expected S<nnnn>, e.g. S0007, or several separated by commas. Nothing was written and nothing was sent."
+            }
+            $rlNamed += $rlOne
+        }
+    }
+    $rlGh = Resolve-Gh
+    if ($null -eq $rlGh) {
+        Fail 90 'GitHub CLI not found. Looked on PATH and in the standard install locations. Install it, or re-point the links from a shell where gh resolves.'
+    }
+
+    Enter-WriteLock $SignalsHome 'the signal store'
+    $rlSet = @(Get-Signals -Slug '' -FilterKind '' | Where-Object {
+        ($null -ne (Get-Prop $_ 'issue' $null)) -and (Test-SameRepo (Get-IssueUrlRepo ([string](Get-Prop $_ 'issueUrl' ''))) $rlFrom)
+    } | Sort-Object -Property id)
+
+    # A name that is not in the set is refused before any network call: it would otherwise be
+    # silently ignored, which reads as accepted.
+    foreach ($rlOne in $rlNamed) {
+        if (@($rlSet | Where-Object { $_.id -eq $rlOne }).Count -eq 0) {
+            Fail 90 "Signal '$rlOne' is not a record linked to an issue on $rlFrom, so -Id cannot name it here. Nothing was written and nothing was sent."
+        }
+    }
+    if ($rlSet.Count -eq 0) {
+        Say "No signal record links to an issue on $rlFrom. Nothing to re-point."
+        exit 0
+    }
+
+    # THE OUTWARD GUARD, site 6 of 6, after both resolvers and after the one local-only exit
+    # above, so it changes only WHY the reads below are skipped.
+    $rlBlocked = Test-OutwardBlocked
+    if ($null -ne $rlBlocked) {
+        Fail 90 (Get-OutwardBlockedMessage -OwReason $rlBlocked `
+            -OwCommands @("gh issue view <n> --repo $rlTo, once for each of $($rlSet.Count) record(s)") `
+            -OwAssurance 'gh WAS found and a destination WAS chosen - this refusal says nothing about either. Nothing was read and no signal record was written.')
+    }
+
+    $rlMatch = 0
+    $rlMismatch = 0
+    $rlUnread = 0
+    $rlWritten = 0
+    foreach ($rlSig in $rlSet) {
+        $rlNum = Get-Prop $rlSig 'issue' $null
+        $rlOld = [string](Get-Prop $rlSig 'issueUrl' '')
+        $rlNew = Format-IssueLink $rlTo $rlNum
+        $rlStatus = 'NOT READ'
+        $rlNote = ''
+        $rlView = Invoke-Native -Exe $rlGh -Arguments @('issue','view',"$rlNum",'--repo',$rlTo,'--json','number,title,state,url')
+        if ($rlView.Code -ne 0) {
+            $rlWhy = ''
+            foreach ($rlLn in @($rlView.Output)) { if (-not [string]::IsNullOrWhiteSpace([string]$rlLn)) { $rlWhy = ([string]$rlLn).Trim(); break } }
+            if ($rlWhy.Length -gt 160) { $rlWhy = $rlWhy.Substring(0, 157) + '...' }
+            $rlNote = "gh exited $($rlView.Code): $rlWhy"
+        }
+        else {
+            $rlIssue = $null
+            try { $rlIssue = $rlView.Text | ConvertFrom-Json } catch { $rlIssue = $null }
+            # An empty response parses to $null WITHOUT throwing.
+            if ($null -eq $rlIssue -or $null -eq (Get-Prop $rlIssue 'title' $null)) {
+                $rlNote = 'gh returned no readable title'
+            }
+            else {
+                $rlFound = ([string]$rlIssue.title -replace '\s+', ' ').Trim()
+                $rlBuilt = ((Format-IssueTitle $rlSig) -replace '\s+', ' ').Trim()
+                if ([string]::Equals($rlFound, $rlBuilt, [System.StringComparison]::Ordinal)) { $rlStatus = 'MATCH' }
+                else { $rlStatus = 'MISMATCH'; $rlNote = "title there: $rlFound" }
+            }
+        }
+        if ($rlStatus -eq 'MATCH') { $rlMatch++ } elseif ($rlStatus -eq 'MISMATCH') { $rlMismatch++ } else { $rlUnread++ }
+        $rlIsNamed = $rlNamed -contains $rlSig.id
+        $rlLine = "$($rlSig.id)  #$rlNum  $rlOld -> $rlNew  $rlStatus"
+        if ($rlNote -ne '') { $rlLine += "  ($rlNote)" }
+        if ($rlIsNamed) { $rlLine += '  [named]' }
+        Write-Output $rlLine
+
+        # A record that could not be read is never re-pointed, named or not: nothing says the
+        # issue it would point at exists.
+        if ($Apply -and ($rlStatus -eq 'MATCH' -or ($rlStatus -eq 'MISMATCH' -and $rlIsNamed))) {
+            Set-Prop $rlSig 'issueUrl' $rlNew
+            Write-SignalFields (Join-Path $SignalsHome "$($rlSig.id).json") $rlSig @('issueUrl')
+            $rlWritten++
+        }
+    }
+
+    Write-Output ''
+    $rlSummary = "$($rlSet.Count) record(s) link to issues on $($rlFrom): $rlMatch MATCH, $rlMismatch MISMATCH, $rlUnread NOT READ on $rlTo."
+    if ($Apply) {
+        Say "$rlSummary Re-pointed $rlWritten record(s) to $rlTo; only issueUrl changed."
+    }
+    else {
+        Say "PREVIEW ONLY. $rlSummary Re-run with -Apply to re-point the MATCH records. A MISMATCH record is re-pointed only when named with -Id; a NOT READ record never is."
+    }
+    # A read that did not complete is an outward act that did not complete.
+    if ($rlUnread -gt 0) { exit 99 }
     exit 0
 }
 
@@ -6537,6 +6715,19 @@ switch ($Command) {
     Save-ReadSha $sp
     $sig = Read-Json $sp
 
+    # A -Repo THAT DISAGREES WITH THE RECORD'S OWN LINK IS REFUSED HERE, before the terminal write
+    # below, so nothing is written and nothing is sent. -CloseIssue acts on the repo the record's
+    # link names; letting a typed -Repo win would reach the same number on another repo, which is
+    # an unrelated issue. Without -CloseIssue, -Repo does nothing on this verb and is not checked.
+    if ($CloseIssue -and -not [string]::IsNullOrWhiteSpace($Repo) -and $null -ne $sig -and $null -ne (Get-Prop $sig 'issue' $null)) {
+        $rsLinked = Get-IssueUrlRepo ([string](Get-Prop $sig 'issueUrl' ''))
+        if ($null -ne $rsLinked -and -not (Test-SameRepo $rsLinked $Repo)) {
+            Fail 90 ("Signal '$Id' holds issue #$(Get-Prop $sig 'issue' '?') on $rsLinked, not on $($Repo.Trim()). -CloseIssue acts on the repo the record names. " +
+                     "If that issue moved to $($Repo.Trim()) under the same number, re-point the record first: keel-state.ps1 signals-relink -From $rsLinked -Repo $($Repo.Trim()) " +
+                     "(a preview; add -Apply to write). Nothing was written and nothing was sent.")
+        }
+    }
+
     # THE TERMINAL STATE IS STILL WRITTEN BEFORE gh IS CALLED. That ordering is deliberate -
     # the resolution is keel's own record and must survive a network that is not there. A
     # guard that refused EVERY second call would leave a resolution whose issue-close half
@@ -6683,7 +6874,10 @@ switch ($Command) {
     $issueNum = Get-Prop $sig 'issue' $null
     if ($null -ne $issueNum) {
         if ($CloseIssue) {
+            # A destination must still be chosen before anything is sent (charter P26); the issue
+            # acted on is the one on the repo the record's link names, else on that destination.
             $slug = Get-SignalsDestination
+            $rsIssueRepo = Get-SignalIssueRepo $sig $slug
             $gh = $null
             if (-not [string]::IsNullOrWhiteSpace($slug)) { $gh = Resolve-Gh }
             if ([string]::IsNullOrWhiteSpace($slug)) {
@@ -6699,8 +6893,8 @@ switch ($Command) {
                 # above instead would be the bug. Those branches say no destination
                 # was chosen or gh could not be resolved - and under the guard BOTH resolved,
                 # so sharing one would assert the exact false reason the guard's message
-                # exists to avoid. 'GitHub CLI not found' lives solely in signals-push and
-                # adopt-signal.
+                # exists to avoid. 'GitHub CLI not found' lives solely in signals-push,
+                # adopt-signal and signals-relink.
                 #
                 # THE VERB'S OUTCOME IS PRESERVED: this takes the SAME continue path as the
                 # branch above, at exit 0, and the local resolution was already written
@@ -6712,7 +6906,7 @@ switch ($Command) {
                 # first would leave the second untested while looking covered.
                 $owResolveBlocked = Test-OutwardBlocked
                 Say ("  Issue #$issueNum NOT closed: " + (Get-OutwardBlockedMessage -OwReason $owResolveBlocked `
-                    -OwCommands @("gh api --method POST repos/$slug/issues/$issueNum/comments", "gh issue close $issueNum --repo $slug") `
+                    -OwCommands @("gh api --method POST repos/$rsIssueRepo/issues/$issueNum/comments", "gh issue close $issueNum --repo $rsIssueRepo") `
                     -OwAssurance 'gh WAS found and a destination WAS chosen - this says nothing about either. The local resolution IS recorded.'))
             }
             else {
@@ -6745,7 +6939,7 @@ switch ($Command) {
                     Write-TextNoBom $tmp ([ordered]@{ body = $commentBody } | ConvertTo-Json -Depth 6)
                     # --jq for the same reason as signals-push: the response echoes the body
                     # back, and signal prose can itself contain a github.com issues URL.
-                    $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$slug/issues/$issueNum/comments",'--input',$tmp,'--jq','.html_url')
+                    $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$rsIssueRepo/issues/$issueNum/comments",'--input',$tmp,'--jq','.html_url')
                     # Record first, then clean up through the helper that cannot throw - the
                     # same order and the same reason as signals-push.
                     if ($res.Code -eq 0) {
@@ -6760,11 +6954,11 @@ switch ($Command) {
                     }
                 }
                 if ($commentOk) {
-                    $res = Invoke-Native -Exe $gh -Arguments @('issue','close',"$issueNum",'--repo',$slug)
+                    $res = Invoke-Native -Exe $gh -Arguments @('issue','close',"$issueNum",'--repo',$rsIssueRepo)
                     if ($res.Code -eq 0) {
                         Set-Prop $sig 'issueClosedAt' (Now)
                         Write-SignalFields $sp $sig @('issueClosedAt')
-                        Say "  Closed issue #$issueNum on $slug."
+                        Say "  Closed issue #$issueNum on $rsIssueRepo."
                     }
                     else {
                         Say "  Issue #$issueNum NOT closed: $($res.Text)"

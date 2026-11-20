@@ -130,6 +130,16 @@ machine, across every project — so a confirmation naming one signal can carry 
 never read, which is a P6 failure and has held up an enactment before. `-Id` refuses
 rather than guessing: unknown id exits 94, and a malformed, already-pushed or non-OPEN id exits 90.
 
+**A signal's issue is its repo and its number.** The repo is read from the record's stored link,
+and a record with no link is read as on the destination the call uses. `adopt-signal` refuses only
+an issue already held here on the same repo; `resolve-signal -CloseIssue` comments on and closes the
+issue on the repo the record names, and refuses at 90 a `-Repo` naming another, writing nothing.
+When a machine's reports moved to another repo under the same numbers, `signals-relink -From
+<old owner/name> [-Repo <new owner/name>]` re-points their links: it previews each record as MATCH,
+MISMATCH or NOT READ by comparing its title with the issue's on the new repo, and `-Apply` re-points
+the matches, plus any mismatch named with `-Id`. Show the operator the preview and every mismatch
+before applying, since it rewrites stored records.
+
 **Never run `-Apply` unprompted.** Show the preview and wait — it is the last point at which
 something that should not leave the machine can be stopped. A project with `quarantine` on may only
 file evidence by reference, and the wrapper refuses content with exit 97.

@@ -1322,7 +1322,7 @@ else {
 # --- 14. the outward-act guard still behaves: run its committed suite --------
 #
 # The third sibling, and a sibling for the reason sections 9 and 11 are siblings
-# rather than one file: scripts/test-outward-guard.ps1's subject is the FIVE
+# rather than one file: scripts/test-outward-guard.ps1's subject is the SIX
 # outward code points, which share no machinery with quarantine's three (a
 # per-project keel.json flag) or with the charter gate's marker file. One file
 # answering three unrelated questions is the P10 error, and each suite's case
@@ -1396,7 +1396,7 @@ if ($Strict) {
 # what the signal RECORD holds and what 'signals' prints - the judge-signal
 # append, refusals guarding it, and the 'addresses' key resolve-signal persists.
 # That shares no machinery with the charter gate's marker file, with
-# quarantine's per-project keel.json flag, or with the five outward invocations,
+# quarantine's per-project keel.json flag, or with the six outward invocations,
 # and judge-signal makes no process call at all. One file answering two unrelated
 # questions is the charter P10 error and each suite's case count would stop
 # meaning one thing.

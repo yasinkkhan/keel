@@ -212,8 +212,10 @@ Like any Claude Code session, what the session reads is sent to the model. keel 
 and nothing else:
 
 - **Reports about keel, sent as GitHub issues**, only after you choose a destination. `signals-push`
-  creates the issues, `adopt-signal` reads one, and `resolve-signal -CloseIssue` comments on one and
-  closes it. With no destination chosen nothing is sent: `signals-push` and `adopt-signal` refuse,
+  creates the issues, `adopt-signal` reads one, `signals-relink` reads the issues on the repo your
+  reports moved to, to check each stored link before it re-points it, and `resolve-signal
+  -CloseIssue` comments on one and closes it, on the repo the report's stored link names. With no
+  destination chosen nothing is sent: `signals-push`, `adopt-signal` and `signals-relink` refuse,
   and `resolve-signal -CloseIssue` records the resolution on your machine and leaves the issue
   alone. keel never works out a destination from your repository's `origin`. `signals-push` on its
   own only prints the exact title and body of each issue; it sends only when run again with

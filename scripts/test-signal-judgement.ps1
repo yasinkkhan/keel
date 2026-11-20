@@ -21,6 +21,16 @@
 #                  review-date suffix and its two counts, and -Id's scoping and refusals
 #   the hook       scripts/keel-session-start.ps1's parse of the counts line - RUN, not
 #                  imitated: row P26 invokes the real file against the scratch store
+#   the link       group LINK: a record's issue is its repo and number. adopt-signal takes the
+#                  same number from another repo and refuses it from the same one;
+#                  resolve-signal -CloseIssue acts on the record's own repo and refuses a -Repo
+#                  naming another, writing nothing; signals-relink previews, re-points only the
+#                  records whose title matches or that are named, and takes the store lock. It
+#                  runs with its OWN fake gh, one that ANSWERS - see that group's helpers.
+#
+# -AgainstWrapper <path> runs every row against another copy of keel-state.ps1, and -LinkOnly
+# runs group LINK alone. Both exist to show a row able to fail, by running it against a copy
+# with one thing broken; neither is on the push path, which runs this suite with no switches.
 #
 # THE REFUSAL COVERAGE IS STATED AS A FRACTION ON PURPOSE: how many refusal paths the verb
 # has, and how many of them this suite exercises. judge-signal has FIFTEEN refusal paths
@@ -53,11 +63,17 @@
 # Add-Result appends to a script-scope list and returns NOTHING. A function that both
 # writes output and returns a value hands the caller a two-element array, which is truthy.
 
+param(
+    [string]$AgainstWrapper = '',
+    [switch]$LinkOnly
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $SjRepoRoot     = Split-Path -Parent $PSScriptRoot
 $SjStateWrapper = Join-Path $SjRepoRoot 'plugins\keel-workflow\skills\keel-orchestrator\wrappers\keel-state.ps1'
+if ($AgainstWrapper -ne '') { $SjStateWrapper = (Resolve-Path -LiteralPath $AgainstWrapper).Path }
 $SjHook         = Join-Path $SjRepoRoot 'scripts\keel-session-start.ps1'
 $SjPwsh         = Join-Path $PSHOME 'powershell.exe'
 
@@ -1091,6 +1107,411 @@ function Invoke-Cases {
 }
 
 # ---------------------------------------------------------------------------
+# The LINK group's helpers. A record's issue is its repo and number, read from the stored
+# link; these rows need a gh that ANSWERS, which the outward suite's fake does not (it refuses
+# everything, and that suite throws if a row reaches it). So this group writes its own fake:
+# it logs every call, answers 'issue view <n> --repo <owner/name>' by typing a fixture file
+# named <owner>_<name>_<n>.json and exits 1 when there is none, and answers 'issue close' and
+# 'api' with exit 0. Every child of the group runs with it FIRST on PATH, where Resolve-Gh asks
+# first, and with KEEL_OUTWARD=allow; every repo in the fixtures is under example/, and the
+# harness row below proves the fake is what answered before any other row is read.
+# ---------------------------------------------------------------------------
+function New-AnsweringGh {
+    param([string]$SjDir, [string]$SjLog, [string]$SjFix)
+    New-Item -ItemType Directory -Path $SjDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $SjFix -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $SjDir 'gh.cmd') -Encoding ASCII -Value @(
+        '@echo off',
+        ('echo %*>>"' + $SjLog + '"'),
+        'if "%1"=="issue" if "%2"=="view" goto view',
+        'if "%1"=="issue" if "%2"=="close" exit /b 0',
+        'if "%1"=="api" goto api',
+        'exit /b 7',
+        ':view',
+        'set "SJREPO=%5"',
+        'set "SJREPO=%SJREPO:/=_%"',
+        ('if exist "' + $SjFix + '\%SJREPO%_%3.json" ( type "' + $SjFix + '\%SJREPO%_%3.json" & exit /b 0 )'),
+        'echo fake gh: no such fixture 1>&2',
+        'exit /b 1',
+        ':api',
+        'echo https://github.com/example/fake-comment',
+        'exit /b 0')
+}
+
+# One fixture issue the fake answers for. ASCII only; the titles here are ASCII.
+function Set-FixtureIssue {
+    param([string]$SjFix, [string]$SjRepoSlug, [int]$SjNum, [string]$SjTitle)
+    $SjObj = [ordered]@{ number = $SjNum; title = $SjTitle; state = 'OPEN'; url = "https://github.com/$SjRepoSlug/issues/$SjNum" }
+    $SjName = ($SjRepoSlug -replace '/', '_') + '_' + $SjNum + '.json'
+    Set-Content -LiteralPath (Join-Path $SjFix $SjName) -Encoding ASCII -Value ($SjObj | ConvertTo-Json -Compress)
+}
+
+function Invoke-WrapperGh {
+    param([string[]]$SjArgs, [string]$SjHome, [string]$SjGhDir)
+    $SjPrevPath = $env:PATH
+    $SjPrevOut  = $env:KEEL_OUTWARD
+    try {
+        Set-EnvVar 'PATH' ($SjGhDir + ';' + $SjPrevPath)
+        Set-EnvVar 'KEEL_OUTWARD' 'allow'
+        return (Invoke-Wrapper -SjHome $SjHome -SjArgs $SjArgs)
+    }
+    finally {
+        Set-EnvVar 'PATH' $SjPrevPath
+        Set-EnvVar 'KEEL_OUTWARD' $SjPrevOut
+    }
+}
+
+function Get-GhLogLines {
+    param([string]$SjLog)
+    if (-not (Test-Path -LiteralPath $SjLog)) { return @() }
+    return @(Get-Content -LiteralPath $SjLog | ForEach-Object { ([string]$_).TrimEnd() })
+}
+
+# Writes an issue number and, unless the link is empty, a stored link onto a filed signal. The
+# wrapper writes these only after a real GitHub call (signals-push, adopt-signal), so a suite
+# that must not reach GitHub builds the precondition itself, in its own scratch store, as
+# test-outward-guard.ps1's New-SignalWithIssue does.
+function Set-LinkedRecord {
+    param([string]$SjHome, [string]$SjId, [int]$SjNum, [string]$SjLink)
+    $SjPath = Get-SignalPath -SjHome $SjHome -SjId $SjId
+    $SjRec = Get-SignalRecord -SjHome $SjHome -SjId $SjId
+    Add-Member -InputObject $SjRec -NotePropertyName 'issue' -NotePropertyValue $SjNum -Force
+    $SjUrlValue = $null
+    if ($SjLink -ne '') { $SjUrlValue = $SjLink }
+    Add-Member -InputObject $SjRec -NotePropertyName 'issueUrl' -NotePropertyValue $SjUrlValue -Force
+    Add-Member -InputObject $SjRec -NotePropertyName 'pushedAt' -NotePropertyValue '2026-01-01T00:00:00' -Force
+    [System.IO.File]::WriteAllText($SjPath, ($SjRec | ConvertTo-Json -Depth 14), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-FileSha {
+    param([string]$SjPath)
+    # .NET rather than Get-FileHash: that cmdlet is not always loaded in a powershell.exe started
+    # from a hook or a tool shell, and a missing cmdlet would end the run.
+    $SjAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($SjAlg.ComputeHash([System.IO.File]::ReadAllBytes($SjPath)) | ForEach-Object { $_.ToString('x2') })) }
+    finally { $SjAlg.Dispose() }
+}
+
+# The names of the properties two parsed records disagree on, compared by their compressed JSON,
+# over the properties either one has.
+function Get-PropDiff {
+    param($SjA, $SjB)
+    $SjNames = @()
+    foreach ($SjP in @($SjA.PSObject.Properties)) { if ($SjNames -notcontains $SjP.Name) { $SjNames += $SjP.Name } }
+    foreach ($SjP in @($SjB.PSObject.Properties)) { if ($SjNames -notcontains $SjP.Name) { $SjNames += $SjP.Name } }
+    $SjDiff = @()
+    foreach ($SjN in $SjNames) {
+        $SjVa = ''
+        $SjVb = ''
+        if ($null -ne $SjA.PSObject.Properties[$SjN]) { $SjVa = ConvertTo-Json -Compress -Depth 14 -InputObject $SjA.PSObject.Properties[$SjN].Value }
+        else { $SjVa = '<absent>' }
+        if ($null -ne $SjB.PSObject.Properties[$SjN]) { $SjVb = ConvertTo-Json -Compress -Depth 14 -InputObject $SjB.PSObject.Properties[$SjN].Value }
+        else { $SjVb = '<absent>' }
+        if ($SjVa -cne $SjVb) { $SjDiff += $SjN }
+    }
+    return $SjDiff
+}
+
+# The write lock's name for the scratch store, computed as the wrapper's Get-WriteLockName
+# computes it and as scripts/test-concurrent-writes.ps1 computes it - a DECLARED coupling: if the
+# wrapper's naming moves, LINK7's case stops holding the lock and fails, loudly.
+function Get-StoreLockName {
+    param([string]$SjHome)
+    $SjStore = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $SjHome '.keel') 'signals')).ToLowerInvariant()
+    $SjAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { $SjHex = -join ($SjAlg.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($SjStore)) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $SjAlg.Dispose() }
+    return ('Global\keel-write-' + $SjHex)
+}
+
+# The new lines a log gained since a count was taken.
+function Get-NewLines {
+    param([string]$SjLog, [int]$SjSince)
+    $SjAll = @(Get-GhLogLines -SjLog $SjLog)
+    if ($SjAll.Count -le $SjSince) { return @() }
+    return @($SjAll[$SjSince..($SjAll.Count - 1)])
+}
+
+# The one line of a relink listing that starts with a record's id.
+function Get-RelinkRow {
+    param([string]$SjText, [string]$SjId)
+    foreach ($SjL in @($SjText -split "`n")) { if ($SjL.StartsWith("$SjId  ")) { return $SjL } }
+    return ''
+}
+
+# ---------------------------------------------------------------------------
+# GROUP LINK - a record's issue is its repo and number
+#
+# Its own scratch home and project, destination example/new. Each pair has its own records, so
+# no row inherits a state an earlier row left: a resolved record would take the retry path, and a
+# re-pointed one would leave the relink set. The numbers are held in variables and every id is
+# parsed from the wrapper's output, because validator section 18 refuses record ids and
+# issue-number phrases in product files.
+# ---------------------------------------------------------------------------
+function Invoke-LinkCases {
+    param([string]$SjTempRoot)
+
+    $SjLHome = Join-Path $SjTempRoot 'link-home'
+    $SjLRepo = Join-Path $SjTempRoot 'link-project'
+    $SjGhDir = Join-Path $SjTempRoot 'link-gh'
+    $SjFix   = Join-Path $SjTempRoot 'link-fixtures'
+    $SjLog   = Join-Path $SjTempRoot 'link-gh.log'
+    New-AnsweringGh -SjDir $SjGhDir -SjLog $SjLog -SjFix $SjFix
+    New-Fixture -SjRepo $SjLRepo -SjHome $SjLHome
+    $SjTgt = Invoke-Wrapper -SjHome $SjLHome -SjArgs @('signals-target', '-Repo', 'example/new')
+    if ($SjTgt.Code -ne 0) { throw "fixture signals-target failed (exit $($SjTgt.Code)): $($SjTgt.Text)" }
+    $SjStoreDir = Join-Path (Join-Path $SjLHome '.keel') 'signals'
+    $SjOldBase = 'https://github.com/example/old/issues/'
+    $SjNewBase = 'https://github.com/example/new/issues/'
+    $SjOthBase = 'https://github.com/example/other/issues/'
+
+    # --- HARNESS: the answering fake is what gh resolves to ---------------------------------
+    $SjHN = 40
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjHN -SjTitle 'harness fixture'
+    $SjH = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'adopt-signal', '-Issue', "$SjHN", '-Repo', 'example/new', '-Project', 'link', '-Phase', 'W1.1', '-Kind', 'gap', '-Path', $SjLRepo)
+    $SjHLog = @(Get-GhLogLines -SjLog $SjLog)
+    Add-Result 'LINK-HARNESS-CONTROL-answering-gh-reached' `
+        (($SjH.Code -eq 0) -and ($SjHLog -contains "issue view $SjHN --repo example/new --json number,title,state,url")) `
+        "a fresh adopt through the answering fake must exit 0 and be logged; exit $($SjH.Code), log=[$($SjHLog -join ' || ')]"
+
+    # --- LINK1: adopt refuses only the same repo and number ----------------------------------
+    $SjN1 = 41
+    $SjHeld = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link held on old'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjHeld -SjNum $SjN1 -SjLink ($SjOldBase + $SjN1)
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN1 -SjTitle 'same number on another repo'
+    $SjL1Case = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'adopt-signal', '-Issue', "$SjN1", '-Repo', 'example/new', '-Project', 'link', '-Phase', 'W1.1', '-Kind', 'gap', '-Path', $SjLRepo)
+    $SjL1New = ''
+    if ($SjL1Case.Text -match 'as (S\d{4}) \(') { $SjL1New = $Matches[1] }
+    $SjL1NewUrl = ''
+    $SjL1NewNum = 0
+    if ($SjL1New -ne '') {
+        $SjL1Rec = Get-SignalRecord -SjHome $SjLHome -SjId $SjL1New
+        $SjL1NewUrl = [string]$SjL1Rec.issueUrl
+        $SjL1NewNum = [int]$SjL1Rec.issue
+    }
+    $SjL1Files = @(Get-ChildItem -LiteralPath $SjStoreDir -Filter '*.json').Count
+    $SjL1Log = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL1Ctl = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'adopt-signal', '-Issue', "$SjN1", '-Repo', 'example/old', '-Project', 'link', '-Phase', 'W1.1', '-Kind', 'gap', '-Path', $SjLRepo)
+    $SjL1FilesAfter = @(Get-ChildItem -LiteralPath $SjStoreDir -Filter '*.json').Count
+    $SjL1LogAfter = @(Get-GhLogLines -SjLog $SjLog).Count
+    Add-Pair 'LINK1-adopt-compares-repo-and-number' `
+        (($SjL1Case.Code -eq 0) -and ($SjL1NewUrl -eq ($SjNewBase + $SjN1)) -and ($SjL1NewNum -eq $SjN1)) `
+        "adopting the number from example/new over a record holding it on example/old must exit 0 and store a link on example/new; exit $($SjL1Case.Code), id=$SjL1New, url=$SjL1NewUrl; output=[$($SjL1Case.Text)]" `
+        (($SjL1Ctl.Code -eq 90) -and ($SjL1Ctl.Text -like "*$SjHeld*") -and ($SjL1FilesAfter -eq $SjL1Files) -and ($SjL1LogAfter -eq $SjL1Log)) `
+        "adopting it from example/old, where the held record is, must refuse at 90 naming $SjHeld, add no file and call no gh; exit $($SjL1Ctl.Code), files $SjL1Files->$SjL1FilesAfter, log $SjL1Log->$SjL1LogAfter; output=[$($SjL1Ctl.Text)]" `
+        ($SjL1Case.Code -ne $SjL1Ctl.Code) `
+        'the same number from two repos must be answered differently, or the scan is not reading the repo'
+
+    # --- LINK2: -CloseIssue acts on the record's own repo ------------------------------------
+    $SjN2 = 42
+    $SjL2Id = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link linked to other'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL2Id -SjNum $SjN2 -SjLink ($SjOthBase + $SjN2)
+    $SjL2Since = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL2Case = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'resolve-signal', '-Id', $SjL2Id, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Path', $SjLRepo)
+    $SjL2Lines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL2Since)
+    $SjN2c = 43
+    $SjL2CtlId = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link with no link'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL2CtlId -SjNum $SjN2c -SjLink ''
+    $SjL2CtlSince = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL2Ctl = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'resolve-signal', '-Id', $SjL2CtlId, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Path', $SjLRepo)
+    $SjL2CtlLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL2CtlSince)
+    $SjL2CaseOk = ($SjL2Case.Code -eq 0) -and ($SjL2Lines.Count -eq 2)
+    if ($SjL2CaseOk) {
+        $SjL2CaseOk = ($SjL2Lines[0] -like "api --method POST repos/example/other/issues/$SjN2/comments --input *") -and
+            ($SjL2Lines[1] -ceq "issue close $SjN2 --repo example/other") -and
+            (@($SjL2Lines | Where-Object { $_ -like '*example/new*' }).Count -eq 0)
+    }
+    $SjL2CtlOk = ($SjL2Ctl.Code -eq 0) -and ($SjL2CtlLines.Count -eq 2)
+    if ($SjL2CtlOk) {
+        $SjL2CtlOk = ($SjL2CtlLines[0] -like "api --method POST repos/example/new/issues/$SjN2c/comments --input *") -and
+            ($SjL2CtlLines[1] -ceq "issue close $SjN2c --repo example/new")
+    }
+    Add-Pair 'LINK2-close-acts-on-the-records-repo' `
+        $SjL2CaseOk `
+        "a record linked to example/other, with the destination example/new, must comment on and close on example/other and nowhere else; exit $($SjL2Case.Code), lines=[$($SjL2Lines -join ' || ')]" `
+        $SjL2CtlOk `
+        "a record with no link must still comment on and close on the destination, example/new; exit $($SjL2Ctl.Code), lines=[$($SjL2CtlLines -join ' || ')]" `
+        ((($SjL2Lines -join ' ') -like '*example/other*') -ne (($SjL2CtlLines -join ' ') -like '*example/other*')) `
+        'the linked and the unlinked record must reach different repos, or the close is not reading the link'
+
+    # --- LINK3: a -Repo that disagrees with the link is refused before anything happens -----
+    $SjN3 = 44
+    $SjL3Id = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link disagreeing repo'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL3Id -SjNum $SjN3 -SjLink ($SjOthBase + $SjN3)
+    $SjL3Path = Get-SignalPath -SjHome $SjLHome -SjId $SjL3Id
+    $SjL3Sha = Get-FileSha -SjPath $SjL3Path
+    $SjL3Since = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL3Case = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'resolve-signal', '-Id', $SjL3Id, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Repo', 'example/new', '-Path', $SjLRepo)
+    $SjL3CaseLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL3Since)
+    $SjL3ShaAfter = Get-FileSha -SjPath $SjL3Path
+    $SjL3CtlSince = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL3Ctl = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
+        'resolve-signal', '-Id', $SjL3Id, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Repo', 'example/other', '-Path', $SjLRepo)
+    $SjL3CtlLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL3CtlSince)
+    $SjL3CtlOk = ($SjL3Ctl.Code -eq 0) -and ($SjL3CtlLines.Count -eq 2)
+    if ($SjL3CtlOk) {
+        $SjL3CtlOk = ($SjL3CtlLines[0] -like "api --method POST repos/example/other/issues/$SjN3/comments --input *") -and ($SjL3CtlLines[1] -ceq "issue close $SjN3 --repo example/other")
+    }
+    Add-Pair 'LINK3-disagreeing-repo-refused' `
+        (($SjL3Case.Code -eq 90) -and ($SjL3Case.Text -like '*signals-relink -From example/other -Repo example/new*') -and ($SjL3CaseLines.Count -eq 0) -and ($SjL3ShaAfter -eq $SjL3Sha)) `
+        "-Repo example/new on a record linked to example/other must refuse at 90 naming the relink command, call no gh and leave the record's bytes alone; exit $($SjL3Case.Code), new log lines=$($SjL3CaseLines.Count), sha same=$($SjL3ShaAfter -eq $SjL3Sha); output=[$($SjL3Case.Text)]" `
+        $SjL3CtlOk `
+        "-Repo example/other, which agrees with the record, must exit 0 and make both calls there; exit $($SjL3Ctl.Code), lines=[$($SjL3CtlLines -join ' || ')]" `
+        ($SjL3Case.Code -ne $SjL3Ctl.Code) `
+        'an agreeing and a disagreeing -Repo must be answered differently, or the check refuses every -Repo'
+
+    # --- LINK4: a record with no link, or linked to the destination, closes as before -------
+    # The expected lines are the ones the wrapper as it stood before this change logged for
+    # records of exactly these two shapes, read from that wrapper's own run.
+    $SjN4a = 45
+    $SjN4b = 46
+    $SjL4a = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link no link four'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL4a -SjNum $SjN4a -SjLink ''
+    $SjL4b = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link on destination four'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL4b -SjNum $SjN4b -SjLink ($SjNewBase + $SjN4b)
+    $SjL4Since = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL4Ra = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('resolve-signal', '-Id', $SjL4a, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Path', $SjLRepo)
+    $SjL4Rb = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('resolve-signal', '-Id', $SjL4b, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Path', $SjLRepo)
+    $SjL4Lines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL4Since)
+    $SjL4Want = @(
+        ("api --method POST repos/example/new/issues/$SjN4a/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL4a.json") + ' --jq .html_url'),
+        "issue close $SjN4a --repo example/new",
+        ("api --method POST repos/example/new/issues/$SjN4b/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL4b.json") + ' --jq .html_url'),
+        "issue close $SjN4b --repo example/new")
+    $SjL4Same = ($SjL4Lines.Count -eq $SjL4Want.Count)
+    if ($SjL4Same) { for ($SjI = 0; $SjI -lt $SjL4Want.Count; $SjI++) { if ($SjL4Lines[$SjI] -cne $SjL4Want[$SjI]) { $SjL4Same = $false } } }
+    # The control: LINK2's record, compared with the destination shape for ITS number, must NOT
+    # equal it - so this comparison can tell a record that moved from one that did not.
+    $SjL4Dest2 = @(
+        ("api --method POST repos/example/new/issues/$SjN2/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL2Id.json") + ' --jq .html_url'),
+        "issue close $SjN2 --repo example/new")
+    $SjL4CtlSame = ($SjL2Lines.Count -eq 2)
+    if ($SjL4CtlSame) { $SjL4CtlSame = ($SjL2Lines[0] -ceq $SjL4Dest2[0]) -and ($SjL2Lines[1] -ceq $SjL4Dest2[1]) }
+    Add-Pair 'LINK4-unlinked-and-destination-close-as-before' `
+        (($SjL4Ra.Code -eq 0) -and ($SjL4Rb.Code -eq 0) -and $SjL4Same) `
+        "both records must log exactly the destination lines the earlier wrapper logged; exits $($SjL4Ra.Code)/$($SjL4Rb.Code), got=[$($SjL4Lines -join ' || ')], want=[$($SjL4Want -join ' || ')]" `
+        (-not $SjL4CtlSame) `
+        "LINK2's record, linked to example/other, must NOT log the destination shape; got=[$($SjL2Lines -join ' || ')]" `
+        ($SjL4Same -ne $SjL4CtlSame) `
+        'the comparison must accept the unmoved records and reject the moved one, or it accepts everything'
+
+    # --- LINK5: signals-relink previews, then re-points the matching records ----------------
+    # Its records move from a repo of their own, example/moved, so the set the route finds is
+    # exactly these three and no record an earlier pair left linked to example/old.
+    $SjMovBase = 'https://github.com/example/moved/issues/'
+    $SjN5 = @(51, 52, 53)
+    $SjL5Ids = @()
+    $SjL5Det = @('link relink alpha', 'link relink beta', 'link relink gamma')
+    for ($SjI = 0; $SjI -lt 3; $SjI++) {
+        $SjOneId = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail $SjL5Det[$SjI]
+        Set-LinkedRecord -SjHome $SjLHome -SjId $SjOneId -SjNum $SjN5[$SjI] -SjLink ($SjMovBase + $SjN5[$SjI])
+        $SjL5Ids += $SjOneId
+    }
+    $SjN5o = 54
+    $SjL5Oth = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link relink other repo'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL5Oth -SjNum $SjN5o -SjLink ($SjOthBase + $SjN5o)
+    # alpha matches exactly, beta's title there is signal-shaped and differs only after a shared
+    # prefix (so a test reading only the '[signal:' prefix or a leading part would call it a match),
+    # gamma matches once whitespace runs are collapsed. The other-repo record's number is answerable too, so a relink that ignored -From
+    # would list it.
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN5[0] -SjTitle '[signal:gap] link relink alpha'
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN5[1] -SjTitle '[signal:gap] link relink beta, then edited'
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN5[2] -SjTitle '[signal:gap]  link   relink gamma '
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN5o -SjTitle '[signal:gap] link relink other repo'
+    $SjL5All = @($SjL5Ids) + @($SjL5Oth)
+    $SjL5Sha = @{}
+    $SjL5Before = @{}
+    foreach ($SjOneId in $SjL5All) {
+        $SjL5Sha[$SjOneId] = Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjOneId)
+        $SjL5Before[$SjOneId] = Get-SignalRecord -SjHome $SjLHome -SjId $SjOneId
+    }
+    $SjL5Since = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjL5Prev = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/moved', '-Path', $SjLRepo)
+    $SjL5PrevLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL5Since)
+    $SjL5Marks = @('MATCH', 'MISMATCH', 'MATCH')
+    $SjL5RowsOk = $true
+    for ($SjI = 0; $SjI -lt 3; $SjI++) {
+        $SjRow = Get-RelinkRow -SjText $SjL5Prev.Text -SjId $SjL5Ids[$SjI]
+        $SjWantLead = "$($SjL5Ids[$SjI])  #$($SjN5[$SjI])  $SjMovBase$($SjN5[$SjI]) -> $SjNewBase$($SjN5[$SjI])  $($SjL5Marks[$SjI])"
+        if (-not (($SjRow -ceq $SjWantLead) -or $SjRow.StartsWith("$SjWantLead  "))) { $SjL5RowsOk = $false }
+    }
+    $SjL5NoOther = (-not ($SjL5Prev.Text -like "*$SjL5Oth*")) -and ($SjL5Prev.Text -like '*3 record(s) link to issues on example/moved*')
+    $SjL5HashSame = $true
+    foreach ($SjOneId in $SjL5All) { if ((Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjOneId)) -ne $SjL5Sha[$SjOneId]) { $SjL5HashSame = $false } }
+    # The route REACHES gh when the guard allows it: one read per old-repo record.
+    $SjL5Reads = $true
+    for ($SjI = 0; $SjI -lt 3; $SjI++) { if ($SjL5PrevLines -notcontains "issue view $($SjN5[$SjI]) --repo example/new --json number,title,state,url") { $SjL5Reads = $false } }
+    $SjL5Apply = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/moved', '-Apply', '-Path', $SjLRepo)
+    $SjL5Moved = $true
+    foreach ($SjI in @(0, 2)) {
+        $SjAfter = Get-SignalRecord -SjHome $SjLHome -SjId $SjL5Ids[$SjI]
+        $SjDiff = @(Get-PropDiff $SjL5Before[$SjL5Ids[$SjI]] $SjAfter)
+        if (($SjDiff.Count -ne 1) -or ($SjDiff[0] -ne 'issueUrl') -or ([string]$SjAfter.issueUrl -ne ($SjNewBase + $SjN5[$SjI]))) { $SjL5Moved = $false }
+    }
+    $SjL5BetaSame = ((Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjL5Ids[1])) -eq $SjL5Sha[$SjL5Ids[1]])
+    $SjL5OthSame = ((Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjL5Oth)) -eq $SjL5Sha[$SjL5Oth])
+    $SjL5AlphaSame = ((Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjL5Ids[0])) -eq $SjL5Sha[$SjL5Ids[0]])
+    Add-Pair 'LINK5-relink-previews-then-repoints-matches' `
+        (($SjL5Prev.Code -eq 0) -and $SjL5RowsOk -and $SjL5NoOther -and $SjL5HashSame -and $SjL5Reads -and ($SjL5Apply.Code -eq 0) -and $SjL5Moved) `
+        "preview must exit 0, list the three old-repo records MATCH/MISMATCH/MATCH with old and new links, not list the other-repo record, change no file and read each once; -Apply must change alpha and gamma in issueUrl alone. preview exit=$($SjL5Prev.Code) rows=$SjL5RowsOk noOther=$SjL5NoOther hashSame=$SjL5HashSame reads=$SjL5Reads apply exit=$($SjL5Apply.Code) moved=$SjL5Moved; preview=[$($SjL5Prev.Text)]" `
+        ($SjL5BetaSame -and $SjL5OthSame) `
+        "the mismatching record and the other-repo record must keep their bytes after -Apply; beta same=$SjL5BetaSame, other same=$SjL5OthSame; apply=[$($SjL5Apply.Text)]" `
+        ($SjL5AlphaSame -ne $SjL5BetaSame) `
+        'a matching and a mismatching record must end differently, or the title test is not deciding'
+
+    # --- LINK6: a mismatching record is re-pointed when named --------------------------------
+    $SjL6Beta = $SjL5Ids[1]
+    $SjL6Apply = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/moved', '-Id', $SjL6Beta, '-Apply', '-Path', $SjLRepo)
+    $SjL6After = Get-SignalRecord -SjHome $SjLHome -SjId $SjL6Beta
+    $SjL6Diff = @(Get-PropDiff $SjL5Before[$SjL6Beta] $SjL6After)
+    $SjL6OthSame = ((Get-FileSha -SjPath (Get-SignalPath -SjHome $SjLHome -SjId $SjL5Oth)) -eq $SjL5Sha[$SjL5Oth])
+    $SjL6Moved = ($SjL6Apply.Code -eq 0) -and ($SjL6Diff.Count -eq 1)
+    if ($SjL6Moved) { $SjL6Moved = ($SjL6Diff[0] -eq 'issueUrl') -and ([string]$SjL6After.issueUrl -eq ($SjNewBase + $SjN5[1])) }
+    Add-Pair 'LINK6-named-mismatch-repointed' `
+        ($SjL6Moved -and $SjL6OthSame) `
+        "-Apply -Id naming the mismatching record must change it in issueUrl alone, to example/new, and leave the other-repo record alone; exit $($SjL6Apply.Code), diff=[$($SjL6Diff -join ',')], url=$($SjL6After.issueUrl), other same=$SjL6OthSame; output=[$($SjL6Apply.Text)]" `
+        $SjL5BetaSame `
+        'without the name, the same record was left alone by the earlier -Apply' `
+        ($SjL6Moved -ne (-not $SjL5BetaSame)) `
+        'the named and the unnamed run must end differently for the same record, or -Id is not deciding'
+
+    # --- LINK7: -Apply waits for the store lock, and writes once it is free -----------------
+    $SjN7 = 57
+    $SjL7Id = New-Signal -SjRepo $SjLRepo -SjHome $SjLHome -SjDetail 'link lock fixture'
+    Set-LinkedRecord -SjHome $SjLHome -SjId $SjL7Id -SjNum $SjN7 -SjLink ("https://github.com/example/lockold/issues/$SjN7")
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjN7 -SjTitle '[signal:gap] link lock fixture'
+    $SjL7Path = Get-SignalPath -SjHome $SjLHome -SjId $SjL7Id
+    $SjL7Sha = Get-FileSha -SjPath $SjL7Path
+    $SjL7Mutex = [System.Threading.Mutex]::new($false, (Get-StoreLockName -SjHome $SjLHome))
+    $SjL7Held = $SjL7Mutex.WaitOne([TimeSpan]::FromSeconds(5))
+    $SjL7Case = $null
+    try {
+        $SjL7Case = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/lockold', '-Apply', '-Path', $SjLRepo)
+    }
+    finally {
+        if ($SjL7Held) { $SjL7Mutex.ReleaseMutex() }
+        $SjL7Mutex.Dispose()
+    }
+    $SjL7ShaCase = Get-FileSha -SjPath $SjL7Path
+    $SjL7Ctl = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/lockold', '-Apply', '-Path', $SjLRepo)
+    $SjL7ShaCtl = Get-FileSha -SjPath $SjL7Path
+    $SjL7CtlUrl = [string](Get-SignalRecord -SjHome $SjLHome -SjId $SjL7Id).issueUrl
+    Add-Pair 'LINK7-relink-takes-the-store-lock' `
+        ($SjL7Held -and ($SjL7Case.Code -eq 89) -and ($SjL7ShaCase -eq $SjL7Sha)) `
+        "with the store's lock held past the wait, -Apply must stop at 89 and write nothing; held=$SjL7Held exit $($SjL7Case.Code), sha same=$($SjL7ShaCase -eq $SjL7Sha); output=[$($SjL7Case.Text)]" `
+        (($SjL7Ctl.Code -eq 0) -and ($SjL7ShaCtl -ne $SjL7Sha) -and ($SjL7CtlUrl -eq ($SjNewBase + $SjN7))) `
+        "with the lock released, the same -Apply must exit 0 and re-point the record; exit $($SjL7Ctl.Code), url=$SjL7CtlUrl" `
+        ($SjL7Case.Code -ne $SjL7Ctl.Code) `
+        'a held and a free lock must be answered differently, or the arm is not taking the lock'
+}
+
+# ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
 $SjTempBase = [System.IO.Path]::GetTempPath()
@@ -1113,7 +1534,8 @@ $SjFailed = 0
 $SjHarnessOk = $false
 $SjSandboxOk = $false
 try {
-    Invoke-Cases -SjTempRoot $SjTempRoot
+    if (-not $LinkOnly) { Invoke-Cases -SjTempRoot $SjTempRoot }
+    Invoke-LinkCases -SjTempRoot $SjTempRoot
 
     foreach ($SjResult in @($script:SjResults)) {
         if (-not $SjResult.Ok) {
@@ -1124,6 +1546,7 @@ try {
         if ($SjResult.Name -eq 'HARNESS-CONTROL-store-is-sandboxed')    { $SjSandboxOk = $SjResult.Ok }
     }
 
+    if ($LinkOnly) { $SjHarnessOk = $true; $SjSandboxOk = $true }
     if ($SjHarnessOk -ne $true) {
         Write-Output ''
         Write-Output '  HARNESS CONTROL FAILED: judge-signal did not succeed on a freshly filed OPEN scratch signal.'
