@@ -1,4 +1,4 @@
-# test-outward-guard.ps1 - the suite for the SEVEN outward code points: the process
+# test-outward-guard.ps1 - the suite for the EIGHT outward code points: the process
 # invocations in keel-state.ps1 that leave the machine.
 #
 # WHY THIS EXISTS AND WHY IT IS A SIBLING rather than three more cases inside
@@ -11,8 +11,8 @@
 # from it would need an argument that this reason does not apply, and there is none - the
 # outward guard shares no machinery with quarantine either.
 #
-# WHAT IT COVERS. Seven process invocations across five verbs, found by an AST parse of the
-# whole wrapper - the parse Group 0 below runs on every run, so a seventh call added without a
+# WHAT IT COVERS. Eight process invocations across five verbs, found by an AST parse of the
+# whole wrapper - the parse Group 0 below runs on every run, so a ninth call added without a
 # row here fails this suite rather than going unnoticed:
 #
 #   1  signals-push -Apply           gh api --method POST repos/<slug>/issues      exit 90
@@ -23,6 +23,12 @@
 #   6  signals-relink                gh issue view <n> --repo <slug>               exit 90
 #   7  signals-push, and             gh repo view <slug> --json visibility         exit 0,
 #      resolve-signal -CloseIssue                                                  could not tell
+#   8  signals-push -Apply           gh api --method POST .../issues/<n>/comments  exit 90
+#                                    (a sighting's comment)
+#
+# Row 6 is ONE call site, Read-RelinkIssue, that both forms of signals-relink reach: re-pointing
+# moved records, and attaching one issue to a record with none (-Id -Issue). Group 9 runs the
+# attach form under the guard; Group 7 runs the re-point form.
 #
 # Row 7 is ONE call site, Get-DestinationVisibility, that two verbs reach: the visibility read
 # before anything is published. It fails open, so under the guard the verb goes on and says
@@ -122,7 +128,7 @@ $OgStateWrapper = Join-Path $OgRepoRoot 'plugins\keel-workflow\skills\keel-orche
 if ($AgainstWrapper -ne '') { $OgStateWrapper = (Resolve-Path -LiteralPath $AgainstWrapper).Path }
 
 # The outward invocations the header table lists. Group 0 compares the wrapper's AST against it.
-$OgDeclaredOutward = 7
+$OgDeclaredOutward = 8
 
 # By full path, deliberately: the reason-control limb empties PATH, and a bare
 # 'powershell.exe' would then fail to launch at all.
@@ -717,6 +723,61 @@ function Invoke-Cases {
     Add-Result 'G8-reason-control-other-refusal-still-produced' `
                (($OgG8Reason.Code -eq 90) -and ($OgG8Reason.Text -like "*$OgNoTarget*") -and (-not ($OgG8Reason.Text -like '*Destination visibility*'))) `
                "exit $($OgG8Reason.Code), wanted 90 with '$OgNoTarget' PRESENT and no visibility line"
+
+    # =====================================================================
+    # GROUP 9 - a sighting's comment (row 8) and the attach form's read (row 6)
+    # =====================================================================
+    # Its own home, so the only thing signals-push has to send is one sighting on a signal that
+    # already has an issue: Group 1's pending signal would otherwise put an issue POST in front
+    # of the comment and the message would name both.
+    $OgHome9 = Join-Path $OgTempRoot 'home9'
+    $OgRepo9 = Join-Path $OgTempRoot 'fixture-project9'
+    New-Fixture -OgRepo $OgRepo9 -OgHome $OgHome9
+    Set-FixtureTarget -OgHome $OgHome9
+    $OgG9Num = 30 + 3
+    $OgG9Sid = New-SignalWithIssue -OgRepo $OgRepo9 -OgHome $OgHome9 -OgIssueNum $OgG9Num -OgLink ("https://github.com/$OgFixtureTarget/issues/" + $OgG9Num)
+    $OgG9Seen = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signal', '-Id', $OgG9Sid, '-Phase', 'W1.1', '-Detail', 'outward guard fixture sighting',
+        '-Evidence', 'scripts/test-outward-guard.ps1 - fixture, no real defect', '-Path', $OgRepo9)
+    if ($OgG9Seen.Code -ne 0) { throw "fixture sighting failed (exit $($OgG9Seen.Code)): $($OgG9Seen.Text)" }
+
+    $OgG9Case = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signals-push', '-Apply', '-Path', $OgRepo9)
+    Add-Result 'G9-case-sighting-comment-refused-90' `
+               (($OgG9Case.Code -eq 90) -and ($OgG9Case.Text -like "*$OgGuardText*") -and
+                ($OgG9Case.Text -like "*gh api --method POST repos/$OgFixtureTarget/issues/$OgG9Num/comments*")) `
+               "exit $($OgG9Case.Code), wanted 90 with the guard's text naming the comment POST on the signal's issue"
+    Add-Result 'G9-case-does-NOT-claim-gh-missing-UNCONTROLLED' `
+               (-not ($OgG9Case.Text -like "*$OgGhMissing*")) `
+               "wanted '$OgGhMissing' ABSENT - the guard must not claim a false reason"
+    $OgG9Prev = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signals-push', '-Path', $OgRepo9)
+    Add-Result 'G9-scope-control-preview-shows-the-comment-unguarded' `
+               (($OgG9Prev.Code -eq 0) -and ($OgG9Prev.Text -like '*PREVIEW ONLY*') -and ($OgG9Prev.Text -like '*COMMENT 1 -> *') -and
+                (-not ($OgG9Prev.Text -like "*$OgGuardText*"))) `
+               "exit $($OgG9Prev.Code), wanted 0 with 'PREVIEW ONLY', the comment section and NO guard text"
+    Clear-FixtureTarget -OgHome $OgHome9
+    $OgG9Reason = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signals-push', '-Apply', '-Path', $OgRepo9) -OgOutward 'allow' -OgBlindDir $OgBlind
+    Set-FixtureTarget -OgHome $OgHome9
+    Add-Result 'G9-reason-control-other-refusal-still-produced' `
+               (($OgG9Reason.Text -like "*$OgNoTarget*") -and (-not ($OgG9Reason.Text -like "*$OgGuardText*"))) `
+               "exit $($OgG9Reason.Code), wanted '$OgNoTarget' PRESENT and the guard's text ABSENT"
+
+    # The attach form of signals-relink reaches the same issue read as re-pointing does, behind
+    # its own guard check: an unlinked record and a number.
+    $OgG9Free = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', 'outward guard fixture unlinked signal',
+        '-Evidence', 'scripts/test-outward-guard.ps1 - fixture, no real defect', '-Path', $OgRepo9)
+    $OgG9FreeId = ''
+    foreach ($OgLine in @($OgG9Free.Text -split "`n")) { if ($OgLine -match 'Filed signal\s+(S\d{4})') { $OgG9FreeId = $Matches[1]; break } }
+    if ($OgG9FreeId -eq '') { throw "fixture unlinked signal failed (exit $($OgG9Free.Code)): $($OgG9Free.Text)" }
+    $OgG9AtNum = 30 + 4
+    $OgG9At = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signals-relink', '-Id', $OgG9FreeId, '-Issue', "$OgG9AtNum")
+    Add-Result 'G9-case-attach-read-refused-90' `
+               (($OgG9At.Code -eq 90) -and ($OgG9At.Text -like "*$OgGuardText*") -and ($OgG9At.Text -like "*gh issue view $OgG9AtNum --repo $OgFixtureTarget*")) `
+               "exit $($OgG9At.Code), wanted 90 with the guard's text naming the issue read"
+    Clear-FixtureTarget -OgHome $OgHome9
+    $OgG9AtReason = Invoke-Wrapper -OgHome $OgHome9 -OgArgs @('signals-relink', '-Id', $OgG9FreeId, '-Issue', "$OgG9AtNum") -OgOutward 'allow' -OgBlindDir $OgBlind
+    Set-FixtureTarget -OgHome $OgHome9
+    Add-Result 'G9-reason-control-attach-other-refusal-still-produced' `
+               (($OgG9AtReason.Text -like "*$OgNoTarget*") -and (-not ($OgG9AtReason.Text -like "*$OgGuardText*"))) `
+               "exit $($OgG9AtReason.Code), wanted '$OgNoTarget' PRESENT and the guard's text ABSENT"
 
     # No row in this suite may run gh. A non-empty log means one got past the guard or the
     # destination check - throw, so the run ends with no summary line and is reported.

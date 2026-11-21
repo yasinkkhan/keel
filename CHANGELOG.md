@@ -4,6 +4,66 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.84.0 - 2026-11-21
+
+- **`keel-workflow` 0.76.0: signal records are easy to read and repair.** A report's issue title was
+  the whole detail cut at 240 characters, the version it showed was the plugin's rather than the
+  release, a push could leave its payload files behind in `TEMP`, an issue whose number a push failed
+  to record could not be attached to its record, and an open signal seen again had nowhere to go but a
+  second signal.
+  - **Short titles.** `signal` and `adopt-signal` take an optional `-Title`, stored on the record
+    as `title`: one line of at most 100 characters, refused at exit 90 otherwise. An issue's title is
+    `[signal:<kind>] <title>`; with no title it is the detail's first sentence, kept whole when it
+    fits in 80 characters and otherwise cut to the whole words that fit, followed by `...`. The whole
+    detail stays in the body, and the preview says when a title was taken from the detail.
+    `adopt-signal -Title` prints the title the record carries. Titles already published are not
+    changed.
+  - **The published title is kept.** A push stores the title it sent as `issueTitle`. `signals-relink`
+    compares an issue's title with that, else with the title an adopted record was adopted with, else
+    with the title the old 240-character builder makes, so records pushed before this release still
+    match their issues. An adopted record is now compared with its issue's own title, which before
+    could never match.
+  - **The release beside the plugin version.** A record filed or adopted from now on stores the keel
+    release as `release`, read from the marketplace manifest that lists this keel-workflow at the
+    version running: two levels above the plugin in a clone or a directory source, or the
+    marketplace's own copy under `~/.claude/plugins/marketplaces/<marketplace>` for an installed
+    copy; otherwise `unknown`. An installed copy whose marketplace was updated without its plugins,
+    past a release that left keel-workflow unchanged, reads that later release. A report's body shows
+    `keel release` and `keel-workflow plugin` in two rows; a record from before shows its stored
+    number as the plugin's and the release as `not recorded`. What `keel.json` stores and `status`
+    compares is unchanged.
+  - **No temp files.** `signals-push -Apply`, `resolve-signal -CloseIssue` and the new sighting
+    comment send their JSON to `gh api --input -` on standard input, so nothing is written to `TEMP`.
+  - **Attaching a known issue.** `signals-relink -Id <id> -Issue <n> [-Repo <owner/name>]` reads the
+    issue, compares its title with the record's (either builder's for a record with no stored title)
+    and previews `MATCH` or `MISMATCH`; `-Apply` writes `issue`, `issueUrl` and `issueTitle`. It
+    refuses at exit 90, writing nothing, a record that already has a link, an issue another record
+    holds on that repo, a record that is not OPEN, `-From` given as well, and a mismatch without
+    `-Detail "<why>"`; with it the mismatch is attached and `attachReason` records the reason. It
+    reads the issue through the same one call the re-point form uses.
+  - **Sightings.** `signal -Id <open signal>` with `-Phase`, `-Detail` and `-Evidence` appends a
+    dated sighting to that signal's `sightings` instead of filing a new signal, under the same
+    evidence and quarantine rules; it refuses an unknown id at 94, a signal not OPEN at 90, a
+    different `-Kind` at 90 and `-Title` at 90. `signals` lists each as a `SEEN` line under its
+    signal, marked `POSTED` once sent. `signals-push` previews each unsent sighting as a comment
+    below its signal, checks it for findings with the report, holds it the same way, and with
+    `-Apply` posts it to the signal's issue on the repo the record names, after creating the issue
+    first when the signal has none; each sighting records `commentedAt` and `commentUrl`, and a
+    `-Clearance` used on it is recorded as `clearance`. `signals-push -Id` now accepts a pushed
+    signal that has a sighting waiting. Comments are never read back.
+  - **Skills.** `keel-close-workstream`'s signal command passes `-Title`, and it records a sighting
+    with `signal -Id` for an open signal seen again. `keel-orchestrator`'s signals section describes
+    sightings and the attach form.
+- **`keel-project` 0.4.9: the index rebuild no longer needs `Get-FileHash`.** A Windows PowerShell
+  child that inherits PowerShell 7's module path cannot load that cmdlet, and `keel-index.ps1` failed
+  outright there. It now hashes with .NET's SHA-256 and keeps the same first 12 lowercase hex
+  characters, so every stored index still compares.
+- **Suites.** `test-signal-judgement.ps1` gains group RECORD (`-RecordOnly`) for short titles, the
+  stored published title, the release, temp files, the attach form and sightings; group LINK's
+  expected comment calls now read `--input -`, and group PUBLISH's fake reads the body from standard
+  input. `test-outward-guard.ps1` counts eight outward calls, the sighting comment added, and its
+  Group 9 runs the comment and the attach read under the guard.
+
 ## marketplace 0.83.0 - 2026-11-20
 
 - **`keel-workflow` 0.75.0: a report is checked before it is published, and names its machine by a

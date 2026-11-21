@@ -128,7 +128,8 @@ where a project's name and detail are published, so do not run `signals-target -
 **Push the one you meant.** Without `-Id` the pending set is every unpushed open signal on the
 machine, across every project — so a confirmation naming one signal can carry others the human has
 never read, which is a P6 failure and has held up an enactment before. `-Id` refuses
-rather than guessing: unknown id exits 94, and a malformed, already-pushed or non-OPEN id exits 90.
+rather than guessing: unknown id exits 94, and a malformed or non-OPEN id, or one already pushed with
+no sighting waiting to be sent, exits 90.
 
 **The preview is checked before you show it.** For each signal it lists `FINDINGS`: an entry of this
 machine's `private-names.txt`, this machine's name, or a user folder path, in the exact title and
@@ -152,6 +153,20 @@ When a machine's reports moved to another repo under the same numbers, `signals-
 MISMATCH or NOT READ by comparing its title with the issue's on the new repo, and `-Apply` re-points
 the matches, plus any mismatch named with `-Id`. Show the operator the preview and every mismatch
 before applying, since it rewrites stored records.
+
+**A record whose issue exists but whose number was never stored is attached, not adopted.** A push
+can create an issue and fail to record it, and adopting that issue would make a second record of the
+same defect. `signals-relink -Id <id> -Issue <n> [-Repo <owner/name>]` reads the issue, compares its
+title with the record's and previews; `-Apply` writes the number and link. It refuses a record that
+already has a link, an issue another record holds and a record not OPEN, and a title that does not
+match is attached only with `-Detail "<why it is this record's issue>"`, which is recorded. Show the
+operator the preview before applying.
+
+**An open signal seen again is a sighting, not a second signal.** `signal -Id <open signal id>`,
+with `-Phase`, `-Detail` and `-Evidence` as for a new one, appends a dated sighting to that signal's
+record, and `signals` lists it under the signal. `signals-push` previews each sighting not yet sent as a comment on the signal's issue, checked for findings and held exactly as a report is, and
+`-Apply` posts it, creating the issue first in the same run when the signal has none. Comments are
+never read back: a sighting posted from another machine is read on its issue.
 
 **Never run `-Apply` unprompted.** Show the preview and wait — it is the last point at which
 something that should not leave the machine can be stopped. A project with `quarantine` on may only

@@ -33,9 +33,18 @@
 #                  name a finding by place and never by text, say whether the destination is
 #                  public, and publish a machine code; and the wrapper flags the list lines
 #                  section 16 of check-suite-docs.ps1 flags. Its own fake gh, as LINK has.
+#   the record     group RECORD: an issue's title is short, from -Title or the detail's first
+#                  sentence, and the whole detail stays in the body; the title a push sends is
+#                  stored and relink compares with it or with the old builder's; the release is
+#                  stored beside the plugin version and shown in its own row; no push or close
+#                  leaves a temp file, under a long or an 8.3 TEMP; signals-relink -Id -Issue
+#                  attaches a known issue, with its refusals; 'signal -Id' records a sighting,
+#                  with its refusals, and 'signals' lists it; signals-push posts it as a checked
+#                  comment. Its own fake gh, which reads bodies from standard input.
 #
 # -AgainstWrapper <path> runs every row against another copy of keel-state.ps1, -LinkOnly
-# runs group LINK alone, and -PublishOnly runs group PUBLISH alone. Both exist to show a row able to fail, by running it against a copy
+# runs group LINK alone, -PublishOnly runs group PUBLISH alone and -RecordOnly runs group RECORD
+# alone. They exist to show a row able to fail, by running it against a copy
 # with one thing broken; neither is on the push path, which runs this suite with no switches.
 #
 # THE REFUSAL COVERAGE IS STATED AS A FRACTION ON PURPOSE: how many refusal paths the verb
@@ -72,7 +81,8 @@
 param(
     [string]$AgainstWrapper = '',
     [switch]$LinkOnly,
-    [switch]$PublishOnly
+    [switch]$PublishOnly,
+    [switch]$RecordOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1392,16 +1402,16 @@ function Invoke-LinkCases {
     $SjL4Rb = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @('resolve-signal', '-Id', $SjL4b, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Path', $SjLRepo)
     $SjL4Lines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL4Since)
     $SjL4Want = @(
-        ("api --method POST repos/example/new/issues/$SjN4a/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL4a.json") + ' --jq .html_url'),
+        "api --method POST repos/example/new/issues/$SjN4a/comments --input - --jq .html_url",
         "issue close $SjN4a --repo example/new",
-        ("api --method POST repos/example/new/issues/$SjN4b/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL4b.json") + ' --jq .html_url'),
+        "api --method POST repos/example/new/issues/$SjN4b/comments --input - --jq .html_url",
         "issue close $SjN4b --repo example/new")
     $SjL4Same = ($SjL4Lines.Count -eq $SjL4Want.Count)
     if ($SjL4Same) { for ($SjI = 0; $SjI -lt $SjL4Want.Count; $SjI++) { if ($SjL4Lines[$SjI] -cne $SjL4Want[$SjI]) { $SjL4Same = $false } } }
     # The control: LINK2's record, compared with the destination shape for ITS number, must NOT
     # equal it - so this comparison can tell a record that moved from one that did not.
     $SjL4Dest2 = @(
-        ("api --method POST repos/example/new/issues/$SjN2/comments --input " + (Join-Path $env:TEMP "keel-resolve-$SjL2Id.json") + ' --jq .html_url'),
+        "api --method POST repos/example/new/issues/$SjN2/comments --input - --jq .html_url",
         "issue close $SjN2 --repo example/new")
     $SjL4CtlSame = ($SjL2Lines.Count -eq 2)
     if ($SjL4CtlSame) { $SjL4CtlSame = ($SjL2Lines[0] -ceq $SjL4Dest2[0]) -and ($SjL2Lines[1] -ceq $SjL4Dest2[1]) }
@@ -1532,7 +1542,8 @@ function Invoke-LinkCases {
 # never by its text. Both say whether the destination is public, and a published body names the
 # machine by a random code. This group runs on its OWN scratch home and project, with its own fake
 # gh FIRST on PATH: it logs every call, answers 'repo view' with PUBLIC or PRIVATE when a mode file
-# says so (and exits 1 otherwise), appends every '--input' file it is given to a bodies file, and
+# says so (and exits 1 otherwise), appends every body it is given - on standard input for '--input -',
+# from the file otherwise - to a bodies file, and
 # answers an issue POST with a number and a URL. Every child runs with a scratch COMPUTERNAME and,
 # except the block limb, KEEL_OUTWARD=allow; the destination is example/pub.
 #
@@ -1563,7 +1574,7 @@ function New-PublishGh {
         'echo fake gh: no visibility fixture 1>&2',
         'exit /b 1',
         ':api',
-        ('if "%5"=="--input" ( type "%~6" >>"' + $SjBodies + '" & echo.>>"' + $SjBodies + '" & echo ----SJ-BODY-END---->>"' + $SjBodies + '" )'),
+        ('if "%6"=="-" ( findstr "^" >>"' + $SjBodies + '" & echo.>>"' + $SjBodies + '" & echo ----SJ-BODY-END---->>"' + $SjBodies + '" ) else if "%5"=="--input" ( type "%~6" >>"' + $SjBodies + '" & echo.>>"' + $SjBodies + '" & echo ----SJ-BODY-END---->>"' + $SjBodies + '" )'),
         'echo 101',
         'echo https://github.com/example/pub/issues/101',
         'exit /b 0')
@@ -2064,6 +2075,609 @@ function Invoke-PublishCases {
         ((($SjWr9 -join ',') -ne ($SjWr9b -join ',')) -and (($SjSec16 -join ',') -ne ($SjSec16b -join ','))) 'the wrapper and section 16 must each answer the near miss and the exact word differently'
 }
 
+
+# A property of a parsed record, or $null when it has none: under strict mode a missing property
+# throws on a plain read.
+function Get-Prop2 {
+    param($SjObj, [string]$SjName)
+    if ($null -eq $SjObj) { return $null }
+    $SjP = $SjObj.PSObject.Properties[$SjName]
+    if ($null -eq $SjP) { return $null }
+    return $SjP.Value
+}
+
+# ---------------------------------------------------------------------------
+# GROUP RECORD's helpers. What a signal record holds and what a push sends from it: the issue's
+# short title, the release beside the plugin version, no temp file, attaching a known issue to a
+# record, and a sighting of an open signal, listed and posted as a comment. Its own fake gh,
+# FIRST on PATH, logs every call, answers 'repo view' with PRIVATE, answers 'issue view <n> --repo
+# <owner/name>' from a fixture file as group LINK's does, appends every body it reads on standard
+# input to a bodies file, refuses a body holding the word FAILME, and answers an issue POST with a
+# number and a URL. Every child runs with KEEL_OUTWARD=allow; every repo is under example/.
+# ---------------------------------------------------------------------------
+function New-RecordGh {
+    param([string]$SjDir, [string]$SjLog, [string]$SjFix, [string]$SjBodies)
+    New-Item -ItemType Directory -Path $SjDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $SjFix -Force | Out-Null
+    $SjCap = Join-Path $SjDir 'cap.txt'
+    Set-Content -LiteralPath (Join-Path $SjDir 'gh.cmd') -Encoding ASCII -Value @(
+        '@echo off',
+        ('echo %*>>"' + $SjLog + '"'),
+        'if "%1"=="repo" ( echo PRIVATE& exit /b 0 )',
+        'if "%1"=="issue" if "%2"=="view" goto view',
+        'if "%1"=="issue" if "%2"=="close" exit /b 0',
+        'if "%1"=="api" goto api',
+        'exit /b 7',
+        ':view',
+        'set "SJREPO=%5"',
+        'set "SJREPO=%SJREPO:/=_%"',
+        ('if exist "' + $SjFix + '\%SJREPO%_%3.json" ( type "' + $SjFix + '\%SJREPO%_%3.json" & exit /b 0 )'),
+        'echo fake gh: no such fixture 1>&2',
+        'exit /b 1',
+        ':api',
+        ('if "%6"=="-" ( findstr "^" >"' + $SjCap + '" ) else ( type nul >"' + $SjCap + '" )'),
+        ('type "' + $SjCap + '" >>"' + $SjBodies + '"'),
+        ('echo.>>"' + $SjBodies + '"'),
+        ('echo ----SJ-BODY-END---->>"' + $SjBodies + '"'),
+        ('findstr /c:"FAILME" "' + $SjCap + '" >nul && ( echo fake gh: refused 1>&2 & exit /b 1 )'),
+        'if "%4"=="repos/example/rec/issues" goto created',
+        'echo https://github.com/example/rec/issues/101-comment',
+        'exit /b 0',
+        ':created',
+        'echo 101',
+        'echo https://github.com/example/rec/issues/101',
+        'exit /b 0')
+}
+
+# A child run of a wrapper - the one under test unless another is named - with the record fake
+# first on PATH, KEEL_OUTWARD=allow, and TEMP and TMP moved when a folder is given.
+function Invoke-WrapperRec {
+    param([string[]]$SjArgs, [string]$SjHome, [string]$SjGhDir, [string]$SjWrapper = '', [string]$SjTemp = '')
+    if ($SjWrapper -eq '') { $SjWrapper = $SjStateWrapper }
+    $SjPrev = @{ PATH = $env:PATH; KEEL_OUTWARD = $env:KEEL_OUTWARD; USERPROFILE = $env:USERPROFILE; TEMP = $env:TEMP; TMP = $env:TMP }
+    $SjPrevPref = $ErrorActionPreference
+    $SjLines = @()
+    $SjCode = 0
+    try {
+        Set-EnvVar 'PATH' ($SjGhDir + ';' + $SjPrev.PATH)
+        Set-EnvVar 'KEEL_OUTWARD' 'allow'
+        Set-EnvVar 'USERPROFILE' $SjHome
+        if ($SjTemp -ne '') { Set-EnvVar 'TEMP' $SjTemp; Set-EnvVar 'TMP' $SjTemp }
+        $ErrorActionPreference = 'Continue'
+        $SjLines = & $SjPwsh -NoProfile -ExecutionPolicy Bypass -File $SjWrapper @SjArgs 2>&1 | ForEach-Object { $_.ToString() }
+        $SjCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $SjPrevPref
+        foreach ($SjK in @('PATH', 'KEEL_OUTWARD', 'USERPROFILE', 'TEMP', 'TMP')) { Set-EnvVar $SjK $SjPrev[$SjK] }
+    }
+    return [pscustomobject]@{ Code = $SjCode; Text = (@($SjLines) -join "`n") }
+}
+
+# A scratch home and project of its own, destination example/rec, so no row's pending set holds
+# another row's signals.
+function New-RecHome {
+    param([string]$SjRoot, [string]$SjName, [switch]$SjQuarantined)
+    $SjHomeDir = Join-Path $SjRoot "$SjName-home"
+    $SjProj = Join-Path $SjRoot "$SjName-project"
+    if ($SjQuarantined) {
+        New-Item -ItemType Directory -Path $SjProj -Force | Out-Null
+        $SjQ = Invoke-Wrapper -SjHome $SjHomeDir -SjArgs @('init-project', '-Title', 'record quarantine fixture', '-Path', $SjProj, '-Tracker', 'none', '-Quarantine')
+        if ($SjQ.Code -ne 0) { throw "fixture quarantined init-project failed (exit $($SjQ.Code)): $($SjQ.Text)" }
+        foreach ($SjStep in @(@('add-goal', '-Id', 'G1', '-Text', 'fixture goal'),
+                              @('add-workstream', '-Id', 'W1', '-Title', 'fixture workstream', '-Parent', 'root', '-Goals', 'G1'),
+                              @('add-phase', '-Phase', 'W1.1', '-Scope', 'fixture phase', '-Actor', 'agent', '-RunOrder', '1'))) {
+            $SjR = Invoke-Wrapper -SjHome $SjHomeDir -SjArgs (@($SjStep) + @('-Path', $SjProj))
+            if ($SjR.Code -ne 0) { throw "fixture step '$($SjStep[0])' failed (exit $($SjR.Code)): $($SjR.Text)" }
+        }
+    }
+    else { New-Fixture -SjRepo $SjProj -SjHome $SjHomeDir }
+    $SjT = Invoke-Wrapper -SjHome $SjHomeDir -SjArgs @('signals-target', '-Repo', 'example/rec')
+    if ($SjT.Code -ne 0) { throw "fixture signals-target failed (exit $($SjT.Code)): $($SjT.Text)" }
+    return [pscustomobject]@{ Home = $SjHomeDir; Proj = $SjProj; Store = (Join-Path (Join-Path $SjHomeDir '.keel') 'signals') }
+}
+
+function New-RecSignal {
+    param($SjFx, [string]$SjGhDir, [string]$SjDetail, [string[]]$SjExtra = @(), [string]$SjWrapper = '')
+    $SjR = Invoke-WrapperRec -SjHome $SjFx.Home -SjGhDir $SjGhDir -SjWrapper $SjWrapper -SjArgs (@(
+        'signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', $SjDetail,
+        '-Evidence', 'scripts/test-signal-judgement.ps1 - fixture, no real defect', '-Path', $SjFx.Proj) + $SjExtra)
+    if ($SjR.Code -ne 0) { throw "fixture signal failed (exit $($SjR.Code)): $($SjR.Text)" }
+    foreach ($SjL in @($SjR.Text -split "`n")) { if ($SjL -match 'Filed signal\s+(S\d{4})') { return $Matches[1] } }
+    throw "could not read the filed signal id from: $($SjR.Text)"
+}
+
+# One SHA-256 over every signal file in a store, in name order, so a refusal can be shown to have
+# left the whole store byte-identical.
+function Get-StoreSha {
+    param([string]$SjStore)
+    $SjParts = @()
+    foreach ($SjF in @(Get-ChildItem -LiteralPath $SjStore -Filter 'S*.json' -File | Sort-Object Name)) { $SjParts += ($SjF.Name + '=' + (Get-FileSha -SjPath $SjF.FullName)) }
+    return ($SjParts -join ';')
+}
+
+function Get-SectionTitle {
+    param($SjParsed, [string]$SjId)
+    if (-not $SjParsed.Sections.ContainsKey($SjId)) { return '<no section>' }
+    foreach ($SjL in @($SjParsed.Sections[$SjId].Body)) { if ($SjL -match '^TITLE: (.*)$') { return $Matches[1] } }
+    return '<no title>'
+}
+
+# The "What happened" text of one preview section: the lines between that heading's blank line and
+# the blank line before "### Evidence".
+function Get-SectionWhatHappened {
+    param($SjParsed, [string]$SjId)
+    if (-not $SjParsed.Sections.ContainsKey($SjId)) { return '<no section>' }
+    $SjBody = @($SjParsed.Sections[$SjId].Body)
+    $SjA = [array]::IndexOf($SjBody, '### What happened')
+    $SjB = [array]::IndexOf($SjBody, '### Evidence')
+    if ($SjA -lt 0 -or $SjB -lt ($SjA + 3)) { return '<no what happened>' }
+    return (@($SjBody[($SjA + 2)..($SjB - 2)]) -join "`n")
+}
+
+function Get-OldTitle {
+    param([string]$SjKind, [string]$SjDetail)
+    $SjT = "[signal:$SjKind] $SjDetail"
+    if ($SjT.Length -gt 240) { $SjT = $SjT.Substring(0, 237) + '...' }
+    return $SjT
+}
+
+# A wrapper copy laid out as a directory source: <root>\.claude-plugin\marketplace.json two levels
+# above the plugin root, or as an installed copy under <root>\plugins\cache\<marketplace>\... with
+# the marketplace's manifest under <root>\plugins\marketplaces\<marketplace>.
+function New-ReleaseLayout {
+    param([string]$SjRoot, [string]$SjShape, [string]$SjManifest)
+    $SjPj = Join-Path $SjRepoRoot 'plugins\keel-workflow\.claude-plugin\plugin.json'
+    $SjVer = [string]((Get-Content -Raw -LiteralPath $SjPj | ConvertFrom-Json).version)
+    if ($SjShape -eq 'dir') {
+        $SjPlugin = Join-Path $SjRoot 'plugins\keel-workflow'
+        $SjManDir = Join-Path $SjRoot '.claude-plugin'
+    }
+    else {
+        $SjPlugin = Join-Path $SjRoot ('plugins\cache\recmk\keel-workflow\' + $SjVer)
+        $SjManDir = Join-Path $SjRoot 'plugins\marketplaces\recmk\.claude-plugin'
+    }
+    $SjWrapDir = Join-Path $SjPlugin 'skills\keel-orchestrator\wrappers'
+    New-Item -ItemType Directory -Path $SjWrapDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $SjPlugin '.claude-plugin') -Force | Out-Null
+    New-Item -ItemType Directory -Path $SjManDir -Force | Out-Null
+    Copy-Item -LiteralPath $SjPj -Destination (Join-Path $SjPlugin '.claude-plugin\plugin.json') -Force
+    Copy-Item -LiteralPath $SjStateWrapper -Destination (Join-Path $SjWrapDir 'keel-state.ps1') -Force
+    if ($SjManifest -ne '') {
+        [System.IO.File]::WriteAllText((Join-Path $SjManDir 'marketplace.json'), $SjManifest, (New-Object System.Text.UTF8Encoding($false)))
+    }
+    return [pscustomobject]@{ Wrapper = (Join-Path $SjWrapDir 'keel-state.ps1'); Version = $SjVer; ManDir = $SjManDir }
+}
+
+function Get-KeelTempFiles {
+    param([string]$SjDir)
+    return @(Get-ChildItem -LiteralPath $SjDir -Filter 'keel-*' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object)
+}
+
+# Every line of a captured run, carriage returns trimmed.
+function Get-RunLines {
+    param([string]$SjText)
+    return @(@($SjText -split "`n") | ForEach-Object { $_.TrimEnd("`r") })
+}
+
+# ---------------------------------------------------------------------------
+# GROUP RECORD
+# ---------------------------------------------------------------------------
+function Invoke-RecordCases {
+    param([string]$SjTempRoot)
+
+    $SjRoot   = Join-Path $SjTempRoot 'rec'
+    $SjGhDir  = Join-Path $SjRoot 'gh'
+    $SjLog    = Join-Path $SjRoot 'gh.log'
+    $SjFix    = Join-Path $SjRoot 'fixtures'
+    $SjBodies = Join-Path $SjRoot 'bodies.txt'
+    New-Item -ItemType Directory -Path $SjRoot -Force | Out-Null
+    New-RecordGh -SjDir $SjGhDir -SjLog $SjLog -SjFix $SjFix -SjBodies $SjBodies
+    $SjSfx = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
+
+    # --- HARNESS: the record fake is what gh resolves to ------------------------------------
+    $SjFx1 = New-RecHome -SjRoot $SjRoot -SjName 'titles'
+    $SjLong = 'This first sentence of the fixture detail is deliberately long so that a title built from it is cut on a word boundary well before its end, and it runs on past two hundred and forty characters so that the old builder has to cut it as well, which is the point. A second sentence follows it.'
+    $SjFirst = $SjLong.Substring(0, $SjLong.IndexOf('. A second') + 1)
+    $SjUn = New-RecSignal -SjFx $SjFx1 -SjGhDir $SjGhDir -SjDetail $SjLong
+    $SjPlanted = "planted short title $SjSfx"
+    $SjTi = New-RecSignal -SjFx $SjFx1 -SjGhDir $SjGhDir -SjDetail 'Titled fixture detail. More text.' -SjExtra @('-Title', $SjPlanted)
+    $SjPv1 = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('signals-push')
+    Add-Result 'REC-HARNESS-CONTROL-record-gh-reached' `
+        (($SjPv1.Code -eq 0) -and (@(Get-GhLogLines -SjLog $SjLog) -contains 'repo view example/rec --json visibility --jq .visibility')) `
+        "the preview must exit 0 and its visibility read must be logged by the record fake; exit $($SjPv1.Code)"
+    $SjP1 = Get-PubSections -SjText $SjPv1.Text
+
+    # --- REC1: the issue title is short ------------------------------------------------------
+    $SjTitTi = Get-SectionTitle $SjP1 $SjTi
+    $SjTitUn = Get-SectionTitle $SjP1 $SjUn
+    Add-Pair 'REC1-titled-uses-the-title' `
+        ($SjTitTi -ceq "[signal:gap] $SjPlanted") "a signal filed with -Title must preview '[signal:gap] <title>' exactly; got [$SjTitTi]" `
+        (($SjTitUn -cne "[signal:gap] $SjPlanted") -and $SjTitUn.StartsWith('[signal:gap] ')) "the untitled signal in the same preview must not carry it; got [$SjTitUn]" `
+        ($SjTitTi -cne $SjTitUn) 'the two titles must differ'
+    $SjText1 = ''
+    if ($SjTitUn.StartsWith('[signal:gap] ')) { $SjText1 = $SjTitUn.Substring(13) }
+    $SjStem = $SjText1
+    if ($SjStem.EndsWith('...')) { $SjStem = $SjStem.Substring(0, $SjStem.Length - 3) }
+    $SjBoundOk = ($SjText1.Length -gt 0) -and ($SjText1.Length -le 80) -and $SjText1.EndsWith('...') -and
+                 $SjFirst.StartsWith($SjStem) -and ($SjFirst.Length -gt $SjStem.Length) -and ($SjFirst[$SjStem.Length] -eq ' ')
+    $SjOld1 = Get-OldTitle 'gap' $SjLong
+    Add-Pair 'REC1-derived-title-is-bounded-on-a-word' `
+        $SjBoundOk "with no -Title the title must be the first sentence's whole words, at most 80 characters with '...'; got [$SjText1] ($($SjText1.Length))" `
+        (($SjOld1.Length -eq 240) -and ($SjTitUn -cne $SjOld1)) "the old 240-character title of the same detail must be 240 long and not what is previewed; old length $($SjOld1.Length)" `
+        ($SjTitUn.Length -lt $SjOld1.Length) 'the previewed title must be shorter than the old one'
+    $SjNoteUn = 0
+    $SjNoteTi = 0
+    if ($SjP1.Sections.ContainsKey($SjUn)) { $SjNoteUn = @($SjP1.Sections[$SjUn].Body | Where-Object { $_ -like "*(title taken from the detail's first sentence*" }).Count }
+    if ($SjP1.Sections.ContainsKey($SjTi)) { $SjNoteTi = @($SjP1.Sections[$SjTi].Body | Where-Object { $_ -like "*(title taken from the detail's first sentence*" }).Count }
+    Add-Pair 'REC1-derived-title-is-noted' `
+        ($SjNoteUn -eq 1) "the untitled section must say once that its title came from the detail; got $SjNoteUn" `
+        ($SjNoteTi -eq 0) "the titled section must not; got $SjNoteTi" `
+        ($SjNoteUn -ne $SjNoteTi) 'the note must depend on whether a title is stored'
+    $SjWhUn = Get-SectionWhatHappened $SjP1 $SjUn
+    $SjWhTi = Get-SectionWhatHappened $SjP1 $SjTi
+    Add-Pair 'REC1-body-keeps-the-whole-detail' `
+        ($SjWhUn -ceq $SjLong) "the untitled body's What happened must equal the whole detail; got $($SjWhUn.Length) characters against $($SjLong.Length)" `
+        ($SjWhTi -ceq 'Titled fixture detail. More text.') "the titled body's What happened must equal its own detail; got [$SjWhTi]" `
+        ($SjWhUn -cne $SjWhTi) 'the two bodies must carry different details'
+    $SjTiRec = Get-SignalRecord -SjHome $SjFx1.Home -SjId $SjTi
+    $SjUnRec = Get-SignalRecord -SjHome $SjFx1.Home -SjId $SjUn
+    Add-Pair 'REC1-title-is-stored' `
+        (([string](Get-Prop2 $SjTiRec 'title')) -ceq $SjPlanted) "the record filed with -Title must store it as title; got [$(Get-Prop2 $SjTiRec 'title')]" `
+        ($null -eq (Get-Prop2 $SjUnRec 'title')) "the record filed without one must store no title; got [$(Get-Prop2 $SjUnRec 'title')]" `
+        (([string](Get-Prop2 $SjTiRec 'title')) -cne ([string](Get-Prop2 $SjUnRec 'title'))) 'the stored titles must differ'
+    $SjCount0 = @(Get-ChildItem -LiteralPath $SjFx1.Store -Filter 'S*.json').Count
+    $SjTooLong = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', 'x', '-Evidence', 'y', '-Title', ('t' * 101), '-Path', $SjFx1.Proj)
+    $SjCount1 = @(Get-ChildItem -LiteralPath $SjFx1.Store -Filter 'S*.json').Count
+    $SjJustFits = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', 'x', '-Evidence', 'y', '-Title', ('t' * 100), '-Path', $SjFx1.Proj)
+    $SjCount2 = @(Get-ChildItem -LiteralPath $SjFx1.Store -Filter 'S*.json').Count
+    Add-Pair 'REC1-title-over-100-refused' `
+        (($SjTooLong.Code -eq 90) -and ($SjCount1 -eq $SjCount0)) "a 101-character -Title must exit 90 and file nothing; exit $($SjTooLong.Code), files $SjCount0 -> $SjCount1" `
+        (($SjJustFits.Code -eq 0) -and ($SjCount2 -eq $SjCount1 + 1)) "a 100-character -Title must file one signal; exit $($SjJustFits.Code), files $SjCount1 -> $SjCount2" `
+        ($SjTooLong.Code -ne $SjJustFits.Code) 'the two lengths must be answered differently'
+    $SjAdN = 71
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum $SjAdN -SjTitle 'an issue filed elsewhere'
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum ($SjAdN + 1) -SjTitle 'another issue filed elsewhere'
+    $SjAdTitle = "adopted short title $SjSfx"
+    $SjAd = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('adopt-signal', '-Issue', "$SjAdN", '-Project', 'rec', '-Phase', 'W1.1', '-Kind', 'gap', '-Title', $SjAdTitle, '-Path', $SjFx1.Proj)
+    $SjAdB = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('adopt-signal', '-Issue', "$($SjAdN + 1)", '-Project', 'rec', '-Phase', 'W1.1', '-Kind', 'gap', '-Path', $SjFx1.Proj)
+    $SjAdLine = @(Get-RunLines $SjAd.Text | Where-Object { $_ -like 'TITLE: *' })
+    $SjAdBLine = @(Get-RunLines $SjAdB.Text | Where-Object { $_ -like 'TITLE: *' })
+    $SjAdLine0 = ''
+    if ($SjAdLine.Count -gt 0) { $SjAdLine0 = $SjAdLine[0] }
+    Add-Pair 'REC1-adopted-title' `
+        (($SjAd.Code -eq 0) -and ($SjAdLine.Count -eq 1) -and ($SjAdLine0 -ceq "TITLE: [signal:gap] $SjAdTitle")) "adopt-signal -Title must print 'TITLE: [signal:gap] <title>' once; exit $($SjAd.Code), got [$($SjAdLine -join ' || ')]" `
+        (($SjAdB.Code -eq 0) -and ($SjAdBLine.Count -eq 0)) "adopt-signal without -Title must print no TITLE line; exit $($SjAdB.Code), got $($SjAdBLine.Count)" `
+        ($SjAdLine.Count -ne $SjAdBLine.Count) 'the TITLE line must depend on -Title'
+
+    # --- REC2: the published title is stored, and relink compares with it --------------------
+    $SjPushT = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply', '-Id', $SjTi)
+    $SjIt = [string](Get-Prop2 (Get-SignalRecord -SjHome $SjFx1.Home -SjId $SjTi) 'issueTitle')
+    $SjUnRec2 = Get-SignalRecord -SjHome $SjFx1.Home -SjId $SjUn
+    Add-Pair 'REC2-issue-title-stored-at-push' `
+        (($SjPushT.Code -eq 0) -and ($SjIt -ceq $SjTitTi)) "after a push the record's issueTitle must equal the previewed title; exit $($SjPushT.Code), stored [$SjIt]" `
+        ($null -eq (Get-Prop2 $SjUnRec2 'issueTitle')) 'a record not pushed must hold no issueTitle' `
+        ($SjIt -ne '') 'the pushed record must hold a value the unpushed one does not'
+    # Records linked to example/old: the pushed one (its issueTitle kept), one with no issueTitle
+    # whose issue carries the old builder's title, one whose issue's title is unrelated, and the
+    # control - no issueTitle, its issue carrying the NEW builder's title, which the old-title
+    # fallback must not accept.
+    $SjRlA = $SjTi
+    $SjRlNumA = 81
+    Set-LinkedRecord -SjHome $SjFx1.Home -SjId $SjRlA -SjNum $SjRlNumA -SjLink ('https://github.com/example/old/issues/' + $SjRlNumA)
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjRlNumA -SjTitle $SjIt
+    $SjRlB = New-RecSignal -SjFx $SjFx1 -SjGhDir $SjGhDir -SjDetail $SjLong
+    $SjRlNumB = 82
+    Set-LinkedRecord -SjHome $SjFx1.Home -SjId $SjRlB -SjNum $SjRlNumB -SjLink ('https://github.com/example/old/issues/' + $SjRlNumB)
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjRlNumB -SjTitle $SjOld1
+    $SjRlC = New-RecSignal -SjFx $SjFx1 -SjGhDir $SjGhDir -SjDetail 'Unrelated record detail. x'
+    $SjRlNumC = 83
+    Set-LinkedRecord -SjHome $SjFx1.Home -SjId $SjRlC -SjNum $SjRlNumC -SjLink ('https://github.com/example/old/issues/' + $SjRlNumC)
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjRlNumC -SjTitle 'a title nothing here built'
+    $SjRlD = New-RecSignal -SjFx $SjFx1 -SjGhDir $SjGhDir -SjDetail $SjLong
+    $SjRlNumD = 84
+    Set-LinkedRecord -SjHome $SjFx1.Home -SjId $SjRlD -SjNum $SjRlNumD -SjLink ('https://github.com/example/old/issues/' + $SjRlNumD)
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/new' -SjNum $SjRlNumD -SjTitle $SjTitUn
+    $SjRl = Invoke-WrapperRec -SjHome $SjFx1.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-From', 'example/old', '-Repo', 'example/new')
+    $SjRowA = Get-RelinkRow -SjText $SjRl.Text -SjId $SjRlA
+    $SjRowB = Get-RelinkRow -SjText $SjRl.Text -SjId $SjRlB
+    $SjRowC = Get-RelinkRow -SjText $SjRl.Text -SjId $SjRlC
+    $SjRowD = Get-RelinkRow -SjText $SjRl.Text -SjId $SjRlD
+    Add-Pair 'REC2-relink-reads-the-stored-and-old-titles' `
+        (($SjRowA -like '* MATCH*') -and ($SjRowB -like '* MATCH*') -and ($SjRowC -like '* MISMATCH*')) "the stored title and the old builder's title must each read MATCH, an unrelated one MISMATCH; rows [$SjRowA] [$SjRowB] [$SjRowC]" `
+        ($SjRowD -like '* MISMATCH*') "a record with no issueTitle whose issue carries the NEW builder's title must read MISMATCH; row [$SjRowD]" `
+        (($SjRowB -like '* MATCH*') -and ($SjRowD -like '* MISMATCH*')) 'the old-title fallback must be what matched, not any title'
+
+    # --- REC3: the release beside the plugin version -----------------------------------------
+    $SjFx3 = New-RecHome -SjRoot $SjRoot -SjName 'release'
+    $SjPv = [string]((Get-Content -Raw -LiteralPath (Join-Path $SjRepoRoot 'plugins\keel-workflow\.claude-plugin\plugin.json') | ConvertFrom-Json).version)
+    $SjRelA = '9.8.' + (Get-Random -Minimum 10 -Maximum 99)
+    $SjRelB = '7.6.' + (Get-Random -Minimum 10 -Maximum 99)
+    $SjManA   = '{"name":"keel","version":"' + $SjRelA + '","plugins":[{"name":"keel-workflow","version":"' + $SjPv + '"}]}'
+    $SjManB   = '{"name":"keel","version":"' + $SjRelB + '","plugins":[{"name":"keel-workflow","version":"' + $SjPv + '"}]}'
+    $SjManOff = '{"name":"keel","version":"' + $SjRelA + '","plugins":[{"name":"keel-workflow","version":"0.0.1"}]}'
+    $SjLays = @(
+        @('dir',  (New-ReleaseLayout -SjRoot (Join-Path $SjRoot 'lay-dir')  -SjShape 'dir'  -SjManifest $SjManA)),
+        @('inst', (New-ReleaseLayout -SjRoot (Join-Path $SjRoot 'lay-inst') -SjShape 'inst' -SjManifest $SjManB)),
+        @('off',  (New-ReleaseLayout -SjRoot (Join-Path $SjRoot 'lay-off')  -SjShape 'dir'  -SjManifest $SjManOff)),
+        @('bad',  (New-ReleaseLayout -SjRoot (Join-Path $SjRoot 'lay-bad')  -SjShape 'dir'  -SjManifest '{ this is not json')),
+        @('none', (New-ReleaseLayout -SjRoot (Join-Path $SjRoot 'lay-none') -SjShape 'inst' -SjManifest '')))
+    $SjR3 = @{}
+    foreach ($SjLay in $SjLays) {
+        $SjR3Id = New-RecSignal -SjFx $SjFx3 -SjGhDir $SjGhDir -SjDetail "Release fixture $($SjLay[0]). x" -SjWrapper $SjLay[1].Wrapper
+        $SjR3[$SjLay[0]] = [pscustomobject]@{ Id = $SjR3Id; Release = [string](Get-Prop2 (Get-SignalRecord -SjHome $SjFx3.Home -SjId $SjR3Id) 'release') }
+    }
+    $SjPv3 = Invoke-WrapperRec -SjHome $SjFx3.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Id', $SjR3['dir'].Id)
+    $SjRows3 = @(Get-RunLines $SjPv3.Text | Where-Object { $_ -like '| keel*' })
+    Add-Pair 'REC3-release-beside-a-directory-plugin' `
+        (($SjR3['dir'].Release -ceq $SjRelA) -and ($SjRows3.Count -eq 2) -and ($SjRows3 -contains "| keel release | $SjRelA |") -and ($SjRows3 -contains "| keel-workflow plugin | $SjPv |")) "a manifest two levels above the plugin listing it at its version must be stored and shown in its own row; stored [$($SjR3['dir'].Release)], rows [$($SjRows3 -join ' || ')]" `
+        ($SjR3['off'].Release -ceq 'unknown') "a manifest listing keel-workflow at another version must read unknown; stored [$($SjR3['off'].Release)]" `
+        ($SjR3['dir'].Release -cne $SjR3['off'].Release) 'the plugin entry must decide'
+    Add-Pair 'REC3-release-of-an-installed-copy' `
+        ($SjR3['inst'].Release -ceq $SjRelB) "a cached plugin must read the marketplace's own manifest; stored [$($SjR3['inst'].Release)]" `
+        ($SjR3['none'].Release -ceq 'unknown') "the same cached layout with no marketplace manifest must read unknown; stored [$($SjR3['none'].Release)]" `
+        ($SjR3['inst'].Release -cne $SjR3['none'].Release) 'the marketplace manifest must be what was read'
+    Add-Pair 'REC3-unreadable-manifest-is-unknown' `
+        ($SjR3['bad'].Release -ceq 'unknown') "a manifest that does not parse must store unknown; stored [$($SjR3['bad'].Release)]" `
+        ($SjR3['dir'].Release -ceq $SjRelA) 'the readable manifest in the same shape must store its version' `
+        ($SjR3['bad'].Release -cne $SjR3['dir'].Release) 'parsing must decide'
+    # A record written before releases were recorded: no 'release' key and an old plugin number.
+    $SjOldId = New-RecSignal -SjFx $SjFx3 -SjGhDir $SjGhDir -SjDetail 'Old record fixture. x'
+    $SjOldPath = Get-SignalPath -SjHome $SjFx3.Home -SjId $SjOldId
+    $SjOldRec = Get-SignalRecord -SjHome $SjFx3.Home -SjId $SjOldId
+    $SjOldRec.PSObject.Properties.Remove('release')
+    $SjOldRec.keelVersion = '0.0.7'
+    [System.IO.File]::WriteAllText($SjOldPath, ($SjOldRec | ConvertTo-Json -Depth 14), (New-Object System.Text.UTF8Encoding($false)))
+    $SjPvOld = Invoke-WrapperRec -SjHome $SjFx3.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Id', $SjOldId)
+    $SjRowsOld = @(Get-RunLines $SjPvOld.Text | Where-Object { $_ -like '| keel*' })
+    Add-Pair 'REC3-old-record-shows-plugin-and-not-recorded' `
+        (($SjRowsOld.Count -eq 2) -and ($SjRowsOld -contains '| keel release | not recorded |') -and ($SjRowsOld -contains '| keel-workflow plugin | 0.0.7 |')) "a record with no release must show its stored number as the plugin's and the release as not recorded; rows [$($SjRowsOld -join ' || ')]" `
+        (-not ($SjRows3 -contains '| keel release | not recorded |')) 'a record that stored a release must not show not recorded' `
+        (($SjRowsOld -join '|') -cne ($SjRows3 -join '|')) 'the two previews must show different rows'
+    $SjInitProj = Join-Path $SjRoot 'init-check'
+    New-Item -ItemType Directory -Path $SjInitProj -Force | Out-Null
+    $SjInit = Invoke-WrapperRec -SjHome $SjFx3.Home -SjGhDir $SjGhDir -SjWrapper $SjLays[0][1].Wrapper -SjArgs @('init-project', '-Title', 'init check', '-Path', $SjInitProj, '-Tracker', 'none')
+    $SjKv = ''
+    $SjKj = Join-Path $SjInitProj 'keel.json'
+    if (Test-Path -LiteralPath $SjKj) { $SjKv = [string]((Get-Content -Raw -LiteralPath $SjKj | ConvertFrom-Json).keelVersion) }
+    Add-Pair 'REC3-keel-json-keeps-the-plugin-version' `
+        (($SjInit.Code -eq 0) -and ($SjKv -ceq $SjPv)) "init-project beside a planted release must still write the plugin's version to keel.json; exit $($SjInit.Code), keelVersion [$SjKv]" `
+        ($SjKv -cne $SjRelA) 'keel.json must not hold the release' `
+        ($SjPv -cne $SjRelA) 'the plugin version and the planted release differ'
+
+    # --- REC4: no temp file is left by a push or a close -------------------------------------
+    foreach ($SjForm in @('long', 'short')) {
+        $SjFx4 = New-RecHome -SjRoot $SjRoot -SjName "temp-$SjForm"
+        $SjTempLong = Join-Path $SjRoot "rec-scratch-temp-folder-$SjForm"
+        New-Item -ItemType Directory -Path $SjTempLong -Force | Out-Null
+        $SjTempUse = $SjTempLong
+        $SjShortNote = ''
+        if ($SjForm -eq 'short') {
+            $SjTempUse = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($SjTempLong).ShortPath
+            $SjShortNote = " (TEMP given as $SjTempUse)"
+        }
+        $SjOk1 = New-RecSignal -SjFx $SjFx4 -SjGhDir $SjGhDir -SjDetail 'Push that the fake accepts. x'
+        $SjBad1 = New-RecSignal -SjFx $SjFx4 -SjGhDir $SjGhDir -SjDetail 'Push that the fake refuses FAILME. x'
+        $SjPush4 = Invoke-WrapperRec -SjHome $SjFx4.Home -SjGhDir $SjGhDir -SjTemp $SjTempUse -SjArgs @('signals-push', '-Apply')
+        $SjLeft1 = @(Get-KeelTempFiles $SjTempLong)
+        $SjClose4 = Invoke-WrapperRec -SjHome $SjFx4.Home -SjGhDir $SjGhDir -SjTemp $SjTempUse -SjArgs @('resolve-signal', '-Id', $SjOk1, '-As', 'REJECTED', '-Detail', 'fixture close', '-CloseIssue')
+        $SjLeft2 = @(Get-KeelTempFiles $SjTempLong)
+        $SjCtlDir = Join-Path $SjRoot "rec-listing-control-$SjForm"
+        New-Item -ItemType Directory -Path $SjCtlDir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $SjCtlDir 'keel-planted.json') -Value '{}' -Encoding ASCII
+        $SjCtlList = @(Get-KeelTempFiles $SjCtlDir)
+        $SjCaseOk = ($SjPush4.Code -eq 99) -and ($SjClose4.Code -eq 0) -and ($SjLeft1.Count -eq 0) -and ($SjLeft2.Count -eq 0) -and
+                    ($null -ne (Get-Prop2 (Get-SignalRecord -SjHome $SjFx4.Home -SjId $SjOk1) 'issueCommentedAt')) -and
+                    ($null -eq (Get-Prop2 (Get-SignalRecord -SjHome $SjFx4.Home -SjId $SjBad1) 'issue'))
+        if ($SjForm -eq 'short' -and $SjTempUse -eq $SjTempLong) { $SjCaseOk = $false; $SjShortNote = ' - NO 8.3 ALIAS: the short form equals the long one, so this limb tested nothing' }
+        $SjCtl0 = ''
+        if ($SjCtlList.Count -gt 0) { $SjCtl0 = $SjCtlList[0] }
+        Add-Pair "REC4-no-temp-file-$SjForm-path" `
+            $SjCaseOk "a push of two signals, one refused, and a close must leave no keel-* file in TEMP$SjShortNote; push exit $($SjPush4.Code) (want 99), close exit $($SjClose4.Code), left after push [$($SjLeft1 -join ',')], after close [$($SjLeft2 -join ',')]" `
+            (($SjCtlList.Count -eq 1) -and ($SjCtl0 -eq 'keel-planted.json')) "the same listing must name a keel-* file planted in a folder; got [$($SjCtlList -join ',')]" `
+            ($SjCtlList.Count -ne $SjLeft2.Count) 'the listing must be able to see a file'
+    }
+
+    # --- REC5: attach a known issue to a record with none ------------------------------------
+    $SjFx5 = New-RecHome -SjRoot $SjRoot -SjName 'attach'
+    $SjAtA = New-RecSignal -SjFx $SjFx5 -SjGhDir $SjGhDir -SjDetail 'Attach fixture A. x'
+    $SjPvA = Get-PubSections -SjText (Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Id', $SjAtA)).Text
+    $SjTitA = Get-SectionTitle $SjPvA $SjAtA
+    $SjNA = 61
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum $SjNA -SjTitle $SjTitA
+    $SjShaA = Get-StoreSha $SjFx5.Store
+    $SjAtPv = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-Id', $SjAtA, '-Issue', "$SjNA")
+    $SjShaA2 = Get-StoreSha $SjFx5.Store
+    $SjAtD = New-RecSignal -SjFx $SjFx5 -SjGhDir $SjGhDir -SjDetail 'Attach fixture D. x'
+    $SjND = 64
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum $SjND -SjTitle 'an unrelated issue title'
+    $SjAtDPv = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-Id', $SjAtD, '-Issue', "$SjND")
+    Add-Pair 'REC5-attach-preview' `
+        (($SjAtPv.Code -eq 0) -and ((Get-RelinkRow -SjText $SjAtPv.Text -SjId $SjAtA) -like '*attach*on example/rec  MATCH') -and ($SjShaA -eq $SjShaA2)) "a matching issue must preview MATCH and write nothing; exit $($SjAtPv.Code), row [$(Get-RelinkRow -SjText $SjAtPv.Text -SjId $SjAtA)]" `
+        (($SjAtDPv.Code -eq 0) -and ((Get-RelinkRow -SjText $SjAtDPv.Text -SjId $SjAtD) -like '*attach*MISMATCH*')) "an unrelated title must preview MISMATCH; exit $($SjAtDPv.Code)" `
+        ($SjAtPv.Text -notlike '*MISMATCH*') 'the comparison must read the titles'
+    $SjAtAp = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-Id', $SjAtA, '-Issue', "$SjNA", '-Apply')
+    $SjAtRec = Get-SignalRecord -SjHome $SjFx5.Home -SjId $SjAtA
+    $SjAtOk = ($SjAtAp.Code -eq 0) -and ([string](Get-Prop2 $SjAtRec 'issue') -eq "$SjNA") -and ([string](Get-Prop2 $SjAtRec 'issueUrl') -ceq ('https://github.com/example/rec/issues/' + $SjNA))
+    Add-Pair 'REC5-attach-apply' `
+        $SjAtOk "-Apply must write the number and the link; exit $($SjAtAp.Code), issue [$(Get-Prop2 $SjAtRec 'issue')], url [$(Get-Prop2 $SjAtRec 'issueUrl')]" `
+        ($null -eq (Get-Prop2 (Get-SignalRecord -SjHome $SjFx5.Home -SjId $SjAtD) 'issue')) 'the record only previewed must still hold no issue' `
+        $SjAtOk 'apply and preview must differ'
+    # The refusals, each against the same store, which must come out byte-identical.
+    $SjAtB = New-RecSignal -SjFx $SjFx5 -SjGhDir $SjGhDir -SjDetail 'Attach fixture B. x'
+    $SjAtC = New-RecSignal -SjFx $SjFx5 -SjGhDir $SjGhDir -SjDetail 'Attach fixture C. x'
+    $SjRes = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('resolve-signal', '-Id', $SjAtC, '-As', 'REJECTED', '-Detail', 'fixture')
+    if ($SjRes.Code -ne 0) { throw "fixture resolve failed (exit $($SjRes.Code)): $($SjRes.Text)" }
+    $SjNOther = 62
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum $SjNOther -SjTitle 'unused'
+    $SjRefusals = @(
+        @('already-linked', @('signals-relink', '-Id', $SjAtA, '-Issue', "$SjNOther", '-Apply'), 'already holds issue'),
+        @('number-held', @('signals-relink', '-Id', $SjAtB, '-Issue', "$SjNA", '-Apply'), 'is already held here as signal'),
+        @('not-open', @('signals-relink', '-Id', $SjAtC, '-Issue', "$SjNOther", '-Apply'), 'not OPEN'),
+        @('mismatch-unacknowledged', @('signals-relink', '-Id', $SjAtD, '-Issue', "$SjND", '-Apply'), 'does not match'))
+    foreach ($SjRf in $SjRefusals) {
+        $SjB4 = Get-StoreSha $SjFx5.Store
+        $SjRr = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs $SjRf[1]
+        $SjAf = Get-StoreSha $SjFx5.Store
+        Add-Pair "REC5-refuses-$($SjRf[0])" `
+            (($SjRr.Code -ne 0) -and ($SjRr.Text -like "*$($SjRf[2])*") -and ($SjB4 -eq $SjAf)) "must exit nonzero naming '$($SjRf[2])' and leave the store byte-identical; exit $($SjRr.Code), unchanged $($SjB4 -eq $SjAf)" `
+            ($SjAtAp.Code -eq 0) 'the same verb attached a matching record on this store' `
+            ($SjRr.Code -ne $SjAtAp.Code) 'the refusal must be selective'
+    }
+    $SjAck = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-Id', $SjAtD, '-Issue', "$SjND", '-Apply', '-Detail', 'fixture: the operator read both titles')
+    $SjDRec = Get-SignalRecord -SjHome $SjFx5.Home -SjId $SjAtD
+    $SjDReason = [string](Get-Prop2 (Get-Prop2 $SjDRec 'attachReason') 'reason')
+    Add-Pair 'REC5-mismatch-with-a-reason-attaches' `
+        (($SjAck.Code -eq 0) -and ([string](Get-Prop2 $SjDRec 'issue') -eq "$SjND") -and ($SjDReason -ceq 'fixture: the operator read both titles')) "with -Detail the mismatch must attach and record the reason; exit $($SjAck.Code), reason [$SjDReason]" `
+        ($null -eq (Get-Prop2 (Get-SignalRecord -SjHome $SjFx5.Home -SjId $SjAtB) 'issue')) 'a record refused above still holds no issue' `
+        ($SjAck.Code -eq 0) 'the reason must decide'
+    $SjAtE = New-RecSignal -SjFx $SjFx5 -SjGhDir $SjGhDir -SjDetail $SjLong
+    $SjNE = 65
+    Set-FixtureIssue -SjFix $SjFix -SjRepoSlug 'example/rec' -SjNum $SjNE -SjTitle (Get-OldTitle 'gap' $SjLong)
+    $SjAtEPv = Invoke-WrapperRec -SjHome $SjFx5.Home -SjGhDir $SjGhDir -SjArgs @('signals-relink', '-Id', $SjAtE, '-Issue', "$SjNE")
+    $SjRowE = Get-RelinkRow -SjText $SjAtEPv.Text -SjId $SjAtE
+    Add-Pair 'REC5-attach-accepts-the-old-title' `
+        ($SjRowE -like '*attach*  MATCH') "an unlinked record whose issue carries the old builder's title must preview MATCH; got [$SjRowE]" `
+        ((Get-RelinkRow -SjText $SjAtDPv.Text -SjId $SjAtD) -like '*MISMATCH*') 'an unrelated title previewed MISMATCH above' `
+        ($SjRowE -notlike '*MISMATCH*') 'the old title must be what matched'
+
+    # --- REC6: a sighting of an open signal --------------------------------------------------
+    $SjFx6 = New-RecHome -SjRoot $SjRoot -SjName 'sight'
+    $SjO = New-RecSignal -SjFx $SjFx6 -SjGhDir $SjGhDir -SjDetail 'Open signal for sightings. x'
+    $SjQuiet = New-RecSignal -SjFx $SjFx6 -SjGhDir $SjGhDir -SjDetail 'Open signal with no sighting. x'
+    $SjN0 = @(Get-ChildItem -LiteralPath $SjFx6.Store -Filter 'S*.json').Count
+    $SjSeenDetail = "seen again in a fixture $SjSfx"
+    $SjSg = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjO, '-Phase', 'W1.1', '-Detail', $SjSeenDetail, '-Evidence', 'fixture evidence line', '-Path', $SjFx6.Proj)
+    $SjN1 = @(Get-ChildItem -LiteralPath $SjFx6.Store -Filter 'S*.json').Count
+    $SjSgList = @(Get-Prop2 (Get-SignalRecord -SjHome $SjFx6.Home -SjId $SjO) 'sightings')
+    $SjSg0 = $null
+    if ($SjSgList.Count -gt 0) { $SjSg0 = $SjSgList[0] }
+    $SjSgOk = ($SjSg.Code -eq 0) -and ($SjN1 -eq $SjN0) -and ($SjSgList.Count -eq 1) -and ($null -ne $SjSg0) -and
+              ([string](Get-Prop2 $SjSg0 'phase') -ceq 'W1.1') -and ([string](Get-Prop2 $SjSg0 'detail') -ceq $SjSeenDetail) -and
+              ([string](Get-Prop2 $SjSg0 'evidence') -ceq 'fixture evidence line') -and ([string](Get-Prop2 $SjSg0 'project') -ne '') -and
+              ([string](Get-Prop2 $SjSg0 'at') -match '^\d{4}-\d{2}-\d{2}T')
+    $SjNew = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', 'a new signal', '-Evidence', 'e', '-Path', $SjFx6.Proj)
+    $SjN2 = @(Get-ChildItem -LiteralPath $SjFx6.Store -Filter 'S*.json').Count
+    Add-Pair 'REC6-sighting-appended-not-filed' `
+        $SjSgOk "signal -Id must append one sighting with phase, detail, evidence, project and time, and file nothing; exit $($SjSg.Code), files $SjN0 -> $SjN1, sightings $($SjSgList.Count)" `
+        (($SjNew.Code -eq 0) -and ($SjN2 -eq $SjN1 + 1)) "the same verb without -Id must file one new signal; exit $($SjNew.Code), files $SjN1 -> $SjN2" `
+        ($SjN1 -ne $SjN2) '-Id must decide between a sighting and a new signal'
+    $SjResolved = New-RecSignal -SjFx $SjFx6 -SjGhDir $SjGhDir -SjDetail 'Signal to resolve. x'
+    $SjRv = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('resolve-signal', '-Id', $SjResolved, '-As', 'REJECTED', '-Detail', 'fixture')
+    if ($SjRv.Code -ne 0) { throw "fixture resolve failed (exit $($SjRv.Code))" }
+    $SjNoSuch = 'S' + ('9' * 4)
+    $SjSgRefusals = @(
+        @('no-phase', 97, @('signal', '-Id', $SjO, '-Detail', 'd', '-Evidence', 'e', '-Path', $SjFx6.Proj)),
+        @('no-evidence', 97, @('signal', '-Id', $SjO, '-Phase', 'W1.1', '-Detail', 'd', '-Path', $SjFx6.Proj)),
+        @('no-detail', 90, @('signal', '-Id', $SjO, '-Phase', 'W1.1', '-Evidence', 'e', '-Path', $SjFx6.Proj)),
+        @('with-title', 90, @('signal', '-Id', $SjO, '-Phase', 'W1.1', '-Detail', 'd', '-Evidence', 'e', '-Title', 't', '-Path', $SjFx6.Proj)),
+        @('unknown-id', 94, @('signal', '-Id', $SjNoSuch, '-Phase', 'W1.1', '-Detail', 'd', '-Evidence', 'e', '-Path', $SjFx6.Proj)),
+        @('not-open', 90, @('signal', '-Id', $SjResolved, '-Phase', 'W1.1', '-Detail', 'd', '-Evidence', 'e', '-Path', $SjFx6.Proj)))
+    foreach ($SjRf in $SjSgRefusals) {
+        $SjB4 = Get-StoreSha $SjFx6.Store
+        $SjRr = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs $SjRf[2]
+        $SjAf = Get-StoreSha $SjFx6.Store
+        Add-Pair "REC6-refuses-$($SjRf[0])" `
+            (($SjRr.Code -eq $SjRf[1]) -and ($SjB4 -eq $SjAf)) "must exit $($SjRf[1]) and leave the store byte-identical; exit $($SjRr.Code), unchanged $($SjB4 -eq $SjAf)" `
+            ($SjSg.Code -eq 0) 'the same verb recorded a sighting on this store' `
+            ($SjRr.Code -ne $SjSg.Code) 'the refusal must be selective'
+    }
+    # Quarantine: from a quarantined project a sighting's evidence is a reference, on one line.
+    $SjFxQ = New-RecHome -SjRoot $SjRoot -SjName 'sight-q' -SjQuarantined
+    $SjOQ = New-RecSignal -SjFx $SjFxQ -SjGhDir $SjGhDir -SjDetail 'Open signal in a quarantined project. x'
+    $SjB4 = Get-StoreSha $SjFxQ.Store
+    $SjQm = Invoke-WrapperRec -SjHome $SjFxQ.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjOQ, '-Phase', 'W1.1', '-Detail', 'd', '-Evidence', "line one`nline two", '-Path', $SjFxQ.Proj)
+    $SjAf = Get-StoreSha $SjFxQ.Store
+    $SjQs = Invoke-WrapperRec -SjHome $SjFxQ.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjOQ, '-Phase', 'W1.1', '-Detail', 'd', '-Evidence', 'see a local path, one line', '-Path', $SjFxQ.Proj)
+    Add-Pair 'REC6-quarantine-evidence-is-a-reference' `
+        (($SjQm.Code -eq 97) -and ($SjB4 -eq $SjAf)) "multi-line evidence from a quarantined project must exit 97 writing nothing; exit $($SjQm.Code), unchanged $($SjB4 -eq $SjAf)" `
+        ($SjQs.Code -eq 0) "one-line evidence from the same project must record the sighting; exit $($SjQs.Code)" `
+        ($SjQm.Code -ne $SjQs.Code) 'the evidence shape must decide'
+    $SjLs = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('signals')
+    $SjLsId = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('signals', '-Id', $SjO)
+    $SjWantSeen = "      SEEN $(Get-Prop2 $SjSg0 'at') $(Get-Prop2 $SjSg0 'project') W1.1: $SjSeenDetail"
+    $SjSeenAll = @(Get-RunLines $SjLs.Text | Where-Object { $_ -ceq $SjWantSeen }).Count
+    $SjSeenId = @(Get-RunLines $SjLsId.Text | Where-Object { $_ -ceq $SjWantSeen }).Count
+    $SjQuietLs = Invoke-WrapperRec -SjHome $SjFx6.Home -SjGhDir $SjGhDir -SjArgs @('signals', '-Id', $SjQuiet)
+    $SjSeenQuiet = @(Get-RunLines $SjQuietLs.Text | Where-Object { $_ -cmatch '^      SEEN ' }).Count
+    Add-Pair 'REC6-signals-lists-the-sighting' `
+        (($SjSeenAll -eq 1) -and ($SjSeenId -eq 1)) "signals and signals -Id must each print the SEEN line with date, project, phase and detail once; got $SjSeenAll and $SjSeenId" `
+        (($SjQuietLs.Code -eq 0) -and ($SjSeenQuiet -eq 0)) "a signal with no sighting must print no SEEN line; got $SjSeenQuiet" `
+        ($SjSeenId -ne $SjSeenQuiet) 'the SEEN line must come from the record'
+
+    # --- REC7: signals-push posts a sighting as a comment ------------------------------------
+    $SjFx7 = New-RecHome -SjRoot $SjRoot -SjName 'post'
+    $SjP = New-RecSignal -SjFx $SjFx7 -SjGhDir $SjGhDir -SjDetail 'Pushed signal for comments. x'
+    $SjPp = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply', '-Id', $SjP)
+    if ($SjPp.Code -ne 0) { throw "fixture push failed (exit $($SjPp.Code)): $($SjPp.Text)" }
+    $SjPNum = [string](Get-Prop2 (Get-SignalRecord -SjHome $SjFx7.Home -SjId $SjP) 'issue')
+    $SjCtlLog0 = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjCtlNone = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply')
+    $SjCtlPosts = @(Get-NewLines -SjLog $SjLog -SjSince $SjCtlLog0 | Where-Object { $_ -like 'api *' }).Count
+    $SjSgP = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjP, '-Phase', 'W1.1', '-Detail', 'the comment fixture sighting', '-Evidence', 'fixture', '-Path', $SjFx7.Proj)
+    # A sighting refused here is not thrown: the rows below then fail and name what they saw.
+    $SjPv7 = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push')
+    $SjCommentHead = @(Get-RunLines $SjPv7.Text | Where-Object { $_ -like "COMMENT 1 -> example/rec #$SjPNum (sighting recorded *" }).Count
+    $SjLog7 = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjAp7 = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply')
+    $SjNew7 = @(Get-NewLines -SjLog $SjLog -SjSince $SjLog7 | Where-Object { $_ -like 'api *' })
+    $SjWantPost = "api --method POST repos/example/rec/issues/$SjPNum/comments --input - --jq .html_url"
+    $SjSight7 = @(Get-Prop2 (Get-SignalRecord -SjHome $SjFx7.Home -SjId $SjP) 'sightings')
+    $SjPosted = ($SjSight7.Count -eq 1) -and ($null -ne (Get-Prop2 $SjSight7[0] 'commentedAt'))
+    $SjNew70 = ''
+    if ($SjNew7.Count -gt 0) { $SjNew70 = $SjNew7[0] }
+    $SjBodies7 = @(Get-PubBodies -SjBodies $SjBodies)
+    $SjLastBody = ''
+    if ($SjBodies7.Count -gt 0) { $SjLastBody = [string](Get-Prop2 $SjBodies7[$SjBodies7.Count - 1] 'body') }
+    Add-Pair 'REC7-sighting-posted-once' `
+        (($SjCommentHead -eq 1) -and ($SjAp7.Code -eq 0) -and ($SjNew7.Count -eq 1) -and ($SjNew70 -ceq $SjWantPost) -and $SjPosted -and ($SjLastBody -like '*the comment fixture sighting*')) "the preview must show one COMMENT section and -Apply must POST it once, carrying the sighting, and record it; preview comments $SjCommentHead, exit $($SjAp7.Code), posts [$($SjNew7 -join ' || ')], recorded $SjPosted" `
+        (($SjCtlNone.Code -eq 0) -and ($SjCtlPosts -eq 0)) "with no sighting waiting the same -Apply must POST nothing; exit $($SjCtlNone.Code), posts $SjCtlPosts" `
+        ($SjNew7.Count -ne $SjCtlPosts) 'the sighting must be what was posted'
+    $SjLog7b = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjAgain = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply')
+    $SjAgainPosts = @(Get-NewLines -SjLog $SjLog -SjSince $SjLog7b | Where-Object { $_ -like 'api *' }).Count
+    Add-Pair 'REC7-posted-sighting-is-not-posted-again' `
+        (($SjAgain.Code -eq 0) -and ($SjAgainPosts -eq 0)) "a second -Apply must POST nothing; exit $($SjAgain.Code), posts $SjAgainPosts" `
+        ($SjNew7.Count -eq 1) 'the first -Apply posted one' `
+        ($SjAgainPosts -ne $SjNew7.Count) 'the record of the post must decide'
+    # A private-names entry in a sighting's detail: held, then cleared for that one signal.
+    $SjTerm = 'zqx' + $SjSfx + 'term'
+    Set-PubList -SjHome $SjFx7.Home -SjLines @('# fixture list', $SjTerm)
+    $SjP2 = New-RecSignal -SjFx $SjFx7 -SjGhDir $SjGhDir -SjDetail 'Second pushed signal. x'
+    $SjPp2 = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply', '-Id', $SjP2)
+    if ($SjPp2.Code -ne 0) { throw "fixture push failed (exit $($SjPp2.Code))" }
+    $SjSgH = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjP2, '-Phase', 'W1.1', '-Detail', "held sighting mentions $SjTerm here", '-Evidence', 'fixture', '-Path', $SjFx7.Proj)
+    # A sighting refused here is not thrown: the rows below then fail and name what they saw.
+    $SjPvH = Get-PubSections -SjText (Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push')).Text
+    $SjFindH = @(Get-PubFindingsOf $SjPvH $SjP2 | Where-Object { $_.ListLine -eq 2 -and $_.Places -like '*comment 1 line*' })
+    $SjLogH = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjHold = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply')
+    $SjHoldPosts = @(Get-NewLines -SjLog $SjLog -SjSince $SjLogH | Where-Object { $_ -like 'api *' }).Count
+    $SjClr = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply', '-Id', $SjP2, '-Clearance', 'fixture: the operator cleared it')
+    $SjClrPosts = @(Get-NewLines -SjLog $SjLog -SjSince $SjLogH | Where-Object { $_ -like 'api *' }).Count
+    $SjSightH = @(Get-Prop2 (Get-SignalRecord -SjHome $SjFx7.Home -SjId $SjP2) 'sightings')
+    $SjClrReason = ''
+    if ($SjSightH.Count -gt 0) { $SjClrReason = [string](Get-Prop2 (Get-Prop2 $SjSightH[0] 'clearance') 'reason') }
+    Set-PubList -SjHome $SjFx7.Home -SjLines $null
+    Add-Pair 'REC7-sighting-findings-hold-until-cleared' `
+        (($SjFindH.Count -eq 1) -and ($SjHold.Code -eq 95) -and ($SjHoldPosts -eq 0)) "the preview must name the list entry in the comment, and -Apply must exit 95 posting nothing; findings $($SjFindH.Count), exit $($SjHold.Code), posts $SjHoldPosts" `
+        (($SjClr.Code -eq 0) -and ($SjClrPosts -eq 1) -and ($SjClrReason -ceq 'fixture: the operator cleared it')) "-Apply -Id with -Clearance must post it once and record the reason; exit $($SjClr.Code), posts $SjClrPosts, reason [$SjClrReason]" `
+        ($SjHold.Code -ne $SjClr.Code) 'the clearance must decide'
+    # An unpushed signal with a sighting: the issue first, then the comment, in one run.
+    $SjU = New-RecSignal -SjFx $SjFx7 -SjGhDir $SjGhDir -SjDetail 'Unpushed signal with a sighting. x'
+    $SjSgU = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signal', '-Id', $SjU, '-Phase', 'W1.1', '-Detail', 'sighting before the push', '-Evidence', 'fixture', '-Path', $SjFx7.Proj)
+    # A sighting refused here is not thrown: the rows below then fail and name what they saw.
+    $SjLogU = @(Get-GhLogLines -SjLog $SjLog).Count
+    $SjApU = Invoke-WrapperRec -SjHome $SjFx7.Home -SjGhDir $SjGhDir -SjArgs @('signals-push', '-Apply', '-Id', $SjU)
+    $SjNewU = @(Get-NewLines -SjLog $SjLog -SjSince $SjLogU | Where-Object { $_ -like 'api *' })
+    $SjOrderOk = ($SjNewU.Count -eq 2) -and ($SjNewU[0] -ceq 'api --method POST repos/example/rec/issues --input - --jq .number,.html_url') -and
+                 ($SjNewU[1] -ceq 'api --method POST repos/example/rec/issues/101/comments --input - --jq .html_url')
+    Add-Pair 'REC7-unpushed-signal-created-then-commented' `
+        (($SjApU.Code -eq 0) -and $SjOrderOk) "-Apply must POST the issue, then the comment on the number it returned; exit $($SjApU.Code), posts [$($SjNewU -join ' || ')]" `
+        (($SjNew7.Count -eq 1) -and ($SjNew70 -like '*/comments *')) 'an already-pushed signal posted only its comment above' `
+        ($SjNewU.Count -ne $SjNew7.Count) 'whether the signal has an issue must decide'
+}
+
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
@@ -2087,9 +2701,10 @@ $SjFailed = 0
 $SjHarnessOk = $false
 $SjSandboxOk = $false
 try {
-    if (-not $LinkOnly -and -not $PublishOnly) { Invoke-Cases -SjTempRoot $SjTempRoot }
-    if (-not $PublishOnly) { Invoke-LinkCases -SjTempRoot $SjTempRoot }
-    if (-not $LinkOnly) { Invoke-PublishCases -SjTempRoot $SjTempRoot }
+    if (-not $LinkOnly -and -not $PublishOnly -and -not $RecordOnly) { Invoke-Cases -SjTempRoot $SjTempRoot }
+    if (-not $PublishOnly -and -not $RecordOnly) { Invoke-LinkCases -SjTempRoot $SjTempRoot }
+    if (-not $LinkOnly -and -not $RecordOnly) { Invoke-PublishCases -SjTempRoot $SjTempRoot }
+    if (-not $LinkOnly -and -not $PublishOnly) { Invoke-RecordCases -SjTempRoot $SjTempRoot }
 
     foreach ($SjResult in @($script:SjResults)) {
         if (-not $SjResult.Ok) {
@@ -2100,7 +2715,7 @@ try {
         if ($SjResult.Name -eq 'HARNESS-CONTROL-store-is-sandboxed')    { $SjSandboxOk = $SjResult.Ok }
     }
 
-    if ($LinkOnly -or $PublishOnly) { $SjHarnessOk = $true; $SjSandboxOk = $true }
+    if ($LinkOnly -or $PublishOnly -or $RecordOnly) { $SjHarnessOk = $true; $SjSandboxOk = $true }
     if ($SjHarnessOk -ne $true) {
         Write-Output ''
         Write-Output '  HARNESS CONTROL FAILED: judge-signal did not succeed on a freshly filed OPEN scratch signal.'

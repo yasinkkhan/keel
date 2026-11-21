@@ -1662,6 +1662,51 @@ function Get-KeelVersion {
     return 'unknown'
 }
 
+# THE KEEL RELEASE, beside the plugin's own version and never in its place. Get-KeelVersion reads
+# this plugin's number, which every project's keel.json stores and status compares against, so it
+# stays exactly as it is (charter P24). A signal record also names the release, so a report says
+# which release it came from as well as which keel-workflow it ran.
+#
+# READ ONLY FROM A MANIFEST THAT LISTS THIS PLUGIN AT THE VERSION RUNNING, so a manifest belonging
+# to some other release is never read as this one's. Two places can hold it: two levels above the
+# plugin root, where a clone or a directory marketplace source keeps it; and, for a copy installed
+# into the plugin cache at <plugins>\cache\<marketplace>\<plugin>\<version>, the marketplace's own
+# copy at <plugins>\marketplaces\<marketplace>. That copy can be updated without the plugins being
+# updated, so where a later release left this plugin's version unchanged, the later release is
+# read: it still ships exactly this plugin, and the plugin's own number stored beside it stays
+# exact. Anything else reads 'unknown', never the plugin number standing in for the release.
+function Get-KeelRelease {
+    $krRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    $krSelf = $null
+    try { $krSelf = Read-Json (Join-Path $krRoot '.claude-plugin\plugin.json') } catch { $krSelf = $null }
+    if ($null -eq $krSelf) { return 'unknown' }
+    $krName = [string](Get-Prop $krSelf 'name' '')
+    $krVer  = [string](Get-Prop $krSelf 'version' '')
+    if ($krName -eq '' -or $krVer -eq '') { return 'unknown' }
+    $krCands = @(Join-Path (Split-Path -Parent (Split-Path -Parent $krRoot)) '.claude-plugin\marketplace.json')
+    # <plugins>\cache\<marketplace>\<plugin>\<version>: the plugin folder, the marketplace folder, cache.
+    $krPluginDir = Split-Path -Parent $krRoot
+    $krMarketDir = Split-Path -Parent $krPluginDir
+    $krCacheDir  = Split-Path -Parent $krMarketDir
+    if ($krCacheDir -and (Split-Path -Leaf $krCacheDir) -eq 'cache') {
+        $krMarkets = Join-Path (Split-Path -Parent $krCacheDir) 'marketplaces'
+        $krCands += (Join-Path (Join-Path $krMarkets (Split-Path -Leaf $krMarketDir)) '.claude-plugin\marketplace.json')
+    }
+    foreach ($krPath in $krCands) {
+        if (-not (Test-Path -LiteralPath $krPath -PathType Leaf)) { continue }
+        $krMan = $null
+        try { $krMan = Read-Json $krPath } catch { $krMan = $null }
+        if ($null -eq $krMan) { continue }
+        $krRel = [string](Get-Prop $krMan 'version' '')
+        if ($krRel -notmatch '^\d+\.\d+\.\d+$') { continue }
+        foreach ($krEntry in @(Get-Prop $krMan 'plugins' @())) {
+            if ($null -eq $krEntry) { continue }
+            if (([string](Get-Prop $krEntry 'name' '') -ceq $krName) -and ([string](Get-Prop $krEntry 'version' '') -ceq $krVer)) { return $krRel }
+        }
+    }
+    return 'unknown'
+}
+
 # --------------------------------------------------------------- node access --
 
 function Get-Nodes  { param($State) return @(Get-Prop $State 'nodes'  @()) }
@@ -3464,15 +3509,16 @@ function Resolve-Gh {
 # would reach the real keel repository. The destination is therefore
 # $SignalsTargetFile, under $KeelHome, so a scratch home has none unless its fixture
 # sets one, and with none nothing is sent. The guard stays: a fixture that DOES set a
-# destination is still a sandboxed run. An AST parse of this whole file finds SEVEN
-# process invocations across FIVE verbs that leave this machine - the five gh calls in
-# signals-push, adopt-signal, signals-relink and resolve-signal -CloseIssue (two of them), the
-# gh repo view in Get-DestinationVisibility that signals-push and resolve-signal -CloseIssue both
-# reach, and the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
+# destination is still a sandboxed run. An AST parse of this whole file finds EIGHT
+# process invocations across FIVE verbs that leave this machine - the six gh calls in
+# signals-push (two: an issue, and a sighting's comment), adopt-signal, signals-relink (one
+# read, in Read-RelinkIssue, that both its forms reach) and resolve-signal -CloseIssue (two of
+# them), the gh repo view in Get-DestinationVisibility that signals-push and resolve-signal
+# -CloseIssue both reach, and the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
 # never appears as a command name here, because Invoke-Native applies the call
 # operator to a variable, so a name-based search cannot enumerate this surface.
 #
-# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the seven
+# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the eight
 # call sites ask it and report what it says. A run is sandboxed when $KeelHome
 # resolves inside $env:TEMP, compared as FULL paths, ordinal and
 # case-insensitive. On a default Windows install TEMP is <USERPROFILE>\AppData\Local\Temp,
@@ -3609,11 +3655,9 @@ function Get-SignalsDestination {
     return $null
 }
 
-# Removes a temp file and CANNOT throw. Both outward sites write the local record of an
-# issue BEFORE the cleanup: a cleanup between the POST and the record write that throws -
-# an 8.3 short path has done it - loses the record of an issue that already exists. So the
-# record is written first, and the cleanup goes through here: a leaked temp file is a
-# smaller harm than an unrecorded issue.
+# Removes a temp file and CANNOT throw: the machine code is made through one, and a cleanup that
+# threw would end a push over a file nobody needs. The outward payloads no longer use a temp file
+# at all - they go to gh on standard input - so nothing a push sends is left in TEMP.
 function Remove-KeelTempFile {
     param([string]$RtPath)
     try {
@@ -3624,17 +3668,102 @@ function Remove-KeelTempFile {
     }
 }
 
-# The preview and -Apply build the title the same way: a preview printing the raw detail
-# while -Apply truncates to 240 would show, as the last check before content leaves the
-# machine, something the act does not produce. ONE builder, called by both branches, so
-# they cannot diverge (P6, P10).
-$IssueTitleMaxChars = 240
+# THE ISSUE TITLE. The preview and -Apply build it the same way: a preview printing one title while
+# -Apply sends another would show, as the last check before content leaves the machine, something
+# the act does not produce. ONE builder, called by both branches, so they cannot diverge (P6, P10).
+#
+# A TITLE IS SHORT. It is '[signal:<kind>] <title>', the title given with 'signal -Title' when the
+# record has one. A record with none gets one from its detail's FIRST SENTENCE - up to the first
+# '.', '!' or '?' followed by a space or the end, or the first line break - with runs of
+# whitespace collapsed; kept whole when it fits in $TitleTextMaxChars characters, and otherwise cut
+# to the whole words that fit with '...' after them. The whole detail is always in the body.
+# Titles used to be the whole detail cut at 240 characters, which read as a paragraph in every
+# list of issues.
+$TitleTextMaxChars  = 80
+$TitleParamMaxChars = 100
+
+function Get-DerivedTitle {
+    param([string]$DtDetail)
+    $dtLines = @(([string]$DtDetail).Trim() -split "`r?`n")
+    $dtFirst = [string]$dtLines[0]
+    if ($dtFirst -match '^(.*?[.!?])(?=\s|$)') { $dtFirst = $Matches[1] }
+    $dtFirst = ($dtFirst -replace '\s+', ' ').Trim()
+    if ($dtFirst -eq '') { $dtFirst = '(no detail)' }
+    if ($dtFirst.Length -le $TitleTextMaxChars) { return $dtFirst }
+    $dtRoom = $TitleTextMaxChars - 3
+    $dtCut = $dtFirst.Substring(0, $dtRoom)
+    if ($dtFirst[$dtRoom] -ne ' ') {
+        $dtSpace = $dtCut.LastIndexOf(' ')
+        if ($dtSpace -gt 0) { $dtCut = $dtCut.Substring(0, $dtSpace) }
+    }
+    return ($dtCut.TrimEnd() + '...')
+}
 
 function Format-IssueTitle {
+    param($Sig)
+    $itStored = ([string](Get-Prop $Sig 'title' '')).Trim()
+    if ($itStored -ne '') { return "[signal:$($Sig.kind)] $itStored" }
+    return "[signal:$($Sig.kind)] $(Get-DerivedTitle ([string]$Sig.detail))"
+}
+
+# THE OLD BUILDER, KEPT FOR ONE PURPOSE: comparing a record pushed before titles were short with the
+# issue it made. Every issue published before then carries this title, and a record from then
+# stores no 'issueTitle', so this is the only way to reproduce what it was published with. Never
+# used to build a title that is sent.
+$IssueTitleMaxChars = 240
+
+function Format-IssueTitleLegacy {
     param($Sig)
     $t = "[signal:$($Sig.kind)] $($Sig.detail)"
     if ($t.Length -gt $IssueTitleMaxChars) { $t = $t.Substring(0, $IssueTitleMaxChars - 3) + '...' }
     return $t
+}
+
+# THE TITLE AN ISSUE WAS PUBLISHED WITH, for comparing a record with the issue it names. One
+# reader, so 'signals-relink' and its attach form compare the same thing: the title a push stored
+# ('issueTitle', written with the issue number); else the title an adopted record was adopted with
+# ('origin.issueTitle', its one home); else the old builder's, for a record pushed before either
+# was stored.
+function Get-PublishedTitle {
+    param($Sig)
+    $ptStored = [string](Get-Prop $Sig 'issueTitle' '')
+    if ($ptStored -ne '') { return $ptStored }
+    $ptOrigin = [string](Get-Prop (Get-Prop $Sig 'origin' $null) 'issueTitle' '')
+    if ($ptOrigin -ne '') { return $ptOrigin }
+    return (Format-IssueTitleLegacy $Sig)
+}
+
+# THE ONE ISSUE READ signals-relink's two forms share: re-pointing moved records and attaching one
+# issue to a record. One call site, so the outward surface the outward suite counts does not grow
+# with the second form. It returns what it read, and the caller decides; it writes nothing.
+function Read-RelinkIssue {
+    param([string]$RiGh, [string]$RiRepo, $RiNum)
+    $riView = Invoke-Native -Exe $RiGh -Arguments @('issue','view',"$RiNum",'--repo',$RiRepo,'--json','number,title,state,url')
+    if ($riView.Code -ne 0) {
+        $riWhy = ''
+        foreach ($riLn in @($riView.Output)) { if (-not [string]::IsNullOrWhiteSpace([string]$riLn)) { $riWhy = ([string]$riLn).Trim(); break } }
+        if ($riWhy.Length -gt 160) { $riWhy = $riWhy.Substring(0, 157) + '...' }
+        return [pscustomobject]@{ Ok = $false; Found = ''; Note = "gh exited $($riView.Code): $riWhy" }
+    }
+    $riIssue = $null
+    try { $riIssue = $riView.Text | ConvertFrom-Json } catch { $riIssue = $null }
+    # An empty response parses to $null WITHOUT throwing.
+    if ($null -eq $riIssue -or $null -eq (Get-Prop $riIssue 'title' $null)) {
+        return [pscustomobject]@{ Ok = $false; Found = ''; Note = 'gh returned no readable title' }
+    }
+    return [pscustomobject]@{ Ok = $true; Found = (([string]$riIssue.title -replace '\s+', ' ').Trim()); Note = '' }
+}
+
+# The sightings a record holds, always as an array: ConvertFrom-Json unrolls a one-element array.
+function Get-SightingList {
+    param($SlSig)
+    return @(Get-Prop $SlSig 'sightings' @())
+}
+
+# A sighting not yet posted to its signal's issue.
+function Test-SightingPending {
+    param($SpSight)
+    return ($null -eq (Get-Prop $SpSight 'commentedAt' $null))
 }
 
 # A RECORD'S ISSUE IS ITS REPO AND ITS NUMBER. A number alone names a different issue on every
@@ -3772,14 +3901,21 @@ $FindingUserPath   = 'a user folder path'
 
 # One finding per category and list line, with every place it occurs: the title is built from the
 # same detail the body carries, so a detail counted once per place would count twice.
+# -ObMore adds further named texts sent with the same signal - a sighting's comments - each one's
+# lines named '<name> line <n>', so one signal's findings cover everything it sends in one call.
 function Get-OutboundFindings {
-    param([string]$ObTitle, [string]$ObBody, [string]$ObBodyName)
+    param([string]$ObTitle, [string]$ObBody, [string]$ObBodyName, [object[]]$ObMore = @())
     $obIc = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
     $obParts = @()
     if (-not [string]::IsNullOrEmpty($ObTitle)) { $obParts += [pscustomobject]@{ Place = 'title'; Text = $ObTitle } }
-    $obLines = @(([string]$ObBody) -split "`n")
-    for ($obI = 0; $obI -lt $obLines.Count; $obI++) {
-        $obParts += [pscustomobject]@{ Place = "$ObBodyName line $($obI + 1)"; Text = [string]$obLines[$obI] }
+    $obTexts = @([pscustomobject]@{ Name = $ObBodyName; Text = [string]$ObBody })
+    foreach ($obExtra in @($ObMore)) { if ($null -ne $obExtra) { $obTexts += $obExtra } }
+    foreach ($obText in $obTexts) {
+        if ($obText.Name -ne $ObBodyName -and [string]::IsNullOrEmpty([string]$obText.Text)) { continue }
+        $obLines = @(([string]$obText.Text) -split "`n")
+        for ($obI = 0; $obI -lt $obLines.Count; $obI++) {
+            $obParts += [pscustomobject]@{ Place = "$($obText.Name) line $($obI + 1)"; Text = [string]$obLines[$obI] }
+        }
     }
     $obChecks = @()
     foreach ($obEntry in @(Read-PrivateNameList)) {
@@ -3866,7 +4002,10 @@ function Format-IssueBody {
     $lines += "| Kind | ``$($Sig.kind)`` |"
     $lines += "| Filed | $($Sig.created) |"
     $lines += "| Machine | $(Get-MachineCode) |"
-    $lines += "| keel version | $(Get-Prop $Sig 'keelVersion' 'unknown') |"
+    # Two versions, each labelled: the release, and the keel-workflow plugin that wrote the record. A
+    # record filed before releases were recorded has only the plugin's number, and shows it as that.
+    $lines += "| keel release | $(Get-Prop $Sig 'release' 'not recorded') |"
+    $lines += "| keel-workflow plugin | $(Get-Prop $Sig 'keelVersion' 'unknown') |"
     $lines += "| Evidence mode | $(Get-Prop $Sig 'evidenceMode' 'literal') |"
     $lines += ''
     $lines += '### What happened'
@@ -3885,6 +4024,39 @@ function Format-IssueBody {
     $lines += 'decided in keel with the other projects in view. `unsafe` and `refusal` act at n=1;'
     $lines += '`gap` and `friction` wait for a second project or an argued exception.'
     return ($lines -join "`n")
+}
+
+# A SIGHTING'S COMMENT, in the issue body's layout, so a triager reads it the same way. It is posted
+# on the signal's own issue by signals-push and checked first exactly as a report body is.
+function Format-SightingComment {
+    param($Sig, $ScSight)
+    $scLines = @()
+    $scLines += "**Signal $($Sig.id) seen again**, from project ``$(Get-Prop $ScSight 'project' '?')``, phase ``$(Get-Prop $ScSight 'phase' '?')``."
+    $scLines += ''
+    $scLines += "| | |"
+    $scLines += "|---|---|"
+    $scLines += "| Kind | ``$($Sig.kind)`` |"
+    $scLines += "| Seen | $(Get-Prop $ScSight 'at' '?') |"
+    $scLines += "| Machine | $(Get-MachineCode) |"
+    $scLines += "| keel release | $(Get-Prop $ScSight 'release' 'not recorded') |"
+    $scLines += "| keel-workflow plugin | $(Get-Prop $ScSight 'keelVersion' 'unknown') |"
+    $scLines += "| Evidence mode | $(Get-Prop $ScSight 'evidenceMode' 'literal') |"
+    $scLines += ''
+    $scLines += '### What happened'
+    $scLines += ''
+    $scLines += [string](Get-Prop $ScSight 'detail' '')
+    $scLines += ''
+    $scLines += '### Evidence'
+    $scLines += ''
+    $scLines += '```'
+    $scLines += [string](Get-Prop $ScSight 'evidence' '')
+    $scLines += '```'
+    $scLines += ''
+    $scLines += '---'
+    $scLines += ''
+    $scLines += 'Recorded by `keel-state.ps1 signal -Id` as a further sighting of this open signal, and posted by'
+    $scLines += '`signals-push`. It is evidence for the report above, not a second report.'
+    return ($scLines -join "`n")
 }
 
 function Next-SignalId {
@@ -3957,6 +4129,15 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  'resolve-signal -CloseIssue' acts on that repo and refuses a -Repo naming another."
     Write-Output "  'signals-relink -From owner/name [-Repo owner/name]' re-points records whose issues moved"
     Write-Output "  under the same numbers, checked by title: a preview, then -Apply; -Id adds a mismatch."
+    Write-Output "  'signals-relink -Id <id> -Issue <n> [-Repo owner/name]' attaches a known issue to an open"
+    Write-Output "  record with none, checked by title: a preview, then -Apply; a mismatch needs -Detail '<why>'."
+    Write-Output "  'signal -Title <text>' (at most $TitleParamMaxChars characters) is the issue's title; without one the title"
+    Write-Output "  is the detail's first sentence, cut to $TitleTextMaxChars characters. The whole detail is in the body."
+    Write-Output "  'signal -Id <open signal> -Phase -Detail -Evidence' records a SIGHTING - the defect seen again -"
+    Write-Output "  on that signal instead of filing a second one; 'signals' lists it, and 'signals-push' previews"
+    Write-Output "  it and with -Apply posts it as a comment on the signal's issue, checked like a report."
+    Write-Output "  A report shows the keel release and the keel-workflow plugin version, each in its own row."
+    Write-Output "  Payloads go to gh on standard input, so no temp file is written."
     Write-Output "  Before anything is sent, 'signals-push' checks the exact title and body for an entry of"
     Write-Output "  ~/.keel/private-names.txt, this machine's name and user folder paths, and says whether the"
     Write-Output "  destination is public, private or could not tell. A finding names its place and list line,"
@@ -5985,8 +6166,34 @@ switch ($Command) {
 # --------------------------------------------------------------------------- #
 'signal' {
     $proj = Resolve-ProjectOrFail -StartPath $Path
-    Require-Param $Kind 'Kind'; Assert-Enum $Kind $SignalKinds 'Kind'
+
+    # -Id RECORDS A SIGHTING: the defect an OPEN signal describes, seen again. Without it a second
+    # session that meets the same defect files a second signal, and the evidence for one defect is
+    # split across two records and two issues. A sighting carries the same phase, detail and evidence
+    # a new signal does, and the same quarantine rule, because it leaves the machine the same way: as
+    # a comment on the signal's issue, posted by signals-push. It is appended to the signal's record,
+    # and no new signal is filed. A signal that is no longer OPEN takes no sighting: a defect seen
+    # again after its signal was resolved is a new signal.
+    $sgSighting = -not [string]::IsNullOrWhiteSpace($Id)
+    if ($sgSighting) {
+        if ($Id -notmatch '^S\d{4}$') { Fail 90 "-Id '$Id' is not a signal id. Expected S<nnnn>, e.g. S0007. With -Id, 'signal' records a sighting of that open signal." }
+        if ($Kind) { Assert-Enum $Kind $SignalKinds 'Kind' }
+    }
+    else { Require-Param $Kind 'Kind'; Assert-Enum $Kind $SignalKinds 'Kind' }
     Require-Param $Detail 'Detail'
+
+    # -Title IS THE ISSUE'S TITLE, optional, so every existing call is unchanged (charter P24). Read
+    # through $PSBoundParameters, so a title of only spaces refuses rather than reads as absent.
+    $sgTitleText = $null
+    if ($PSBoundParameters.ContainsKey('Title')) {
+        if ($sgSighting) {
+            Fail 90 "-Title names a new signal's issue. A sighting is posted as a comment on its signal's issue and has no title of its own: drop -Title, or drop -Id to file a new signal. Nothing was written."
+        }
+        if ([string]::IsNullOrWhiteSpace($Title) -or $Title -match "[`r`n]" -or $Title.Trim().Length -gt $TitleParamMaxChars) {
+            Fail 90 "-Title must be one line of 1 to $TitleParamMaxChars characters: it is the issue's title, and the whole detail goes in the body. Nothing was written."
+        }
+        $sgTitleText = $Title.Trim()
+    }
 
     if ([string]::IsNullOrWhiteSpace($Phase)) {
         Fail 97 "-Phase is required. A signal cites the moment it came from; a signal with no phase behind it is a wish (charter P25)."
@@ -6011,17 +6218,65 @@ switch ($Command) {
         }
     }
 
+    if ($sgSighting) {
+        $sgPath = Join-Path $SignalsHome "$Id.json"
+        Enter-WriteLock $SignalsHome 'the signal store'
+        if (-not (Test-Path -LiteralPath $sgPath)) { Fail 94 "Signal '$Id' does not exist. Nothing was written." }
+        Save-ReadSha $sgPath
+        $sgSig = Read-Json $sgPath
+        # An empty or truncated file parses to $null without throwing.
+        if ($null -eq $sgSig) { Fail 96 "Signal '$Id' did not parse to an object. The file at '$sgPath' is empty or truncated." }
+        if ($sgSig.state -ne 'OPEN') {
+            Fail 90 "Signal '$Id' is $($sgSig.state), not OPEN. A sighting is recorded on an open signal; a defect seen again after its signal was resolved is a new signal, filed without -Id. Nothing was written."
+        }
+        if ($Kind -and $Kind -ne $sgSig.kind) {
+            Fail 90 "-Kind $Kind does not match signal '$Id', which is $($sgSig.kind). A sighting takes its signal's kind: drop -Kind. Nothing was written."
+        }
+        # APPENDED, never replaced, and re-wrapped with @() because a one-element array comes back
+        # from ConvertFrom-Json as a bare object.
+        $sgTrail = @(Get-SightingList $sgSig)
+        $sgTrail += [pscustomobject]@{
+            at = (Now)
+            project = $proj.Slug
+            phase = $Phase
+            detail = $Detail
+            evidence = $Evidence
+            evidenceMode = $evidenceMode
+            machine = $env:COMPUTERNAME
+            keelVersion = (Get-KeelVersion)
+            release = (Get-KeelRelease)
+            commentedAt = $null
+            commentUrl = $null
+        }
+        Set-Prop $sgSig 'sightings' $sgTrail
+        Write-GuardedJson $sgPath $sgSig
+        Say "Recorded a sighting of signal $Id ($($sgSig.kind)) from $($proj.Slug) $($Phase): $($sgTrail.Count) sighting(s) now on it. No new signal was filed."
+        $sgIssue = Get-Prop $sgSig 'issue' $null
+        if ($null -eq (Get-SignalsDestination)) {
+            Say '  It is LOCAL. No report destination is chosen, so it stays on this machine: keel-state.ps1 signals-target -Repo owner/name'
+        }
+        elseif ($null -ne $sgIssue) {
+            Say "  It is LOCAL until 'signals-push' posts it as a comment on issue #$sgIssue   (preview, then -Apply)"
+        }
+        else {
+            Say "  The signal is not pushed yet: 'signals-push' creates its issue, then posts this as a comment   (preview, then -Apply)"
+        }
+        exit 0
+    }
+
     $sid = Next-SignalId
     $sig = [pscustomobject]@{
         id = $sid
         project = $proj.Slug
         phase = $Phase
         kind = $Kind
+        title = $sgTitleText
         detail = $Detail
         evidence = $Evidence
         evidenceMode = $evidenceMode
         machine = $env:COMPUTERNAME
         keelVersion = (Get-KeelVersion)
+        release = (Get-KeelRelease)
         created = (Now)
         state = 'OPEN'
         issue = $null
@@ -6122,7 +6377,14 @@ switch ($Command) {
     # resolution made meanwhile waits rather than being written over. The preview writes nothing
     # to the store; it may create machine-code.txt, the one file Get-MachineCode makes on first need.
     if ($Apply) { Enter-WriteLock $SignalsHome 'the signal store' }
-    $pending = @(Get-Signals -Slug '' -FilterKind '' | Where-Object { $_.state -eq 'OPEN' -and $null -eq (Get-Prop $_ 'issue' $null) })
+
+    # WHAT A PUSH SENDS: each OPEN record with no issue, as a new issue, and each SIGHTING not yet
+    # posted on an OPEN record, as a comment on that record's issue - after creating the issue first,
+    # in the same run, when the record has none. Comments are never read back: a sighting posted from
+    # another machine is read on its issue.
+    $pending = @(Get-Signals -Slug '' -FilterKind '' | Where-Object {
+        $_.state -eq 'OPEN' -and (($null -eq (Get-Prop $_ 'issue' $null)) -or (@(Get-SightingList $_ | Where-Object { Test-SightingPending $_ }).Count -gt 0))
+    })
 
     # -Id scopes the push to ONE signal. Without it the pending set is every unpushed open
     # signal on the machine, across every project - so an operator asking to push one would
@@ -6133,7 +6395,8 @@ switch ($Command) {
     # Placed after it, 'signals-push -Id <id>' against a fully-pushed store would print
     # 'Nothing to push' and exit 0 - reporting success for a push that did not happen and
     # never naming the signal asked for. Refusals mirror resolve-signal in this same file
-    # rather than inventing codes: bad shape / immutable -> 90, unknown -> 94.
+    # rather than inventing codes: bad shape / immutable -> 90, unknown -> 94. A signal already
+    # pushed is refused only when no sighting on it is waiting to be sent.
     if (-not [string]::IsNullOrWhiteSpace($Id)) {
         if ($Id -notmatch '^S\d{4}$') { Fail 90 "-Id '$Id' is not a signal id. Expected S<nnnn>, e.g. S0007." }
         $sigPath = Join-Path $SignalsHome "$Id.json"
@@ -6144,35 +6407,70 @@ switch ($Command) {
         if ($null -eq $sigOne) { Fail 96 "Signal '$Id' did not parse to an object. The file at '$sigPath' is empty or truncated." }
         if ($sigOne.state -ne 'OPEN') { Fail 90 "Signal '$Id' is $($sigOne.state), not OPEN. Only an open signal is pushed." }
         $alreadyIssue = Get-Prop $sigOne 'issue' $null
-        if ($null -ne $alreadyIssue) {
-            Fail 90 "Signal '$Id' was already pushed as issue #$alreadyIssue on $(Get-Prop $sigOne 'pushedAt' 'an unrecorded date'). A signal is pushed once."
+        $spWaiting = @(Get-SightingList $sigOne | Where-Object { Test-SightingPending $_ }).Count
+        if ($null -ne $alreadyIssue -and $spWaiting -eq 0) {
+            Fail 90 "Signal '$Id' was already pushed as issue #$alreadyIssue on $(Get-Prop $sigOne 'pushedAt' 'an unrecorded date'), and no sighting on it is waiting to be sent. A signal is pushed once; a sighting recorded with 'signal -Id' goes as a comment."
         }
         $pending = @($sigOne)
     }
 
-    if ($pending.Count -eq 0) { Say 'Nothing to push - every open signal already has an issue.'; exit 0 }
+    if ($pending.Count -eq 0) { Say 'Nothing to push - every open signal already has an issue, and no sighting is waiting to be sent.'; exit 0 }
+
+    # Every text one record would send, built ONCE per record by the same builders the preview, the
+    # hold and the send all use. A record with an issue sends no title or body, only its comments.
+    $spPlan = @()
+    foreach ($s in $pending) {
+        $spIsNew = ($null -eq (Get-Prop $s 'issue' $null))
+        $spRepo = $slug
+        $spNumText = 'the issue this run creates'
+        if (-not $spIsNew) { $spRepo = Get-SignalIssueRepo $s $slug; $spNumText = "#$(Get-Prop $s 'issue' '?')" }
+        $spTitleText = ''
+        $spBodyText = ''
+        if ($spIsNew) { $spTitleText = Format-IssueTitle $s; $spBodyText = Format-IssueBody $s }
+        $spComments = @()
+        foreach ($spOne in @(Get-SightingList $s)) {
+            if (-not (Test-SightingPending $spOne)) { continue }
+            $spComments += [pscustomobject]@{ Sight = $spOne; Body = (Format-SightingComment $s $spOne) }
+        }
+        $spMore = @()
+        for ($spK = 0; $spK -lt $spComments.Count; $spK++) { $spMore += [pscustomobject]@{ Name = "comment $($spK + 1)"; Text = $spComments[$spK].Body } }
+        $spFound = @(Get-OutboundFindings -ObTitle $spTitleText -ObBody $spBodyText -ObBodyName 'body' -ObMore $spMore)
+        $spPlan += [pscustomobject]@{ Sig = $s; IsNew = $spIsNew; Repo = $spRepo; NumText = $spNumText; TitleText = $spTitleText; BodyText = $spBodyText; Comments = $spComments; Found = $spFound }
+    }
+    $spNewCount = @($spPlan | Where-Object { $_.IsNew }).Count
+    $spSightCount = 0
+    foreach ($spP in $spPlan) { $spSightCount += @($spP.Comments).Count }
+    $spRepoList = @($spPlan | ForEach-Object { $_.Repo } | Sort-Object -Unique)
 
     if (-not $Apply) {
-        Say "PREVIEW ONLY. $($pending.Count) signal(s) would become issues on $slug. Re-run with -Apply to create them."
-        Write-VisibilityLine -VlGh $gh -VlRepo $slug
+        Say "PREVIEW ONLY. $spNewCount signal(s) would become issues on $slug. Re-run with -Apply to create them."
+        if ($spSightCount -gt 0) { Say "  $spSightCount sighting(s) would be posted as comments on their signals' issues, shown below each signal." }
+        foreach ($spR in $spRepoList) { Write-VisibilityLine -VlGh $gh -VlRepo $spR }
         Write-ListCheckLine
         $spHeldIds = @()
-        foreach ($s in $pending) {
-            $rawLen  = "[signal:$($s.kind)] $($s.detail)".Length
-            $shownTitle = Format-IssueTitle $s
+        foreach ($spP in $spPlan) {
+            $s = $spP.Sig
             Write-Output ''
             Write-Output "--- $($s.id) ------------------------------------------------------------"
-            Write-Output "TITLE: $shownTitle"
-            if ($rawLen -gt $IssueTitleMaxChars) {
-                Write-Output "       (title truncated to $IssueTitleMaxChars chars from $rawLen - the full text is in the body below)"
+            if ($spP.IsNew) {
+                Write-Output "TITLE: $($spP.TitleText)"
+                if (([string](Get-Prop $s 'title' '')).Trim() -eq '') {
+                    Write-Output "       (title taken from the detail's first sentence - the whole detail is in the body below)"
+                }
+                Write-Output "BODY:"
+                Write-Output $spP.BodyText
             }
-            Write-Output "BODY:"
-            $shownBody = Format-IssueBody $s
-            Write-Output $shownBody
-            $spFound = @(Get-OutboundFindings -ObTitle $shownTitle -ObBody $shownBody -ObBodyName 'body')
+            else {
+                Write-Output "ISSUE: $($spP.NumText) on $($spP.Repo) - already published; only its sightings below are sent"
+            }
+            for ($spK = 0; $spK -lt @($spP.Comments).Count; $spK++) {
+                Write-Output ''
+                Write-Output "COMMENT $($spK + 1) -> $($spP.Repo) $($spP.NumText) (sighting recorded $(Get-Prop $spP.Comments[$spK].Sight 'at' '?')):"
+                Write-Output $spP.Comments[$spK].Body
+            }
             $spCleared = $spClearGiven -and ($s.id -eq $Id)
-            Write-OutboundFindings -WfId $s.id -WfFindings $spFound -WfCleared $spCleared -WfHeld $spHeldText
-            if ($spFound.Count -gt 0 -and -not $spCleared) { $spHeldIds += $s.id }
+            Write-OutboundFindings -WfId $s.id -WfFindings $spP.Found -WfCleared $spCleared -WfHeld $spHeldText
+            if (@($spP.Found).Count -gt 0 -and -not $spCleared) { $spHeldIds += $s.id }
         }
         Write-Output ''
         if ($spHeldIds.Count -gt 0) {
@@ -6188,33 +6486,43 @@ switch ($Command) {
     # asks the guard itself and fails open to 'could not tell'. So guarding the
     # preview here would flip a path that proceeds into one that refuses, which the
     # guard must never do - it changes only WHY the outward half is skipped.
-    # Everything after this line leads to the loop that creates issues.
+    # Everything after this line leads to the loop that creates issues and posts comments.
     # It is still after Resolve-Gh and Get-SignalsDestination, so the message below
     # can truthfully say both succeeded.
     $owBlocked = Test-OutwardBlocked
     if ($null -ne $owBlocked) {
+        $owCmds = @()
+        foreach ($spP in $spPlan) {
+            if ($spP.IsNew) { $owCmds += "gh api --method POST repos/$slug/issues" }
+            foreach ($spC in @($spP.Comments)) {
+                $owNum = '<new>'
+                if (-not $spP.IsNew) { $owNum = "$(Get-Prop $spP.Sig 'issue' '?')" }
+                $owCmds += "gh api --method POST repos/$($spP.Repo)/issues/$owNum/comments"
+            }
+        }
         Fail 90 (Get-OutwardBlockedMessage -OwReason $owBlocked `
-            -OwCommands @("gh api --method POST repos/$slug/issues") `
+            -OwCommands @($owCmds | Select-Object -Unique) `
             -OwAssurance 'gh WAS found and a destination WAS chosen - this refusal says nothing about either. Nothing was pushed and no signal record was written.')
     }
 
-    Write-VisibilityLine -VlGh $gh -VlRepo $slug
+    foreach ($spR in $spRepoList) { Write-VisibilityLine -VlGh $gh -VlRepo $spR }
     Write-ListCheckLine
 
-    # THE HOLD. Every pending signal is checked on the exact title and body the loop below sends,
-    # before any of them is sent, and one uncleared finding sends nothing at all. Holding only that
-    # signal and sending the rest would make what one confirmation published depend on signals the
-    # operator did not read. Exit 95, 'a mandatory answer was not supplied': the answer missing is
+    # THE HOLD. Every pending record is checked on the exact title, body and comments the loop below
+    # sends, before any of them is sent, and one uncleared finding sends nothing at all. Holding only
+    # that signal and sending the rest would make what one confirmation published depend on signals
+    # the operator did not read. Exit 95, 'a mandatory answer was not supplied': the answer missing is
     # the clearance, which the wrapper can ask for and cannot judge. Nothing is written before this
     # point, so a held run leaves every record as it was. Only finding lines are printed, never a body.
+    # A clearance covers everything its one signal sends in this run, report and sightings alike.
     $spHeld = @()
     $spCounts = @{}
-    foreach ($s in $pending) {
-        $spFound = @(Get-OutboundFindings -ObTitle (Format-IssueTitle $s) -ObBody (Format-IssueBody $s) -ObBodyName 'body')
-        $spCounts[$s.id] = $spFound.Count
-        if ($spFound.Count -eq 0) { continue }
+    foreach ($spP in $spPlan) {
+        $s = $spP.Sig
+        $spCounts[$s.id] = @($spP.Found).Count
+        if ($spCounts[$s.id] -eq 0) { continue }
         $spCleared = $spClearGiven -and ($s.id -eq $Id)
-        Write-OutboundFindings -WfId $s.id -WfFindings $spFound -WfCleared $spCleared -WfHeld $spHeldText
+        Write-OutboundFindings -WfId $s.id -WfFindings $spP.Found -WfCleared $spCleared -WfHeld $spHeldText
         if (-not $spCleared) { $spHeld += $s.id }
     }
     if ($spClearGiven -and $spCounts[$Id] -eq 0) { Say "-Clearance is not needed: $Id has no findings, so nothing was cleared or recorded." }
@@ -6224,37 +6532,49 @@ switch ($Command) {
     }
 
     $failed = 0
-    foreach ($s in $pending) {
-        $issueTitle = Format-IssueTitle $s
-        $body = Format-IssueBody $s
+    foreach ($spP in $spPlan) {
+        $s = $spP.Sig
+        $spSigPath = Join-Path $SignalsHome "$($s.id).json"
+        $spClearUsed = $spClearGiven -and ($s.id -eq $Id) -and $spCounts[$s.id] -gt 0
+        if ($spP.IsNew) {
+            # THE PAYLOAD TRAVELS ON STANDARD INPUT, NOT AS A NATIVE ARGUMENT AND NOT IN A FILE. Do
+            # not "simplify" this back to 'issue','create','--title',$issueTitle. Measured against a
+            # .NET receiver parsed by CommandLineToArgvW - the same rules gh's Go runtime uses:
+            #   raw --title      : 1/5 titles survive under Windows PowerShell 5.1, 5/5 under pwsh 7.6.3
+            #   escaped --title  : 5/5 under 5.1, 1/5 under 7.6.3 (7.x escapes natively, so
+            #                      pre-escaping arrives literal) - it would have to be host-conditional
+            #   gh api --input   : 5/5 under BOTH
+            # 5.1 does not escape a double quote inside a splatted native argument, so a title
+            # quoting a status line is split at every quoted word and gh sees stray positionals.
+            # A trailing backslash is worse: it escapes the closing quote and swallows the next
+            # flag. Every argument below is a flag name, the repo slug or '-', none of which can
+            # contain a quote. gh issue create has no --title-file (checked against gh 2.97.0),
+            # which is why this is the api verb rather than the issue verb.
+            #
+            # '--input -' reads the body from standard input, which Invoke-Native -NativeInput writes
+            # as UTF-8 with no byte-order mark from a console at any code page. It replaced a temp
+            # file in TEMP, which a machine with an 8.3 short TEMP path was seen to keep after every
+            # push: with no file written, there is none to leave.
+            $payload = [ordered]@{ title = $spP.TitleText; body = $spP.BodyText }
 
-        # THE TITLE TRAVELS IN A FILE, NOT AS A NATIVE ARGUMENT. Do not "simplify" this
-        # back to 'issue','create','--title',$issueTitle. Measured against a .NET receiver
-        # parsed by CommandLineToArgvW - the same rules gh's Go runtime uses:
-        #   raw --title      : 1/5 titles survive under Windows PowerShell 5.1, 5/5 under pwsh 7.6.3
-        #   escaped --title  : 5/5 under 5.1, 1/5 under 7.6.3 (7.x escapes natively, so
-        #                      pre-escaping arrives literal) - it would have to be host-conditional
-        #   gh api --input   : 5/5 under BOTH
-        # 5.1 does not escape a double quote inside a splatted native argument, so a title
-        # quoting a status line is split at every quoted word and gh sees stray positionals.
-        # A trailing backslash is worse: it escapes the closing quote and swallows the next
-        # flag. This vector removes the class by construction - every element below is a
-        # flag name, the repo slug, or a temp path, and none of those can contain a quote.
-        # gh issue create has no --title-file (checked against gh 2.97.0), which is why this
-        # is the api verb rather than the issue verb.
-        $payload = [ordered]@{ title = $issueTitle; body = $body }
-        $tmp = Join-Path $env:TEMP ("keel-signal-" + $s.id + ".json")
-        Write-TextNoBom $tmp ($payload | ConvertTo-Json -Depth 6)
+            # --jq keeps gh to two lines. Not cosmetic: the API response echoes the issue BODY,
+            # and signal evidence prose can itself contain a github.com/.../issues/<n> URL, which
+            # a last-match-wins regex over the whole response would report as the new issue.
+            $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$slug/issues",'--input','-','--jq','.number,.html_url') -NativeInput @(($payload | ConvertTo-Json -Depth 6))
 
-        # --jq keeps gh to two lines. Not cosmetic: the API response echoes the issue BODY,
-        # and signal evidence prose can itself contain a github.com/.../issues/<n> URL, which
-        # a last-match-wins regex over the whole response would report as the new issue.
-        $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$slug/issues",'--input',$tmp,'--jq','.number,.html_url')
-
-        # THE RECORD IS WRITTEN STRAIGHT AFTER THE POST, BEFORE THE TEMP FILE IS TOUCHED. A
-        # cleanup placed here that threw would leave a live issue with no local record of it.
-        # Do not move Remove-KeelTempFile above this block.
-        if ($res.Code -eq 0) {
+            # THE RECORD IS WRITTEN STRAIGHT AFTER THE POST.
+            if ($res.Code -ne 0) {
+                # One line naming the signal and why - not gh's usage wall, which buries the
+                # cause in forty lines of flags. The full text is reproducible by re-running.
+                # Its sightings wait: there is no issue to post them on.
+                $why = ''
+                foreach ($ln in $res.Output) { if (-not [string]::IsNullOrWhiteSpace($ln)) { $why = $ln.Trim(); break } }
+                if ($why.Length -gt 160) { $why = $why.Substring(0, 157) + '...' }
+                if ([string]::IsNullOrWhiteSpace($why)) { $why = 'no output' }
+                [Console]::Error.WriteLine("KEEL-STATE: $($s.id) NOT pushed: gh exited $($res.Code) - $why")
+                $failed++
+                continue
+            }
             $num = $null
             $urlText = ''
             foreach ($ln in $res.Output) {
@@ -6266,29 +6586,49 @@ switch ($Command) {
             Set-Prop $s 'issue' $num
             Set-Prop $s 'issueUrl' $urlText
             Set-Prop $s 'pushedAt' (Now)
-            $spFields = @('issue', 'issueUrl', 'pushedAt')
+            # The title sent is kept, so a later comparison with the issue reads what was published
+            # rather than rebuilding it with whatever builder is current then.
+            Set-Prop $s 'issueTitle' $spP.TitleText
+            $spFields = @('issue', 'issueUrl', 'pushedAt', 'issueTitle')
             # A clearance used is recorded on the one record it covered, in the same write as the
             # issue, so the record says what was published past a finding and why.
-            if ($spClearGiven -and ($s.id -eq $Id) -and $spCounts[$s.id] -gt 0) {
+            if ($spClearUsed) {
                 Set-Prop $s 'pushClearance' ([pscustomobject]@{ at = (Now); reason = $Clearance.Trim(); findings = $spCounts[$s.id] })
                 $spFields += 'pushClearance'
             }
-            Write-SignalFields (Join-Path $SignalsHome "$($s.id).json") $s $spFields
+            Write-SignalFields $spSigPath $s $spFields
             Say "$($s.id) -> issue #$num  $urlText"
         }
 
-        Remove-KeelTempFile $tmp
-
-        if ($res.Code -ne 0) {
-            # One line naming the signal and why - not gh's usage wall, which buries the
-            # cause in forty lines of flags. The full text is reproducible by re-running.
-            $why = ''
-            foreach ($ln in $res.Output) { if (-not [string]::IsNullOrWhiteSpace($ln)) { $why = $ln.Trim(); break } }
-            if ($why.Length -gt 160) { $why = $why.Substring(0, 157) + '...' }
-            if ([string]::IsNullOrWhiteSpace($why)) { $why = 'no output' }
-            [Console]::Error.WriteLine("KEEL-STATE: $($s.id) NOT pushed: gh exited $($res.Code) - $why")
-            $failed++
-            continue
+        $spNum = Get-Prop $s 'issue' $null
+        if ($null -eq $spNum -or @($spP.Comments).Count -eq 0) { continue }
+        $spRepo = $spP.Repo
+        $spList = @(Get-SightingList $s)
+        foreach ($spC in @($spP.Comments)) {
+            # The same route as the issue: the comment on standard input, --jq for its URL alone.
+            $spRes = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$spRepo/issues/$spNum/comments",'--input','-','--jq','.html_url') -NativeInput @(([ordered]@{ body = $spC.Body } | ConvertTo-Json -Depth 6))
+            $spAt = Get-Prop $spC.Sight 'at' '?'
+            if ($spRes.Code -ne 0) {
+                $why = ''
+                foreach ($ln in $spRes.Output) { if (-not [string]::IsNullOrWhiteSpace($ln)) { $why = $ln.Trim(); break } }
+                if ($why.Length -gt 160) { $why = $why.Substring(0, 157) + '...' }
+                if ([string]::IsNullOrWhiteSpace($why)) { $why = 'no output' }
+                [Console]::Error.WriteLine("KEEL-STATE: $($s.id) sighting of $spAt NOT posted: gh exited $($spRes.Code) - $why")
+                $failed++
+                continue
+            }
+            $spUrl = ''
+            foreach ($ln in $spRes.Output) { $t = $ln.Trim(); if ($t -match '^https://\S+$') { $spUrl = $t; break } }
+            # Recorded as it lands, onto the sighting object inside the record's own list, so a
+            # failed one after it is retried alone and a posted one is never posted twice.
+            Set-Prop $spC.Sight 'commentedAt' (Now)
+            Set-Prop $spC.Sight 'commentUrl' $spUrl
+            if ($spClearUsed) {
+                Set-Prop $spC.Sight 'clearance' ([pscustomobject]@{ at = (Now); reason = $Clearance.Trim(); findings = $spCounts[$s.id] })
+            }
+            Set-Prop $s 'sightings' $spList
+            Write-SignalFields $spSigPath $s @('sightings')
+            Say "$($s.id) -> sighting of $spAt posted on #$spNum  $spUrl"
         }
     }
     # A push that did not happen must not report success to whatever called this. Bare exit:
@@ -6331,6 +6671,15 @@ switch ($Command) {
     # is still refused and still writes nothing, but it spends a round trip to say so.
     if ($Id -and $Id -notmatch '^S\d{4}$') {
         Fail 90 "-Id '$Id' is not a signal id. On 'adopt-signal' it is OPTIONAL and records the id this signal carries on the machine that FILED it, e.g. -Id S0007."
+    }
+    # -Title is the record's own short title, as on 'signal'. The issue's title is kept where it
+    # always was, in origin.issueTitle.
+    $adTitleText = $null
+    if ($PSBoundParameters.ContainsKey('Title')) {
+        if ([string]::IsNullOrWhiteSpace($Title) -or $Title -match "[`r`n]" -or $Title.Trim().Length -gt $TitleParamMaxChars) {
+            Fail 90 "-Title must be one line of 1 to $TitleParamMaxChars characters. Nothing was written."
+        }
+        $adTitleText = $Title.Trim()
     }
 
     # -Phase is stored as TEXT and never looked up. The originating phase does not exist in any
@@ -6412,11 +6761,13 @@ switch ($Command) {
         project = $Project
         phase = $Phase
         kind = $Kind
+        title = $adTitleText
         detail = $adTitle
         evidence = "$adUrl - GitHub issue #$Issue on $adSlug, filed from another keel instance. The report body is on the issue."
         evidenceMode = 'reference'
         machine = $env:COMPUTERNAME
         keelVersion = (Get-KeelVersion)
+        release = (Get-KeelRelease)
         created = (Now)
         state = 'OPEN'
         # Set from birth. This is what excludes an adopted record from 'signals-push', whose
@@ -6447,6 +6798,7 @@ switch ($Command) {
 
     $adId = Save-NewSignal $adSig
     Say "Adopted issue #$Issue as $adId ($Kind) from $Project $Phase. The issue is $adState on $adSlug."
+    if ($null -ne $adTitleText) { Write-Output "TITLE: $(Format-IssueTitle $adSig)" }
     Say "  This record is FOREIGN: it was filed on another machine and is marked '<' in 'signals'."
     Say "  It is excluded from 'signals-push' - it already has an issue and was never pushed from here."
     Say "  Triage it as any other signal: keel-state.ps1 resolve-signal -Id $adId -As <PROMOTED|REJECTED|UNREPRODUCIBLE> -Detail '<why>' -CloseIssue"
@@ -6465,7 +6817,7 @@ switch ($Command) {
     # EACH RECORD IS CHECKED AGAINST THE ISSUE IT WOULD POINT AT, BY TITLE, because a link
     # pointing at the wrong issue is the defect being repaired: re-pointing by number alone could
     # not tell a moved issue from an unrelated one with the same number. The title compared is the
-    # one signals-push builds (Format-IssueTitle), with runs of whitespace collapsed on both sides,
+    # one the issue was published with (Get-PublishedTitle), with runs of whitespace collapsed on both sides,
     # since GitHub keeps a title on one line. A record that does not match is listed and left alone
     # unless it is named with -Id, by someone who has read both titles.
     #
@@ -6474,6 +6826,88 @@ switch ($Command) {
     # before the store is read, so what a preview lists is what -Apply would have acted on then.
     # The cost: a command writing a signal meanwhile waits, and stops at 89 if this outlasts the
     # wait, since each record costs one GitHub read.
+    #
+    # -Issue IS THE ATTACH FORM: one known issue, attached to one OPEN record that has none. A push
+    # can create an issue and fail to record its number, and then the record reads as never pushed
+    # while the issue exists; adopting the issue would make a second record of the same defect. So
+    # the issue is read and its title compared with the record's, exactly as a re-point is checked,
+    # and a preview comes first. The refusals that need no network run before the read, and none of
+    # them writes anything.
+    if ($Issue -ne 0) {
+        if ($PSBoundParameters.ContainsKey('From')) {
+            Fail 90 "-From re-points records whose issues moved; -Issue attaches one issue to one record that has none. Use one form per call. Nothing was written and nothing was sent."
+        }
+        if ($Issue -lt 0) { Fail 90 "-Issue must be a positive GitHub issue number, e.g. -Issue 12. Nothing was written and nothing was sent." }
+        Require-Param $Id 'Id'
+        if ($Id -notmatch '^S\d{4}$') {
+            Fail 90 "-Id '$Id' is not one signal id. The attach form takes exactly one, e.g. -Id S0007. Nothing was written and nothing was sent."
+        }
+        $atRepo = Get-SignalsDestination
+        if ([string]::IsNullOrWhiteSpace($atRepo)) { Fail 90 $NoDestinationText }
+        $atGh = Resolve-Gh
+        if ($null -eq $atGh) {
+            Fail 90 'GitHub CLI not found. Looked on PATH and in the standard install locations. Install it, or attach the issue from a shell where gh resolves.'
+        }
+        Enter-WriteLock $SignalsHome 'the signal store'
+        $atPath = Join-Path $SignalsHome "$Id.json"
+        if (-not (Test-Path -LiteralPath $atPath)) { Fail 94 "Signal '$Id' does not exist. Nothing was written and nothing was sent." }
+        $atSig = Read-Json $atPath
+        if ($null -eq $atSig) { Fail 96 "Signal '$Id' did not parse to an object. The file at '$atPath' is empty or truncated." }
+        if ($atSig.state -ne 'OPEN') {
+            Fail 90 "Signal '$Id' is $($atSig.state), not OPEN. Only an open record is attached to an issue. Nothing was written and nothing was sent."
+        }
+        $atHeld = Get-Prop $atSig 'issue' $null
+        if ($null -ne $atHeld) {
+            Fail 90 "Signal '$Id' already holds issue #$atHeld on $(Get-SignalIssueRepo $atSig $atRepo). A record with a link is re-pointed with -From, never attached again. Nothing was written and nothing was sent."
+        }
+        foreach ($atOther in @(Get-Signals -Slug '' -FilterKind '')) {
+            if ((Get-Prop $atOther 'issue' $null) -ne $Issue) { continue }
+            if (-not (Test-SameRepo (Get-SignalIssueRepo $atOther $atRepo) $atRepo)) { continue }
+            Fail 90 "Issue #$Issue on $atRepo is already held here as signal $($atOther.id). One issue, one local record. Nothing was written and nothing was sent."
+        }
+        # THE OUTWARD GUARD, after both resolvers and every local refusal, so it changes only WHY the
+        # read is skipped.
+        $atBlocked = Test-OutwardBlocked
+        if ($null -ne $atBlocked) {
+            Fail 90 (Get-OutwardBlockedMessage -OwReason $atBlocked `
+                -OwCommands @("gh issue view $Issue --repo $atRepo") `
+                -OwAssurance 'gh WAS found and a destination WAS chosen - this refusal says nothing about either. Nothing was read and no signal record was written.')
+        }
+        $atRead = Read-RelinkIssue -RiGh $atGh -RiRepo $atRepo -RiNum $Issue
+        if (-not $atRead.Ok) { Fail 90 "Could not read issue #$Issue on $($atRepo): $($atRead.Note). Nothing was written." }
+        # A record with no link may have been pushed by either builder, so either title matches; a
+        # record that stored the title it was published with is compared with that alone.
+        $atWant = @()
+        if ([string](Get-Prop $atSig 'issueTitle' '') -ne '') { $atWant += (Get-PublishedTitle $atSig) }
+        else { $atWant += (Format-IssueTitleLegacy $atSig); $atWant += (Format-IssueTitle $atSig) }
+        $atMatch = $false
+        foreach ($atOne in $atWant) {
+            if ([string]::Equals($atRead.Found, (([string]$atOne -replace '\s+', ' ').Trim()), [System.StringComparison]::Ordinal)) { $atMatch = $true }
+        }
+        $atLine = "$Id  attach #$Issue on $atRepo  MATCH"
+        if (-not $atMatch) { $atLine = "$Id  attach #$Issue on $atRepo  MISMATCH  (title there: $($atRead.Found))" }
+        Write-Output $atLine
+        if (-not $Apply) {
+            if ($atMatch) { Say "PREVIEW ONLY. Re-run with -Apply to attach issue #$Issue on $atRepo to $Id." }
+            else { Say "PREVIEW ONLY. The titles differ. Attach it only if this issue IS this record's report: re-run with -Apply -Detail '<why it is this record's issue>'." }
+            exit 0
+        }
+        if (-not $atMatch -and [string]::IsNullOrWhiteSpace($Detail)) {
+            Fail 90 "The issue's title does not match signal '$Id', so it is not attached without a reason: re-run with -Detail '<why it is this record's issue>', which is recorded on it. Nothing was written."
+        }
+        Set-Prop $atSig 'issue' $Issue
+        Set-Prop $atSig 'issueUrl' (Format-IssueLink $atRepo $Issue)
+        Set-Prop $atSig 'issueTitle' $atRead.Found
+        $atFields = @('issue', 'issueUrl', 'issueTitle')
+        if (-not $atMatch) {
+            Set-Prop $atSig 'attachReason' ([pscustomobject]@{ at = (Now); reason = $Detail.Trim() })
+            $atFields += 'attachReason'
+        }
+        Write-SignalFields $atPath $atSig $atFields
+        Say "Attached issue #$Issue on $atRepo to $($Id): the record now holds its number, link and title."
+        exit 0
+    }
+
     Require-Param $From 'From'
     $rlFrom = $From.Trim()
     if (-not (Test-RepoSlug $rlFrom)) {
@@ -6537,26 +6971,13 @@ switch ($Command) {
         $rlNew = Format-IssueLink $rlTo $rlNum
         $rlStatus = 'NOT READ'
         $rlNote = ''
-        $rlView = Invoke-Native -Exe $rlGh -Arguments @('issue','view',"$rlNum",'--repo',$rlTo,'--json','number,title,state,url')
-        if ($rlView.Code -ne 0) {
-            $rlWhy = ''
-            foreach ($rlLn in @($rlView.Output)) { if (-not [string]::IsNullOrWhiteSpace([string]$rlLn)) { $rlWhy = ([string]$rlLn).Trim(); break } }
-            if ($rlWhy.Length -gt 160) { $rlWhy = $rlWhy.Substring(0, 157) + '...' }
-            $rlNote = "gh exited $($rlView.Code): $rlWhy"
-        }
+        $rlRead = Read-RelinkIssue -RiGh $rlGh -RiRepo $rlTo -RiNum $rlNum
+        if (-not $rlRead.Ok) { $rlNote = $rlRead.Note }
         else {
-            $rlIssue = $null
-            try { $rlIssue = $rlView.Text | ConvertFrom-Json } catch { $rlIssue = $null }
-            # An empty response parses to $null WITHOUT throwing.
-            if ($null -eq $rlIssue -or $null -eq (Get-Prop $rlIssue 'title' $null)) {
-                $rlNote = 'gh returned no readable title'
-            }
-            else {
-                $rlFound = ([string]$rlIssue.title -replace '\s+', ' ').Trim()
-                $rlBuilt = ((Format-IssueTitle $rlSig) -replace '\s+', ' ').Trim()
-                if ([string]::Equals($rlFound, $rlBuilt, [System.StringComparison]::Ordinal)) { $rlStatus = 'MATCH' }
-                else { $rlStatus = 'MISMATCH'; $rlNote = "title there: $rlFound" }
-            }
+            $rlFound = $rlRead.Found
+            $rlBuilt = ((Get-PublishedTitle $rlSig) -replace '\s+', ' ').Trim()
+            if ([string]::Equals($rlFound, $rlBuilt, [System.StringComparison]::Ordinal)) { $rlStatus = 'MATCH' }
+            else { $rlStatus = 'MISMATCH'; $rlNote = "title there: $rlFound" }
         }
         if ($rlStatus -eq 'MATCH') { $rlMatch++ } elseif ($rlStatus -eq 'MISMATCH') { $rlMismatch++ } else { $rlUnread++ }
         $rlIsNamed = $rlNamed -contains $rlSig.id
@@ -6944,6 +7365,12 @@ switch ($Command) {
             }
             Write-Output ("      JUDGED {0} {1} {2}{3}{4}: {5}" -f (Get-Prop $jg 'as' '?'), (Get-Prop $jg 'at' '?'), (Get-Prop $jg 'phase' '?'), $jgSuffix, $jgReview, (Get-Prop $jg 'detail' ''))
         }
+        # SIGHTINGS AFTER THE JUDGEMENTS AND BEFORE THE TERMINAL LINE, appended so every row a stored
+        # record already prints stays where it is; a record with none prints exactly what it did.
+        foreach ($sgLine in @(Get-SightingList $s)) {
+            $sgPosted = if (Test-SightingPending $sgLine) { '' } else { ' POSTED' }
+            Write-Output ("      SEEN {0} {1} {2}{3}: {4}" -f (Get-Prop $sgLine 'at' '?'), (Get-Prop $sgLine 'project' '?'), (Get-Prop $sgLine 'phase' '?'), $sgPosted, (Get-Prop $sgLine 'detail' ''))
+        }
         if ($s.state -ne 'OPEN') {
             # The scope suffix is OPTIONAL and appears only where the record carries the
             # key, which older records do not. Guarded on non-empty rather than on presence,
@@ -6962,6 +7389,7 @@ switch ($Command) {
     Write-Output "  JUDGED = read and judged with NO terminal verdict - the signal is still open"
     Write-Output "  DEPRIORITISED = judged real and consciously not scheduled; CONFIRMED = judged real, still queued"
     Write-Output "  UNSCHEDULED = deprioritised with no return date; 'review <date>' = when it is read again; DUE = that date has arrived"
+    Write-Output "  SEEN = the defect seen again, recorded with 'signal -Id'; POSTED = sent to its issue as a comment"
     Say "$($open.Count) open of $($all.Count) total; $($unpushedOpen.Count) open signal(s) not yet pushed."
     Say $sigReviewLine
     exit 0
@@ -7187,9 +7615,9 @@ switch ($Command) {
                     -OwAssurance 'gh WAS found and a destination WAS chosen - this says nothing about either. The local resolution IS recorded.'))
             }
             else {
-                # THE COMMENT TRAVELS IN A FILE, NOT AS A NATIVE ARGUMENT. Same defect and the
-                # same fix as 'signals-push' above, whose comment block carries the
-                # measurement. Measured against a compiled argument-counting receiver: a
+                # THE COMMENT TRAVELS ON STANDARD INPUT, NOT AS A NATIVE ARGUMENT. Same defect and
+                # the same fix as 'signals-push' above, whose comment block carries the
+                # measurement, and no temp file either, for the same reason. Measured against a compiled argument-counting receiver: a
                 # -Detail quoting a heading - which charter P8 actively produces - arrived as
                 # EIGHT arguments instead of seven, the quotes stripped, the comment truncated
                 # at the first quoted word and the remainder delivered to gh as a stray
@@ -7229,13 +7657,9 @@ switch ($Command) {
                     }
                     else {
                         if ($rsClearGiven -and $rsFound.Count -eq 0) { Say '  -Clearance is not needed: the closing comment has no findings, so nothing was cleared or recorded.' }
-                        $tmp = Join-Path $env:TEMP ("keel-resolve-" + $Id + ".json")
-                        Write-TextNoBom $tmp ([ordered]@{ body = $commentBody } | ConvertTo-Json -Depth 6)
                         # --jq for the same reason as signals-push: the response echoes the body
                         # back, and signal prose can itself contain a github.com issues URL.
-                        $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$rsIssueRepo/issues/$issueNum/comments",'--input',$tmp,'--jq','.html_url')
-                        # Record first, then clean up through the helper that cannot throw - the
-                        # same order and the same reason as signals-push.
+                        $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$rsIssueRepo/issues/$issueNum/comments",'--input','-','--jq','.html_url') -NativeInput @(([ordered]@{ body = $commentBody } | ConvertTo-Json -Depth 6))
                         if ($res.Code -eq 0) {
                             Set-Prop $sig 'issueCommentedAt' (Now)
                             $rsFields = @('issueCommentedAt')
@@ -7245,7 +7669,6 @@ switch ($Command) {
                             }
                             Write-SignalFields $sp $sig $rsFields
                         }
-                        Remove-KeelTempFile $tmp
                         if ($res.Code -ne 0) {
                             $commentOk = $false
                             Say "  Issue #$issueNum NOT closed: the closing comment could not be posted - $($res.Text)"

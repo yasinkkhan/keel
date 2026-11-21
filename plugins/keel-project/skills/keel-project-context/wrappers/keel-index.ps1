@@ -292,7 +292,13 @@ function Get-DocFacts {
     }
     if (-not $title) { $title = [System.IO.Path]::GetFileNameWithoutExtension($File.Name) }
 
-    $hash = (Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.Substring(0, 12).ToLower()
+    # .NET rather than the file-hashing cmdlet: that cmdlet lives in a module a Windows PowerShell
+    # child does not load when it inherits PowerShell 7's module path, and the rebuild then failed. The
+    # same SHA-256, the same first 12 lowercase hex characters, so every stored hash still compares.
+    $hashAlg = [System.Security.Cryptography.SHA256]::Create()
+    try { $hashHex = -join ($hashAlg.ComputeHash([System.IO.File]::ReadAllBytes($File.FullName)) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $hashAlg.Dispose() }
+    $hash = $hashHex.Substring(0, 12)
 
     return [pscustomobject]@{
         rel      = $rel

@@ -127,8 +127,23 @@ A project session **never** edits `plugins/**` (charter P25). The charter gate b
 queue is the sanctioned path.
 
 ```
-keel-state.ps1 signal -Phase W<n>.<p> -Kind <unsafe|refusal|wrong-doc|gap|friction> -Detail "<what>" -Evidence "<the command and its actual output, or a path>"
+keel-state.ps1 signal -Phase W<n>.<p> -Kind <unsafe|refusal|wrong-doc|gap|friction> -Title "<the issue title, ten words or so>" -Detail "<what>" -Evidence "<the command and its actual output, or a path>"
 ```
+
+`-Title` is the title the report's issue will carry, so write one a triager can read at a glance; the
+whole detail goes in the issue's body. Without it the title is cut from the detail's first sentence.
+
+**If the finding is an open signal seen again, record it on that signal rather than filing a second
+one.** Find it with `keel-state.ps1 signals`, then:
+
+```
+keel-state.ps1 signal -Id <open signal id> -Phase W<n>.<p> -Detail "<what happened this time>" -Evidence "<the command and its actual output, or a path>"
+```
+
+That appends a dated sighting to the signal's record, with the same evidence rules as a new signal,
+and the next `signals-push` posts it as a comment on the signal's issue. A second record of one defect
+splits its evidence across two issues, and a sighting from another project is the second project the
+`n=2` kinds below wait for. A defect seen again after its signal was resolved is a new signal.
 
 **Both `-Phase` and `-Evidence` are mandatory (exit 97), and that is the whole point.** A signal
 cites the moment it came from. Wishes are not signals, and a queue of wishes is a queue nobody
