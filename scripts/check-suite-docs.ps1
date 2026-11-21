@@ -156,6 +156,14 @@ Write-Output 'check-suite-docs'
 # whole word (letters, digits and underscore are word characters) and case-sensitively.
 # That form exists for an entry that is also an ordinary word.
 #
+# A SECOND READER, DECLARED HERE BECAUSE THIS IS THE FORMAT'S HOME. The state wrapper,
+# plugins/keel-workflow/skills/keel-orchestrator/wrappers/keel-state.ps1, reads the same file
+# before signals-push or resolve-signal -CloseIssue publishes anything (its Read-PrivateNameList
+# and Get-PnMatcher), by the same two rules, and an entry this section cannot check is refused
+# there too. A shipped plugin cannot call this script, so the format is read twice: change it here
+# and change it there. scripts/test-signal-judgement.ps1 (group PUBLISH) runs this section and the
+# wrapper over one fixture list and one text and compares the list lines each flags.
+#
 # NO LIST, NO CHECK, AND IT SAYS SO ON EVERY RUN. A newcomer's clone has no list, and
 # refusing every commit there would make the repo unusable to anyone but its author.
 # So a missing list passes - but prints one line saying the check did not run, because
@@ -1322,7 +1330,7 @@ else {
 # --- 14. the outward-act guard still behaves: run its committed suite --------
 #
 # The third sibling, and a sibling for the reason sections 9 and 11 are siblings
-# rather than one file: scripts/test-outward-guard.ps1's subject is the SIX
+# rather than one file: scripts/test-outward-guard.ps1's subject is the SEVEN
 # outward code points, which share no machinery with quarantine's three (a
 # per-project keel.json flag) or with the charter gate's marker file. One file
 # answering three unrelated questions is the P10 error, and each suite's case
@@ -1396,7 +1404,7 @@ if ($Strict) {
 # what the signal RECORD holds and what 'signals' prints - the judge-signal
 # append, refusals guarding it, and the 'addresses' key resolve-signal persists.
 # That shares no machinery with the charter gate's marker file, with
-# quarantine's per-project keel.json flag, or with the six outward invocations,
+# quarantine's per-project keel.json flag, or with the seven outward invocations,
 # and judge-signal makes no process call at all. One file answering two unrelated
 # questions is the charter P10 error and each suite's case count would stop
 # meaning one thing.

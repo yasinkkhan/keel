@@ -4,6 +4,52 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.83.0 - 2026-11-20
+
+- **`keel-workflow` 0.75.0: a report is checked before it is published, and names its machine by a
+  code.** `signals-push` sent each record's title and body as written, and `resolve-signal
+  -CloseIssue` posted its comment the same way; nothing read the text in between. A record filed on
+  a machine carries that machine's name in the body's Machine row, and its detail and evidence can
+  carry a user folder path or a name the operator keeps private, so a push could publish any of them.
+  - **What is checked.** The exact title and body a push would send, and the comment a close would
+    post, for three things: an entry of `%USERPROFILE%\.keel\private-names.txt`, matched as the
+    product's own private-names check matches it (anywhere and in any case, or a `word:` entry as a
+    whole word with case); this machine's name, as a whole word in any case; and a user folder path,
+    a drive letter and `Users` in any slash form, the JSON-escaped double backslash and the
+    `/c/Users` form included. With no list, the output says the list was not checked and the other
+    two checks still run. A list entry that check cannot read (empty, holding a non-ASCII character or
+    a double quote) is a finding until its line is rewritten, as that check refuses it too.
+  - **What a finding shows.** Its category, its list line for a list entry, and where it is: the
+    title, or a numbered line of the body or comment. Never the matched text, because command output
+    gets pasted into the places this protects. The preview prints each signal's findings after its
+    body.
+  - **Whether the destination is public.** Both routes print `Destination visibility: public`,
+    `private` or `could not tell`, read with `gh repo view <slug> --json visibility` before
+    anything is sent. It informs and never decides: a finding holds on a private repo too. The read
+    honours `KEEL_OUTWARD` and fails open: blocked, failed or unclear, it says `could not tell`
+    and the verb goes on. The preview now makes this one read.
+  - **The hold, a tightening.** `signals-push -Apply` now sends nothing while any signal it would
+    push holds a finding, and exits 95 naming them, so a push that succeeded before can now be
+    refused. To send one anyway: `signals-push -Apply -Id <id> -Clearance "<why it may be
+    published>"`. A clearance covers that one signal, needs `-Id` (exit 90 without it) and a reason
+    (exit 95 with none), and is written to the record as `pushClearance`, with its time, reason and
+    number of findings. `resolve-signal -CloseIssue` with a finding in its comment records the
+    resolution, posts nothing, leaves the issue open and exits 0; re-running the same command with
+    `-Clearance "<why>"` posts the comment and closes the issue, recording `commentClearance`.
+    `-Clearance` on `resolve-signal` without `-CloseIssue` exits 90.
+  - **The machine code.** A published issue's Machine row now shows this machine's code, `m-` and
+    eight hexadecimal characters: random, made on first need and kept in `machine-code.txt` in the
+    state home, and the same on every report from that state home. A preview may create that file. The
+    record's own `machine` field still holds the name, locally. A `machine-code.txt` that holds no
+    code is refused at exit 96; delete it and a new code is made.
+  - **What a machine owes after updating.** Nothing until a push is held. Then preview that signal,
+    read each finding against the body above it, and either leave it unsent or clear that one signal
+    with the operator's reason.
+  - The outward-call suite now counts seven calls that leave the machine, the visibility read being
+    the seventh. The signal suite gains a group for these checks, one row of which runs the product's
+    private-names check and this one over the same list and text and compares the list lines each
+    flags.
+
 ## marketplace 0.82.0 - 2026-11-20
 
 - **`keel-workflow` 0.74.0: a signal's GitHub issue is its repo and its number, and a new verb

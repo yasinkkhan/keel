@@ -171,6 +171,12 @@ and do not choose a destination for the operator.
 **Read the preview.** It is the last point at which something that should not leave the machine can
 be stopped. Show it to the human and wait (charter P6); never run `-Apply` unprompted.
 
+**The preview lists findings, and `-Apply` refuses at exit 95 while one stands.** A finding is an
+entry of the machine's private-names list, its name or a user folder path in the text that would be
+sent, named by its place, never by its text. A `-Clearance` reason that sends a signal anyway is the
+operator's answer for that one signal, never yours; see "Signals cross machines" in
+`keel-orchestrator/SKILL.md`.
+
 **Filing a signal does not change keel and must not be described as if it did.** Say: *"filed S0007
 locally; previewed and pushed as issue #12; it will be triaged in a keel session."*
 

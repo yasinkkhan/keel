@@ -109,6 +109,11 @@ param(
     # The repo a signal record's issues moved FROM, for 'signals-relink'. The repo they moved to is
     # -Repo, or the stored destination.
     [string]$From,
+    # The reason a finding may be published anyway, for 'signals-push -Apply -Id <id>' and
+    # 'resolve-signal -CloseIssue': it clears that one signal's findings and is recorded on it. A
+    # string and not a switch, because it carries the reason. NOT -Clear, a switch on two verbs that
+    # carries no text, and NOT -Detail, which is resolve-signal's resolution.
+    [string]$Clearance,
     [string]$Name,
     [string]$RepoPath,
     [string]$Branch,
@@ -133,6 +138,15 @@ $SignalsHome  = Join-Path $KeelHome 'signals'
 # Where this machine's signals are sent: one line, owner/name, written only by 'signals-target'.
 # Under the state home on purpose: a fixture that overrides USERPROFILE loses it.
 $SignalsTargetFile = Join-Path $KeelHome 'signals-target.txt'
+# This machine's code, shown in a published report in place of its name (Get-MachineCode). Under the
+# state home for the same reason as the destination: a fixture that overrides USERPROFILE gets its own.
+$MachineCodeFile = Join-Path $KeelHome 'machine-code.txt'
+# The per-machine list of private names. Its format has one home, the comment on section 16 of
+# scripts/check-suite-docs.ps1; this wrapper is its second reader (Read-PrivateNameList).
+$PrivateNamesFile = Join-Path $KeelHome 'private-names.txt'
+$script:PrivateNamesRead    = $false
+$script:PrivateNamesMissing = $false
+$script:PrivateNameCache    = @()
 
 $IterationCap = 3
 
@@ -3450,14 +3464,15 @@ function Resolve-Gh {
 # would reach the real keel repository. The destination is therefore
 # $SignalsTargetFile, under $KeelHome, so a scratch home has none unless its fixture
 # sets one, and with none nothing is sent. The guard stays: a fixture that DOES set a
-# destination is still a sandboxed run. An AST parse of this whole file finds SIX
+# destination is still a sandboxed run. An AST parse of this whole file finds SEVEN
 # process invocations across FIVE verbs that leave this machine - the five gh calls in
-# signals-push, adopt-signal, signals-relink and resolve-signal -CloseIssue (two of them), and
-# the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
+# signals-push, adopt-signal, signals-relink and resolve-signal -CloseIssue (two of them), the
+# gh repo view in Get-DestinationVisibility that signals-push and resolve-signal -CloseIssue both
+# reach, and the git ls-remote in Get-UnpushedReading reached from 'status'. 'gh'
 # never appears as a command name here, because Invoke-Native applies the call
 # operator to a variable, so a name-based search cannot enumerate this surface.
 #
-# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the six
+# THE DETECTION RULE HAS ONE HOME (charter P10). This function is it; the seven
 # call sites ask it and report what it says. A run is sandboxed when $KeelHome
 # resolves inside $env:TEMP, compared as FULL paths, ordinal and
 # case-insensitive. On a default Windows install TEMP is <USERPROFILE>\AppData\Local\Temp,
@@ -3487,17 +3502,18 @@ function Resolve-Gh {
 # needs in order to be able to fire at all.
 #
 # signals-push is the one site that goes further down, and for the opposite
-# reason: its guard sits AFTER the preview branch's exit 0. A preview makes no
-# outward call, and this guard may change only WHY the outward half is skipped,
-# never WHETHER the verb proceeds. Guarding at the pre-flight would flip a
-# local-only path from proceed-at-0 to refuse-at-90.
+# reason: its guard sits AFTER the preview branch's exit 0. A preview sends
+# nothing; its one outward call, the visibility read, asks this function itself
+# and fails open to 'could not tell'. This guard may change only WHY the outward
+# half is skipped, never WHETHER the verb proceeds, so guarding at the pre-flight
+# would flip a preview from proceed-at-0 to refuse-at-90.
 #
 # A GUARD INSIDE Invoke-Native IS REJECTED, on a measurement and not on taste:
 # signals-push -Apply does not Fail 90 on a gh error, it prints 'gh exited <n>',
 # continues the loop and exits 99 - so a guard there would change that verb's
 # exit code AND put the words 'gh exited' in front of a reader when gh never
 # ran, which is the same false statement the guard's own message is written to
-# avoid, arriving by another route. A backstop there IN ADDITION to these six is
+# avoid, arriving by another route. A backstop there IN ADDITION to these seven is
 # rejected under P13: a second enforcement mechanism for one rule, with no cited
 # failure behind it. What would make it correct is a cited instance of a seventh
 # outward call site being added to this wrapper without the guard.
@@ -3655,6 +3671,191 @@ function Format-IssueLink {
     return "https://github.com/$IlRepo/issues/$IlNumber"
 }
 
+# THE MACHINE CODE. A published report names the machine that filed it by this code, never by its
+# name: a machine's name is a private detail, and a report on a shared or public repo would publish
+# it. Random rather than derived from the name, because a derived code can be confirmed by anyone
+# who guesses the name. Made once, on first need, and the same on every report from this state home
+# after that. The record keeps the real name locally, in its 'machine' field.
+#
+# MADE THROUGH A TEMP FILE AND A MOVE, so two first uses at once cannot leave two codes: a move onto
+# a name that exists throws, and the loser reads the winner's file. A preview needs the code too, to
+# show the exact body (charter P6), so a preview may create this one file and writes nothing else.
+#
+# A FILE THAT DOES NOT HOLD A CODE IS REFUSED, NOT REPLACED. An empty, truncated or hand-edited file
+# replaced in silence would change this machine's identity in published reports without anyone
+# deciding it. The refusal names the file; deleting it makes a new code on the next push. An empty
+# file reads as $null without throwing, which is why the read is null-checked.
+function Get-MachineCode {
+    if (-not (Test-Path -LiteralPath $MachineCodeFile -PathType Leaf)) {
+        $mcNew = 'm-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 8)
+        $mcTmp = Join-Path $KeelHome ('machine-code.' + [System.Guid]::NewGuid().ToString('N') + '.tmp')
+        Write-TextNoBom $mcTmp $mcNew
+        try { [System.IO.File]::Move($mcTmp, $MachineCodeFile) }
+        catch { Remove-KeelTempFile $mcTmp }
+    }
+    $mcRaw = $null
+    try { $mcRaw = Get-Content -Raw -LiteralPath $MachineCodeFile } catch { $mcRaw = $null }
+    $mcText = ''
+    if ($null -ne $mcRaw) { $mcText = ([string]$mcRaw).Trim() }
+    if ($mcText -cnotmatch '^m-[0-9a-f]{8}$') {
+        Fail 96 "'$MachineCodeFile' does not hold a machine code (m- and eight lowercase hex characters). Delete it and a new code is made on the next push. Nothing was sent."
+    }
+    return $mcText
+}
+
+# WHAT A REPORT IS CHECKED FOR BEFORE IT LEAVES THE MACHINE. signals-push sends a record's title and
+# body, and resolve-signal -CloseIssue a comment, to a GitHub repo. A record written on this machine
+# can hold this machine's name, a user folder path or a name the operator keeps private, and once
+# published it cannot be taken back. So the exact text a call would send is checked first for three
+# things, and a finding holds the send until the operator clears it for that one signal.
+#
+# THE LIST IS SECTION 16'S, READ A SECOND TIME. %USERPROFILE%\.keel\private-names.txt is the
+# per-machine list that section 16 of scripts/check-suite-docs.ps1 refuses in the product's own
+# files, and its format has one home, that section's comment block. A shipped plugin cannot call a
+# product script, so this reads the same file by the same rules, and the coupling is declared in
+# both places. Section 16 searches file contents with git grep (-w -F for a 'word:' entry, -i -F for
+# a plain one) and matches paths and commit messages with its Get-PnRegex; Get-PnMatcher below is
+# that regex, which matches what both halves match. scripts/test-signal-judgement.ps1 (group
+# PUBLISH) runs section 16 and this check over one fixture list and one text and compares the list
+# lines each flags, so a change to one reader that the other does not follow fails there.
+#
+# AN ENTRY SECTION 16 CANNOT CHECK IS NOT CHECKED HERE EITHER, AND IT IS A FINDING. Section 16
+# refuses an entry that is empty once 'word:' is stripped, holds a byte above 127, or holds a double
+# quote, because it cannot pass it to git reliably, and that refusal stops every commit until the
+# line is rewritten. Matching such an entry here would make the two readers disagree on it, so it is
+# never matched, and it is a finding on every text, naming its list line, until the line is rewritten.
+#
+# A FINDING NEVER CARRIES THE TEXT IT FOUND. Command output is pasted into notes, issues and
+# transcripts, which are the places this check protects. A finding names its category, the list
+# line for a list entry, and where it is: the title, or a numbered line of the body or comment.
+function Read-PrivateNameList {
+    if ($script:PrivateNamesRead) { return $script:PrivateNameCache }
+    $script:PrivateNamesRead = $true
+    $rpEntries = @()
+    if (-not (Test-Path -LiteralPath $PrivateNamesFile -PathType Leaf)) {
+        $script:PrivateNamesMissing = $true
+    }
+    else {
+        $rpRaw = @(Get-Content -LiteralPath $PrivateNamesFile -Encoding UTF8)
+        for ($rpI = 0; $rpI -lt $rpRaw.Count; $rpI++) {
+            $rpText = ([string]$rpRaw[$rpI]).Trim()
+            if ($rpText -eq '' -or $rpText.StartsWith('#')) { continue }
+            $rpWord = $false
+            if ($rpText.StartsWith('word:')) { $rpWord = $true; $rpText = $rpText.Substring(5).Trim() }
+            $rpUsable = ($rpText -ne '') -and ($rpText -notmatch '[^\x00-\x7F]') -and (-not $rpText.Contains('"'))
+            $rpEntries += [pscustomobject]@{ Line = ($rpI + 1); Word = $rpWord; Text = $rpText; Usable = $rpUsable }
+        }
+    }
+    $script:PrivateNameCache = $rpEntries
+    return $rpEntries
+}
+
+# Section 16's two rules, as its Get-PnRegex builds them: a 'word:' entry matches as a whole word
+# (letters, digits and underscore are word characters, as for git grep -w) and with case; a plain
+# entry matches anywhere, in any case.
+function Get-PnMatcher {
+    param($PmEntry)
+    $pmEsc = [regex]::Escape($PmEntry.Text)
+    if ($PmEntry.Word) { return [regex]::new("(?<![A-Za-z0-9_])$pmEsc(?![A-Za-z0-9_])") }
+    return [regex]::new($pmEsc, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+}
+
+# A user folder path in any slash form: a drive letter, a colon and any run of slashes or
+# backslashes - so the JSON-escaped double backslash too - or the /c/ form a POSIX shell prints,
+# then Users as a whole word, in any case.
+$UserPathPattern = '(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users(?![A-Za-z0-9_])'
+
+$FindingListEntry  = 'a private-names entry'
+$FindingUnreadable = 'a private-names entry this check cannot read'
+$FindingMachine    = "this machine's name"
+$FindingUserPath   = 'a user folder path'
+
+# One finding per category and list line, with every place it occurs: the title is built from the
+# same detail the body carries, so a detail counted once per place would count twice.
+function Get-OutboundFindings {
+    param([string]$ObTitle, [string]$ObBody, [string]$ObBodyName)
+    $obIc = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    $obParts = @()
+    if (-not [string]::IsNullOrEmpty($ObTitle)) { $obParts += [pscustomobject]@{ Place = 'title'; Text = $ObTitle } }
+    $obLines = @(([string]$ObBody) -split "`n")
+    for ($obI = 0; $obI -lt $obLines.Count; $obI++) {
+        $obParts += [pscustomobject]@{ Place = "$ObBodyName line $($obI + 1)"; Text = [string]$obLines[$obI] }
+    }
+    $obChecks = @()
+    foreach ($obEntry in @(Read-PrivateNameList)) {
+        if ($obEntry.Usable) { $obChecks += [pscustomobject]@{ Category = $FindingListEntry; ListLine = $obEntry.Line; Rx = (Get-PnMatcher $obEntry) } }
+        else { $obChecks += [pscustomobject]@{ Category = $FindingUnreadable; ListLine = $obEntry.Line; Rx = $null } }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) {
+        $obName = [regex]::Escape($env:COMPUTERNAME.Trim())
+        $obChecks += [pscustomobject]@{ Category = $FindingMachine; ListLine = 0; Rx = [regex]::new("(?<![A-Za-z0-9_])$obName(?![A-Za-z0-9_])", $obIc) }
+    }
+    $obChecks += [pscustomobject]@{ Category = $FindingUserPath; ListLine = 0; Rx = [regex]::new($UserPathPattern, $obIc) }
+    $obFound = @()
+    foreach ($obCheck in $obChecks) {
+        $obPlaces = @()
+        if ($null -eq $obCheck.Rx) { $obPlaces = @('every text, until that list line is rewritten') }
+        else {
+            foreach ($obPart in $obParts) { if ($obCheck.Rx.IsMatch($obPart.Text)) { $obPlaces += $obPart.Place } }
+        }
+        if ($obPlaces.Count -gt 0) { $obFound += [pscustomobject]@{ Category = $obCheck.Category; ListLine = $obCheck.ListLine; Places = $obPlaces } }
+    }
+    return $obFound
+}
+
+# Prints a text's findings and returns nothing: a function that both printed and returned a value
+# would hand its caller every printed line as well.
+function Write-OutboundFindings {
+    param([string]$WfId, $WfFindings, [bool]$WfCleared, [string]$WfHeld)
+    $wfAll = @($WfFindings)
+    if ($wfAll.Count -eq 0) { Write-Output 'FINDINGS: 0'; return }
+    $wfState = "HELD - $WfHeld"
+    if ($WfCleared) { $wfState = 'cleared by -Clearance on this call' }
+    Write-Output "FINDINGS: $($wfAll.Count) - $wfState"
+    foreach ($wfF in $wfAll) {
+        $wfWhat = $wfF.Category
+        if ($wfF.ListLine -gt 0) { $wfWhat += ", list line $($wfF.ListLine)" }
+        Write-Output ("  $WfId  $($wfWhat): " + (@($wfF.Places) -join ', '))
+    }
+}
+
+function Write-ListCheckLine {
+    $null = Read-PrivateNameList
+    if ($script:PrivateNamesMissing) {
+        Say "private names: NOT CHECKED - no list at %USERPROFILE%\.keel\private-names.txt; this machine's name and user folder paths are still checked."
+    }
+}
+
+# WHETHER THE DESTINATION IS PUBLIC, said before anything is sent. ONE call, here, for both routes
+# that publish text, so the outward surface grows by one, which scripts/test-outward-guard.ps1
+# counts. The answer INFORMS AND NEVER DECIDES: a finding holds on a private repo too, because
+# private repos get shared and made public. It honours the outward guard and FAILS OPEN, as status's
+# remote reading does: under the guard, on a gh error, or on any answer but PUBLIC or PRIVATE it says
+# 'could not tell' and the verb goes on exactly as it would have. GitHub answers a repo the caller
+# cannot see as one that does not exist, so a failed read cannot say which of the two it was.
+function Get-DestinationVisibility {
+    param([string]$DvGh, [string]$DvRepo)
+    $dvBlocked = Test-OutwardBlocked
+    if ($null -ne $dvBlocked) { return [pscustomobject]@{ Word = 'could not tell'; Why = "the read was not made: $dvBlocked" } }
+    $dvRes = Invoke-Native -Exe $DvGh -Arguments @('repo', 'view', $DvRepo, '--json', 'visibility', '--jq', '.visibility')
+    if ($dvRes.Code -ne 0) { return [pscustomobject]@{ Word = 'could not tell'; Why = "gh exited $($dvRes.Code)" } }
+    $dvAnswer = ''
+    foreach ($dvLn in @($dvRes.Output)) { if (-not [string]::IsNullOrWhiteSpace($dvLn)) { $dvAnswer = $dvLn.Trim(); break } }
+    if ($dvAnswer -ceq 'PUBLIC') { return [pscustomobject]@{ Word = 'public'; Why = '' } }
+    if ($dvAnswer -ceq 'PRIVATE') { return [pscustomobject]@{ Word = 'private'; Why = '' } }
+    $dvShown = 'an answer that is neither PUBLIC nor PRIVATE'
+    if ($dvAnswer -cmatch '^[A-Z]{1,20}$') { $dvShown = "GitHub answered $dvAnswer" }
+    return [pscustomobject]@{ Word = 'could not tell'; Why = $dvShown }
+}
+
+function Write-VisibilityLine {
+    param([string]$VlGh, [string]$VlRepo)
+    $vlVis = Get-DestinationVisibility -DvGh $VlGh -DvRepo $VlRepo
+    $vlTail = ''
+    if ($vlVis.Why -ne '') { $vlTail = " - $($vlVis.Why)" }
+    Say "Destination visibility: $($vlVis.Word) ($VlRepo)$vlTail. It informs and never decides: a finding holds on a private repo too."
+}
+
 function Format-IssueBody {
     param($Sig)
     $lines = @()
@@ -3664,7 +3865,7 @@ function Format-IssueBody {
     $lines += "|---|---|"
     $lines += "| Kind | ``$($Sig.kind)`` |"
     $lines += "| Filed | $($Sig.created) |"
-    $lines += "| Machine | $(Get-Prop $Sig 'machine' 'unknown') |"
+    $lines += "| Machine | $(Get-MachineCode) |"
     $lines += "| keel version | $(Get-Prop $Sig 'keelVersion' 'unknown') |"
     $lines += "| Evidence mode | $(Get-Prop $Sig 'evidenceMode' 'literal') |"
     $lines += ''
@@ -3756,6 +3957,14 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  'resolve-signal -CloseIssue' acts on that repo and refuses a -Repo naming another."
     Write-Output "  'signals-relink -From owner/name [-Repo owner/name]' re-points records whose issues moved"
     Write-Output "  under the same numbers, checked by title: a preview, then -Apply; -Id adds a mismatch."
+    Write-Output "  Before anything is sent, 'signals-push' checks the exact title and body for an entry of"
+    Write-Output "  ~/.keel/private-names.txt, this machine's name and user folder paths, and says whether the"
+    Write-Output "  destination is public, private or could not tell. A finding names its place and list line,"
+    Write-Output "  never its text. -Apply sends nothing while one stands (exit 95); -Apply -Id <id> -Clearance"
+    Write-Output "  '<why>' sends that one signal anyway, on the operator's answer, and records why on it."
+    Write-Output "  'resolve-signal -CloseIssue' checks its comment the same way and, on a finding, records the"
+    Write-Output "  resolution and leaves the issue alone until re-run with -Clearance. A published issue names"
+    Write-Output "  this machine by a random code kept in ~/.keel/machine-code.txt, never by its name."
     Write-Output "  'lift-cap' raises ONE phase's iteration cap on the operator's own words; the default"
     Write-Output "  cap is $IterationCap and nothing else changes it."
     Write-Output ""
@@ -5897,8 +6106,21 @@ switch ($Command) {
         Fail 90 'GitHub CLI not found. Looked on PATH and in the standard install locations. Install it, or pass -Repo and push by hand.'
     }
 
+    # A CLEARANCE IS FOR ONE SIGNAL AND CARRIES A REASON, so both are checked here, before any signal
+    # is read, and a refusal writes and sends nothing. Read through $PSBoundParameters, because a
+    # value of only spaces must refuse rather than read as absent.
+    $spClearGiven = $PSBoundParameters.ContainsKey('Clearance')
+    if ($spClearGiven -and [string]::IsNullOrWhiteSpace($Id)) {
+        Fail 90 '-Clearance clears the findings of ONE signal: name it with -Id <id>. Nothing was sent and no record was written.'
+    }
+    if ($spClearGiven -and [string]::IsNullOrWhiteSpace($Clearance)) {
+        Fail 95 "-Clearance needs the reason this signal's findings may be published, in the operator's words. Nothing was sent and no record was written."
+    }
+    $spHeldText = '-Apply sends nothing until it is cleared'
+
     # With -Apply the store lock is taken before any signal is read, so a judgement or a
-    # resolution made meanwhile waits rather than being written over. The preview writes nothing.
+    # resolution made meanwhile waits rather than being written over. The preview writes nothing
+    # to the store; it may create machine-code.txt, the one file Get-MachineCode makes on first need.
     if ($Apply) { Enter-WriteLock $SignalsHome 'the signal store' }
     $pending = @(Get-Signals -Slug '' -FilterKind '' | Where-Object { $_.state -eq 'OPEN' -and $null -eq (Get-Prop $_ 'issue' $null) })
 
@@ -5932,6 +6154,9 @@ switch ($Command) {
 
     if (-not $Apply) {
         Say "PREVIEW ONLY. $($pending.Count) signal(s) would become issues on $slug. Re-run with -Apply to create them."
+        Write-VisibilityLine -VlGh $gh -VlRepo $slug
+        Write-ListCheckLine
+        $spHeldIds = @()
         foreach ($s in $pending) {
             $rawLen  = "[signal:$($s.kind)] $($s.detail)".Length
             $shownTitle = Format-IssueTitle $s
@@ -5942,18 +6167,28 @@ switch ($Command) {
                 Write-Output "       (title truncated to $IssueTitleMaxChars chars from $rawLen - the full text is in the body below)"
             }
             Write-Output "BODY:"
-            Write-Output (Format-IssueBody $s)
+            $shownBody = Format-IssueBody $s
+            Write-Output $shownBody
+            $spFound = @(Get-OutboundFindings -ObTitle $shownTitle -ObBody $shownBody -ObBodyName 'body')
+            $spCleared = $spClearGiven -and ($s.id -eq $Id)
+            Write-OutboundFindings -WfId $s.id -WfFindings $spFound -WfCleared $spCleared -WfHeld $spHeldText
+            if ($spFound.Count -gt 0 -and -not $spCleared) { $spHeldIds += $s.id }
         }
         Write-Output ''
+        if ($spHeldIds.Count -gt 0) {
+            Say ("$($spHeldIds.Count) signal(s) hold findings, so -Apply would send nothing: " + ($spHeldIds -join ', ') +
+                 ". Each finding names a place in the text above, never the text. To send one anyway, on the operator's answer for that signal: -Apply -Id <id> -Clearance '<why it may be published>'.")
+        }
         Say 'Read the bodies above. Anything from a quarantined project must be a reference, not content.'
         exit 0
     }
 
     # THE OUTWARD GUARD, and it sits HERE rather than at the pre-flight above.
-    # Everything before this line is local: the preview exits 0 without sending a
-    # byte, so guarding it would flip a local-only path from proceed to refuse,
-    # which the guard must never do - it changes only WHY the outward half
-    # is skipped. Everything after this line is the loop that creates issues.
+    # The preview above sends nothing; its one outward call, the visibility read,
+    # asks the guard itself and fails open to 'could not tell'. So guarding the
+    # preview here would flip a path that proceeds into one that refuses, which the
+    # guard must never do - it changes only WHY the outward half is skipped.
+    # Everything after this line leads to the loop that creates issues.
     # It is still after Resolve-Gh and Get-SignalsDestination, so the message below
     # can truthfully say both succeeded.
     $owBlocked = Test-OutwardBlocked
@@ -5961,6 +6196,31 @@ switch ($Command) {
         Fail 90 (Get-OutwardBlockedMessage -OwReason $owBlocked `
             -OwCommands @("gh api --method POST repos/$slug/issues") `
             -OwAssurance 'gh WAS found and a destination WAS chosen - this refusal says nothing about either. Nothing was pushed and no signal record was written.')
+    }
+
+    Write-VisibilityLine -VlGh $gh -VlRepo $slug
+    Write-ListCheckLine
+
+    # THE HOLD. Every pending signal is checked on the exact title and body the loop below sends,
+    # before any of them is sent, and one uncleared finding sends nothing at all. Holding only that
+    # signal and sending the rest would make what one confirmation published depend on signals the
+    # operator did not read. Exit 95, 'a mandatory answer was not supplied': the answer missing is
+    # the clearance, which the wrapper can ask for and cannot judge. Nothing is written before this
+    # point, so a held run leaves every record as it was. Only finding lines are printed, never a body.
+    $spHeld = @()
+    $spCounts = @{}
+    foreach ($s in $pending) {
+        $spFound = @(Get-OutboundFindings -ObTitle (Format-IssueTitle $s) -ObBody (Format-IssueBody $s) -ObBodyName 'body')
+        $spCounts[$s.id] = $spFound.Count
+        if ($spFound.Count -eq 0) { continue }
+        $spCleared = $spClearGiven -and ($s.id -eq $Id)
+        Write-OutboundFindings -WfId $s.id -WfFindings $spFound -WfCleared $spCleared -WfHeld $spHeldText
+        if (-not $spCleared) { $spHeld += $s.id }
+    }
+    if ($spClearGiven -and $spCounts[$Id] -eq 0) { Say "-Clearance is not needed: $Id has no findings, so nothing was cleared or recorded." }
+    if ($spHeld.Count -gt 0) {
+        Fail 95 ("Nothing was sent and no record was written: $($spHeld.Count) signal(s) hold findings not cleared: " + ($spHeld -join ', ') +
+                 ". Read each with 'signals-push -Id <id>' (a preview). To send one anyway, on the operator's answer for that signal, re-run with -Apply -Id <id> -Clearance '<why it may be published>'. A clearance covers that one signal and is recorded on it.")
     }
 
     $failed = 0
@@ -6006,7 +6266,14 @@ switch ($Command) {
             Set-Prop $s 'issue' $num
             Set-Prop $s 'issueUrl' $urlText
             Set-Prop $s 'pushedAt' (Now)
-            Write-SignalFields (Join-Path $SignalsHome "$($s.id).json") $s @('issue', 'issueUrl', 'pushedAt')
+            $spFields = @('issue', 'issueUrl', 'pushedAt')
+            # A clearance used is recorded on the one record it covered, in the same write as the
+            # issue, so the record says what was published past a finding and why.
+            if ($spClearGiven -and ($s.id -eq $Id) -and $spCounts[$s.id] -gt 0) {
+                Set-Prop $s 'pushClearance' ([pscustomobject]@{ at = (Now); reason = $Clearance.Trim(); findings = $spCounts[$s.id] })
+                $spFields += 'pushClearance'
+            }
+            Write-SignalFields (Join-Path $SignalsHome "$($s.id).json") $s $spFields
             Say "$($s.id) -> issue #$num  $urlText"
         }
 
@@ -6709,6 +6976,16 @@ switch ($Command) {
     Require-Param $Detail 'Detail'
     $asUpper = $As.ToUpper()
 
+    # A clearance covers the closing comment, so it means nothing without -CloseIssue. Both checks
+    # run before anything is written; $PSBoundParameters so a value of only spaces refuses.
+    $rsClearGiven = $PSBoundParameters.ContainsKey('Clearance')
+    if ($rsClearGiven -and -not $CloseIssue) {
+        Fail 90 '-Clearance clears the findings in the closing comment, so it is only meaningful with -CloseIssue. Nothing was written.'
+    }
+    if ($rsClearGiven -and [string]::IsNullOrWhiteSpace($Clearance)) {
+        Fail 95 "-Clearance needs the reason the closing comment's findings may be published, in the operator's words. Nothing was written."
+    }
+
     $sp = Join-Path $SignalsHome "$Id.json"
     Enter-WriteLock $SignalsHome 'the signal store'
     if (-not (Test-Path -LiteralPath $sp)) { Fail 94 "Signal '$Id' does not exist." }
@@ -6935,22 +7212,45 @@ switch ($Command) {
                 $commentOk = $true
                 if ($null -eq (Get-Prop $sig 'issueCommentedAt' $null)) {
                     $commentBody = "Resolved as $($asUpper): $(Get-Prop $sig 'resolution' '')"
-                    $tmp = Join-Path $env:TEMP ("keel-resolve-" + $Id + ".json")
-                    Write-TextNoBom $tmp ([ordered]@{ body = $commentBody } | ConvertTo-Json -Depth 6)
-                    # --jq for the same reason as signals-push: the response echoes the body
-                    # back, and signal prose can itself contain a github.com issues URL.
-                    $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$rsIssueRepo/issues/$issueNum/comments",'--input',$tmp,'--jq','.html_url')
-                    # Record first, then clean up through the helper that cannot throw - the
-                    # same order and the same reason as signals-push.
-                    if ($res.Code -eq 0) {
-                        Set-Prop $sig 'issueCommentedAt' (Now)
-                        Write-SignalFields $sp $sig @('issueCommentedAt')
+                    # THE COMMENT IS CHECKED LIKE A PUSHED BODY, with the same visibility line. On an
+                    # uncleared finding neither the comment nor the close is made: the resolution is
+                    # already recorded above, and a re-run with -Clearance reaches this point again
+                    # through the retry path, since the issue is still open.
+                    Write-VisibilityLine -VlGh $gh -VlRepo $rsIssueRepo
+                    Write-ListCheckLine
+                    $rsFound = @(Get-OutboundFindings -ObTitle '' -ObBody $commentBody -ObBodyName 'comment')
+                    if ($rsFound.Count -gt 0) {
+                        Write-OutboundFindings -WfId $Id -WfFindings $rsFound -WfCleared $rsClearGiven -WfHeld 'the comment and the close are not made until it is cleared'
                     }
-                    Remove-KeelTempFile $tmp
-                    if ($res.Code -ne 0) {
+                    if ($rsFound.Count -gt 0 -and -not $rsClearGiven) {
                         $commentOk = $false
-                        Say "  Issue #$issueNum NOT closed: the closing comment could not be posted - $($res.Text)"
-                        Say '  Nothing was closed. Re-run the same command with -CloseIssue to retry.'
+                        Say "  Issue #$issueNum NOT commented on or closed: the closing comment holds $($rsFound.Count) finding(s), named above by place and never by text. The local resolution IS recorded."
+                        Say "  To post it anyway, on the operator's answer: re-run the same command with -Clearance '<why it may be published>'."
+                    }
+                    else {
+                        if ($rsClearGiven -and $rsFound.Count -eq 0) { Say '  -Clearance is not needed: the closing comment has no findings, so nothing was cleared or recorded.' }
+                        $tmp = Join-Path $env:TEMP ("keel-resolve-" + $Id + ".json")
+                        Write-TextNoBom $tmp ([ordered]@{ body = $commentBody } | ConvertTo-Json -Depth 6)
+                        # --jq for the same reason as signals-push: the response echoes the body
+                        # back, and signal prose can itself contain a github.com issues URL.
+                        $res = Invoke-Native -Exe $gh -Arguments @('api','--method','POST',"repos/$rsIssueRepo/issues/$issueNum/comments",'--input',$tmp,'--jq','.html_url')
+                        # Record first, then clean up through the helper that cannot throw - the
+                        # same order and the same reason as signals-push.
+                        if ($res.Code -eq 0) {
+                            Set-Prop $sig 'issueCommentedAt' (Now)
+                            $rsFields = @('issueCommentedAt')
+                            if ($rsClearGiven -and $rsFound.Count -gt 0) {
+                                Set-Prop $sig 'commentClearance' ([pscustomobject]@{ at = (Now); reason = $Clearance.Trim(); findings = $rsFound.Count })
+                                $rsFields += 'commentClearance'
+                            }
+                            Write-SignalFields $sp $sig $rsFields
+                        }
+                        Remove-KeelTempFile $tmp
+                        if ($res.Code -ne 0) {
+                            $commentOk = $false
+                            Say "  Issue #$issueNum NOT closed: the closing comment could not be posted - $($res.Text)"
+                            Say '  Nothing was closed. Re-run the same command with -CloseIssue to retry.'
+                        }
                     }
                 }
                 if ($commentOk) {

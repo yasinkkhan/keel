@@ -130,6 +130,19 @@ machine, across every project — so a confirmation naming one signal can carry 
 never read, which is a P6 failure and has held up an enactment before. `-Id` refuses
 rather than guessing: unknown id exits 94, and a malformed, already-pushed or non-OPEN id exits 90.
 
+**The preview is checked before you show it.** For each signal it lists `FINDINGS`: an entry of this
+machine's `private-names.txt`, this machine's name, or a user folder path, in the exact title and
+body that would be sent, each named by its place and list line and never by its text. One line says
+whether the destination is `public`, `private` or `could not tell`; it informs and never decides.
+`-Apply` sends nothing while any signal it would push holds an uncleared finding, and refuses at exit
+95 naming them. To send one anyway: `signals-push -Apply -Id <id> -Clearance "<why it may be
+published>"`, which clears that one signal and records the reason on it. **The reason is the
+operator's answer for that signal, never a session's:** show them the finding and the body and ask,
+as for `-Apply` itself. `resolve-signal -CloseIssue` checks its comment the same way; on a finding it
+records the resolution and leaves the issue open until it is re-run with `-Clearance`. A published
+issue names the machine by a random code kept in `machine-code.txt` in the state home, never by its
+name.
+
 **A signal's issue is its repo and its number.** The repo is read from the record's stored link,
 and a record with no link is read as on the destination the call uses. `adopt-signal` refuses only
 an issue already held here on the same repo; `resolve-signal -CloseIssue` comments on and closes the

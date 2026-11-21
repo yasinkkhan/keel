@@ -1,4 +1,4 @@
-# test-outward-guard.ps1 - the suite for the SIX outward code points: the process
+# test-outward-guard.ps1 - the suite for the SEVEN outward code points: the process
 # invocations in keel-state.ps1 that leave the machine.
 #
 # WHY THIS EXISTS AND WHY IT IS A SIBLING rather than three more cases inside
@@ -11,7 +11,7 @@
 # from it would need an argument that this reason does not apply, and there is none - the
 # outward guard shares no machinery with quarantine either.
 #
-# WHAT IT COVERS. Six process invocations across five verbs, found by an AST parse of the
+# WHAT IT COVERS. Seven process invocations across five verbs, found by an AST parse of the
 # whole wrapper - the parse Group 0 below runs on every run, so a seventh call added without a
 # row here fails this suite rather than going unnoticed:
 #
@@ -21,6 +21,13 @@
 #   4  resolve-signal -CloseIssue    gh issue close <n> --repo <slug>              exit 0
 #   5  status                        git -C <root> ls-remote origin <ref>          exit 0
 #   6  signals-relink                gh issue view <n> --repo <slug>               exit 90
+#   7  signals-push, and             gh repo view <slug> --json visibility         exit 0,
+#      resolve-signal -CloseIssue                                                  could not tell
+#
+# Row 7 is ONE call site, Get-DestinationVisibility, that two verbs reach: the visibility read
+# before anything is published. It fails open, so under the guard the verb goes on and says
+# 'could not tell' instead of refusing - which is why its rows (Group 8) assert that line and an
+# empty fake log rather than a refusal.
 #
 # Rows 3 and 4 are TWO CALLS INSIDE ONE VERB. A case that exercises the verb once and
 # asserts one declined command covers row 3 and leaves row 4 untested, which is why the
@@ -71,7 +78,8 @@
 # every child runs with that folder FIRST on PATH (the blind folder carries a copy). Program
 # Files cannot be hidden from a child (above), but Resolve-Gh asks PATH first, so the fake
 # always wins. No row is supposed to run gh at all - guarded rows stop at the guard, reason
-# controls stop at the destination check, the preview never calls it - so Invoke-Cases ends
+# controls stop at the destination check, the preview's one call, the visibility read, is
+# guarded and never made in a sandboxed home - so Invoke-Cases ends
 # by THROWING if the fake's log is not empty. The throw leaves no summary line, which
 # check-suite-docs.ps1 section 14 reports as a problem. Without the fake, a broken guard
 # would post fixture issues with the operator's own credentials.
@@ -114,7 +122,7 @@ $OgStateWrapper = Join-Path $OgRepoRoot 'plugins\keel-workflow\skills\keel-orche
 if ($AgainstWrapper -ne '') { $OgStateWrapper = (Resolve-Path -LiteralPath $AgainstWrapper).Path }
 
 # The outward invocations the header table lists. Group 0 compares the wrapper's AST against it.
-$OgDeclaredOutward = 6
+$OgDeclaredOutward = 7
 
 # By full path, deliberately: the reason-control limb empties PATH, and a bare
 # 'powershell.exe' would then fail to launch at all.
@@ -677,6 +685,38 @@ function Invoke-Cases {
     Add-Result 'G7-reason-control-other-refusal-still-produced' `
                (($OgG7Reason.Text -like "*$OgNoTarget*") -and (-not ($OgG7Reason.Text -like "*$OgGuardText*"))) `
                "exit $($OgG7Reason.Code), wanted '$OgNoTarget' PRESENT and the guard's text ABSENT"
+
+    # =====================================================================
+    # GROUP 8 - the visibility read (row 7)
+    # =====================================================================
+    # It fails open: under the guard the preview still exits 0, says 'could not tell' and names
+    # the guard's reason, and gh is never run. The reason control is the preview's other outcome on
+    # the same path, no destination chosen, which refuses before any visibility line is printed.
+    $OgG8Sig = Invoke-Wrapper -OgHome $OgHome -OgArgs @(
+        'signal', '-Kind', 'gap', '-Phase', 'W1.1',
+        '-Detail', 'visibility fixture signal', '-Evidence', 'scripts/test-outward-guard.ps1 - fixture',
+        '-Path', $OgRepo)
+    if ($OgG8Sig.Code -ne 0) { throw "fixture: the visibility group's signal could not be filed (exit $($OgG8Sig.Code))" }
+    $OgVisText = 'Destination visibility: could not tell'
+
+    $OgG8Case = Invoke-Wrapper -OgHome $OgHome -OgArgs @('signals-push', '-Path', $OgRepo)
+    $OgG8LogEmpty = (-not (Test-Path -LiteralPath $script:OgFakeLog)) -or ((Get-Item -LiteralPath $script:OgFakeLog).Length -eq 0)
+    Add-Result 'G8-case-preview-visibility-not-read' `
+               (($OgG8Case.Code -eq 0) -and ($OgG8Case.Text -like "*$OgVisText*") -and ($OgG8Case.Text -like '*temp directory*') -and
+                (-not ($OgG8Case.Text -like "*$OgGuardText*")) -and $OgG8LogEmpty) `
+               "exit $($OgG8Case.Code), wanted 0 with '$OgVisText' naming the sandboxed run, NO guard text and an empty fake log (empty: $OgG8LogEmpty)"
+
+    $OgG8Block = Invoke-Wrapper -OgHome $OgHome -OgArgs @('signals-push', '-Path', $OgRepo) -OgOutward 'block'
+    Add-Result 'G8-case-block-names-its-reason' `
+               (($OgG8Block.Code -eq 0) -and ($OgG8Block.Text -like "*$OgVisText*") -and ($OgG8Block.Text -like "*KEEL_OUTWARD is set to 'block'*")) `
+               "exit $($OgG8Block.Code), wanted 0 with '$OgVisText' naming KEEL_OUTWARD=block"
+
+    Clear-FixtureTarget -OgHome $OgHome
+    $OgG8Reason = Invoke-Wrapper -OgHome $OgHome -OgArgs @('signals-push', '-Path', $OgRepo) -OgOutward 'allow' -OgBlindDir $OgBlind
+    Set-FixtureTarget -OgHome $OgHome
+    Add-Result 'G8-reason-control-other-refusal-still-produced' `
+               (($OgG8Reason.Code -eq 90) -and ($OgG8Reason.Text -like "*$OgNoTarget*") -and (-not ($OgG8Reason.Text -like '*Destination visibility*'))) `
+               "exit $($OgG8Reason.Code), wanted 90 with '$OgNoTarget' PRESENT and no visibility line"
 
     # No row in this suite may run gh. A non-empty log means one got past the guard or the
     # destination check - throw, so the run ends with no summary line and is reported.

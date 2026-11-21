@@ -27,9 +27,15 @@
 #                  naming another, writing nothing; signals-relink previews, re-points only the
 #                  records whose title matches or that are named, and takes the store lock. It
 #                  runs with its OWN fake gh, one that ANSWERS - see that group's helpers.
+#   publishing     group PUBLISH: signals-push and resolve-signal -CloseIssue check the exact
+#                  text they would send for a private-names entry, this machine's name and a
+#                  user folder path, hold a finding until -Clearance clears it for one signal,
+#                  name a finding by place and never by text, say whether the destination is
+#                  public, and publish a machine code; and the wrapper flags the list lines
+#                  section 16 of check-suite-docs.ps1 flags. Its own fake gh, as LINK has.
 #
-# -AgainstWrapper <path> runs every row against another copy of keel-state.ps1, and -LinkOnly
-# runs group LINK alone. Both exist to show a row able to fail, by running it against a copy
+# -AgainstWrapper <path> runs every row against another copy of keel-state.ps1, -LinkOnly
+# runs group LINK alone, and -PublishOnly runs group PUBLISH alone. Both exist to show a row able to fail, by running it against a copy
 # with one thing broken; neither is on the push path, which runs this suite with no switches.
 #
 # THE REFUSAL COVERAGE IS STATED AS A FRACTION ON PURPOSE: how many refusal paths the verb
@@ -65,7 +71,8 @@
 
 param(
     [string]$AgainstWrapper = '',
-    [switch]$LinkOnly
+    [switch]$LinkOnly,
+    [switch]$PublishOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1225,11 +1232,16 @@ function Get-StoreLockName {
 }
 
 # The new lines a log gained since a count was taken.
+# The visibility read signals-push and resolve-signal -CloseIssue make before they publish
+# ('repo view <slug> ...') publishes nothing, and these rows count the acts, so it is left out
+# unless -SjEvery asks for every line.
 function Get-NewLines {
-    param([string]$SjLog, [int]$SjSince)
+    param([string]$SjLog, [int]$SjSince, [switch]$SjEvery)
     $SjAll = @(Get-GhLogLines -SjLog $SjLog)
     if ($SjAll.Count -le $SjSince) { return @() }
-    return @($SjAll[$SjSince..($SjAll.Count - 1)])
+    $SjNew = @($SjAll[$SjSince..($SjAll.Count - 1)])
+    if ($SjEvery) { return $SjNew }
+    return @($SjNew | Where-Object { -not $_.StartsWith('repo view ') })
 }
 
 # The one line of a relink listing that starts with a record's id.
@@ -1348,7 +1360,7 @@ function Invoke-LinkCases {
     $SjL3Since = @(Get-GhLogLines -SjLog $SjLog).Count
     $SjL3Case = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
         'resolve-signal', '-Id', $SjL3Id, '-As', 'REJECTED', '-Detail', 'x', '-CloseIssue', '-Repo', 'example/new', '-Path', $SjLRepo)
-    $SjL3CaseLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL3Since)
+    $SjL3CaseLines = @(Get-NewLines -SjLog $SjLog -SjSince $SjL3Since -SjEvery)
     $SjL3ShaAfter = Get-FileSha -SjPath $SjL3Path
     $SjL3CtlSince = @(Get-GhLogLines -SjLog $SjLog).Count
     $SjL3Ctl = Invoke-WrapperGh -SjHome $SjLHome -SjGhDir $SjGhDir -SjArgs @(
@@ -1512,6 +1524,547 @@ function Invoke-LinkCases {
 }
 
 # ---------------------------------------------------------------------------
+# GROUP PUBLISH - what a report is checked for before it leaves the machine
+#
+# signals-push and resolve-signal -CloseIssue check the exact text they would send for an entry of
+# the private-names list, this machine's name and a user folder path; a finding holds the send
+# until it is cleared for that one signal with -Clearance, and is named by place and list line,
+# never by its text. Both say whether the destination is public, and a published body names the
+# machine by a random code. This group runs on its OWN scratch home and project, with its own fake
+# gh FIRST on PATH: it logs every call, answers 'repo view' with PUBLIC or PRIVATE when a mode file
+# says so (and exits 1 otherwise), appends every '--input' file it is given to a bodies file, and
+# answers an issue POST with a number and a URL. Every child runs with a scratch COMPUTERNAME and,
+# except the block limb, KEEL_OUTWARD=allow; the destination is example/pub.
+#
+# FIXTURE TERMS ARE ASSEMBLED AT RUN TIME, with a random suffix. This file sits under scripts/, and
+# the product's own private-names and history checks read it, so a literal term here could match a
+# real list or be refused as a record id. No row prints a term: a failure names the row and what
+# it counted.
+#
+# PUB9 RUNS SECTION 16 ITSELF. It copies check-suite-docs.ps1 into the untracked scripts\ folder of
+# a scratch git repo, as test-private-names.ps1 does, and compares the list lines section 16 flags
+# in one file with the ones the wrapper flags in the same text. Git variables a hook may export are
+# cleared around it, and it refuses unless git resolves the scratch repo as its own top level.
+# ---------------------------------------------------------------------------
+function New-PublishGh {
+    param([string]$SjDir, [string]$SjLog, [string]$SjBodies, [string]$SjMode)
+    New-Item -ItemType Directory -Path $SjDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $SjMode -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $SjDir 'gh.cmd') -Encoding ASCII -Value @(
+        '@echo off',
+        ('echo %*>>"' + $SjLog + '"'),
+        'if "%1"=="repo" goto repo',
+        'if "%1"=="api" goto api',
+        'if "%1"=="issue" if "%2"=="close" exit /b 0',
+        'exit /b 7',
+        ':repo',
+        ('if exist "' + $SjMode + '\public" ( echo PUBLIC& exit /b 0 )'),
+        ('if exist "' + $SjMode + '\private" ( echo PRIVATE& exit /b 0 )'),
+        'echo fake gh: no visibility fixture 1>&2',
+        'exit /b 1',
+        ':api',
+        ('if "%5"=="--input" ( type "%~6" >>"' + $SjBodies + '" & echo.>>"' + $SjBodies + '" & echo ----SJ-BODY-END---->>"' + $SjBodies + '" )'),
+        'echo 101',
+        'echo https://github.com/example/pub/issues/101',
+        'exit /b 0')
+}
+
+function Set-PubMode {
+    param([string]$SjMode, [string]$SjWord)
+    foreach ($SjM in @('public', 'private')) {
+        $SjF = Join-Path $SjMode $SjM
+        if (Test-Path -LiteralPath $SjF) { Remove-Item -LiteralPath $SjF -Force }
+    }
+    if ($SjWord -ne '') { Set-Content -LiteralPath (Join-Path $SjMode $SjWord) -Encoding ASCII -Value 'x' }
+}
+
+function Invoke-WrapperPub {
+    param([string[]]$SjArgs, [string]$SjHome, [string]$SjGhDir, [string]$SjMachine, [string]$SjOutward = 'allow')
+    $SjPrevPath    = $env:PATH
+    $SjPrevOut     = $env:KEEL_OUTWARD
+    $SjPrevMachine = $env:COMPUTERNAME
+    try {
+        Set-EnvVar 'PATH' ($SjGhDir + ';' + $SjPrevPath)
+        Set-EnvVar 'KEEL_OUTWARD' $SjOutward
+        Set-EnvVar 'COMPUTERNAME' $SjMachine
+        return (Invoke-Wrapper -SjHome $SjHome -SjArgs $SjArgs)
+    }
+    finally {
+        Set-EnvVar 'PATH' $SjPrevPath
+        Set-EnvVar 'KEEL_OUTWARD' $SjPrevOut
+        Set-EnvVar 'COMPUTERNAME' $SjPrevMachine
+    }
+}
+
+function New-PubSignal {
+    param([string]$SjRepo, [string]$SjHome, [string]$SjGhDir, [string]$SjMachine, [string]$SjDetail)
+    $SjFiled = Invoke-WrapperPub -SjHome $SjHome -SjGhDir $SjGhDir -SjMachine $SjMachine -SjArgs @(
+        'signal', '-Kind', 'gap', '-Phase', 'W1.1', '-Detail', $SjDetail,
+        '-Evidence', 'scripts/test-signal-judgement.ps1 - fixture, no real defect', '-Path', $SjRepo)
+    if ($SjFiled.Code -ne 0) { throw "fixture signal failed (exit $($SjFiled.Code))" }
+    foreach ($SjLine in @($SjFiled.Text -split "`n")) {
+        if ($SjLine -match 'Filed signal\s+(S\d{4})') { return $Matches[1] }
+    }
+    throw 'could not read the filed signal id'
+}
+
+function Set-PubList {
+    param([string]$SjHome, [string[]]$SjLines)
+    $SjListFile = Join-Path (Join-Path $SjHome '.keel') 'private-names.txt'
+    if ($null -eq $SjLines) {
+        if (Test-Path -LiteralPath $SjListFile) { Remove-Item -LiteralPath $SjListFile -Force }
+        return
+    }
+    [System.IO.File]::WriteAllText($SjListFile, (($SjLines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# A preview split into its per-signal sections: from a '--- <id>' line to that signal's FINDINGS
+# line, the text the operator reads; the finding lines after it; and every other line.
+function Get-PubSections {
+    param([string]$SjText)
+    $SjSec = @{}
+    $SjRest = @()
+    $SjCur = ''
+    $SjInFind = $false
+    foreach ($SjL in @($SjText -split "`n")) {
+        $SjT = $SjL.TrimEnd("`r")
+        if ($SjT -match '^--- (S\d{4}) ') {
+            $SjCur = $Matches[1]
+            $SjSec[$SjCur] = [pscustomobject]@{ Body = @(); Findings = @(); Count = -1 }
+            $SjInFind = $false
+            continue
+        }
+        if ($SjCur -ne '' -and -not $SjInFind -and $SjT -match '^FINDINGS: (\d+)') {
+            $SjSec[$SjCur].Count = [int]$Matches[1]
+            $SjInFind = $true
+            continue
+        }
+        if ($SjInFind -and $SjT -match '^  (S\d{4})  ') { $SjSec[$SjCur].Findings += $SjT; continue }
+        if ($SjInFind) { $SjCur = ''; $SjInFind = $false }
+        if ($SjCur -ne '') { $SjSec[$SjCur].Body += $SjT } else { $SjRest += $SjT }
+    }
+    return [pscustomobject]@{ Sections = $SjSec; Rest = $SjRest }
+}
+
+# One finding line, parsed: its signal id, category, list line (0 for none) and places.
+function Get-PubFinding {
+    param([string]$SjLine)
+    if ($SjLine -match '^  (S\d{4})  (.+?)(?:, list line (\d+))?: (.+)$') {
+        $SjLl = 0
+        if ($Matches[3]) { $SjLl = [int]$Matches[3] }
+        return [pscustomobject]@{ Id = $Matches[1]; Category = $Matches[2]; ListLine = $SjLl; Places = $Matches[4] }
+    }
+    return $null
+}
+
+function Get-PubFindingsOf {
+    param($SjParsed, [string]$SjId)
+    if (-not $SjParsed.Sections.ContainsKey($SjId)) { return @() }
+    return @($SjParsed.Sections[$SjId].Findings | ForEach-Object { Get-PubFinding $_ } | Where-Object { $null -ne $_ })
+}
+
+function Test-PubHas {
+    param([string]$SjHay, [string]$SjNeedle)
+    return ($SjHay.IndexOf($SjNeedle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Get-PubLogCount {
+    param([string]$SjLog, [string]$SjPrefix)
+    return @(Get-GhLogLines -SjLog $SjLog | Where-Object { $_.StartsWith($SjPrefix) }).Count
+}
+
+function Get-PubShas {
+    param([string]$SjHome, [string[]]$SjIds)
+    $SjOut = @{}
+    foreach ($SjI in $SjIds) { $SjOut[$SjI] = Get-FileSha -SjPath (Get-SignalPath -SjHome $SjHome -SjId $SjI) }
+    return $SjOut
+}
+
+# The bodies the fake received, decoded from the JSON the wrapper wrote for gh.
+function Get-PubBodies {
+    param([string]$SjBodies)
+    if (-not (Test-Path -LiteralPath $SjBodies)) { return @() }
+    $SjOut = @()
+    foreach ($SjChunk in ((Get-Content -Raw -LiteralPath $SjBodies) -split '----SJ-BODY-END----')) {
+        if ($SjChunk.Trim() -eq '') { continue }
+        $SjObj = $SjChunk.Trim() | ConvertFrom-Json
+        if ($null -ne $SjObj) { $SjOut += $SjObj }
+    }
+    return $SjOut
+}
+
+function Invoke-PubGit {
+    param([string]$SjRepoDir, [string[]]$SjGitArgs)
+    $SjPrev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $null = & git -C $SjRepoDir @SjGitArgs 2>$null
+        $SjGitCode = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $SjPrev }
+    if ($SjGitCode -ne 0) { throw "fixture: git $($SjGitArgs[0]) failed (exit $SjGitCode)" }
+}
+
+# The list lines section 16 flags in a scratch repo holding one file with this text.
+function Get-Section16Lines {
+    param([string]$SjRoot, [string]$SjHome, [string]$SjTextLine)
+    $SjGitVars = @('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+                   'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_PREFIX', 'GIT_NAMESPACE')
+    $SjSaved = @{}
+    foreach ($SjV in $SjGitVars) {
+        $SjSaved[$SjV] = [Environment]::GetEnvironmentVariable($SjV, 'Process')
+        Remove-Item -LiteralPath "Env:\$SjV" -ErrorAction SilentlyContinue
+    }
+    $SjPrevProfile = $env:USERPROFILE
+    try {
+        $SjRepoDir = Join-Path $SjRoot ('pub9-repo-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 6))
+        New-Item -ItemType Directory -Path (Join-Path $SjRepoDir 'scripts') -Force | Out-Null
+        $SjPrev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $null = & git -c init.defaultBranch=main init -q $SjRepoDir 2>$null
+        $SjInit = $LASTEXITCODE
+        $SjTop = @(& git -C $SjRepoDir rev-parse --show-toplevel 2>$null)
+        $ErrorActionPreference = $SjPrev
+        if ($SjInit -ne 0) { throw "fixture: git init failed (exit $SjInit)" }
+        $SjTail = (Split-Path -Leaf $SjRepoDir)
+        $SjTopText = ''
+        if ($SjTop.Count -gt 0) { $SjTopText = ([string]$SjTop[0]).Replace('\', '/').TrimEnd('/') }
+        if (-not $SjTopText.EndsWith($SjTail, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'fixture: git does not resolve the scratch repository as its own top level - refusing to run'
+        }
+        Invoke-PubGit $SjRepoDir @('config', 'user.email', 'suite@example.invalid')
+        Invoke-PubGit $SjRepoDir @('config', 'user.name', 'signal judgement suite')
+        Invoke-PubGit $SjRepoDir @('config', 'core.autocrlf', 'false')
+        [System.IO.File]::WriteAllText((Join-Path $SjRepoDir 'text.txt'), ($SjTextLine + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        Invoke-PubGit $SjRepoDir @('add', 'text.txt')
+        Invoke-PubGit $SjRepoDir @('commit', '-q', '-m', 'fixture')
+        $SjCopy = Join-Path $SjRepoDir 'scripts\check-suite-docs.ps1'
+        Copy-Item -LiteralPath (Join-Path $SjRepoRoot 'scripts\check-suite-docs.ps1') -Destination $SjCopy -Force
+        $env:USERPROFILE = $SjHome
+        $ErrorActionPreference = 'Continue'
+        $SjOut = @(& $SjPwsh -NoProfile -ExecutionPolicy Bypass -File $SjCopy -PrivateNamesOnly 2>&1 | ForEach-Object { $_.ToString() })
+        $ErrorActionPreference = $SjPrev
+        $SjLines = @()
+        foreach ($SjL in $SjOut) { if ($SjL -match 'holds the entry on list line (\d+) of') { $SjLines += [int]$Matches[1] } }
+        return @($SjLines | Sort-Object -Unique)
+    }
+    finally {
+        $env:USERPROFILE = $SjPrevProfile
+        foreach ($SjV in $SjGitVars) { if ($null -ne $SjSaved[$SjV]) { Set-Item -LiteralPath "Env:\$SjV" -Value $SjSaved[$SjV] } }
+    }
+}
+
+function Invoke-PublishCases {
+    param([string]$SjTempRoot)
+
+    $SjPHome  = Join-Path $SjTempRoot 'pub-home'
+    $SjPHome2 = Join-Path $SjTempRoot 'pub-home-two'
+    $SjPRepo  = Join-Path $SjTempRoot 'pub-project'
+    $SjPRepo2 = Join-Path $SjTempRoot 'pub-project-two'
+    $SjPGh    = Join-Path $SjTempRoot 'pub-gh'
+    $SjPMode  = Join-Path $SjTempRoot 'pub-gh-mode'
+    $SjPLog   = Join-Path $SjTempRoot 'pub-gh.log'
+    $SjPBod   = Join-Path $SjTempRoot 'pub-gh-bodies.txt'
+    New-PublishGh -SjDir $SjPGh -SjLog $SjPLog -SjBodies $SjPBod -SjMode $SjPMode
+    New-Fixture -SjRepo $SjPRepo -SjHome $SjPHome
+    New-Fixture -SjRepo $SjPRepo2 -SjHome $SjPHome2
+    foreach ($SjH in @($SjPHome, $SjPHome2)) {
+        $SjT = Invoke-Wrapper -SjHome $SjH -SjArgs @('signals-target', '-Repo', 'example/pub')
+        if ($SjT.Code -ne 0) { throw "fixture signals-target failed (exit $($SjT.Code))" }
+    }
+
+    # The planted terms, assembled here so no literal of them is in this file.
+    $SjSfx     = [System.Guid]::NewGuid().ToString('N').Substring(0, 6)
+    $SjPlain   = 'qz' + 'plain' + $SjSfx
+    $SjWordT   = 'Qz' + 'Word' + $SjSfx
+    $SjNearT   = 'Qz' + 'Near' + $SjSfx
+    $SjAbsent  = 'qz' + 'absent' + $SjSfx
+    $SjMachine = 'QZ' + 'HOST-' + $SjSfx.ToUpper()
+    $SjPathJ   = 'C:' + '\\' + 'Users' + '\\' + 'x'
+    $SjList    = @('# fixture list', $SjPlain, ('word:' + $SjWordT), ('word:' + $SjNearT), $SjAbsent)
+    Set-PubList -SjHome $SjPHome -SjLines $SjList
+    $SjCatList = 'a private-names entry'
+    $SjCatBad  = 'a private-names entry this check cannot read'
+    $SjCatMach = "this machine's name"
+    $SjCatPath = 'a user folder path'
+    $SjVis     = 'Destination visibility:'
+    $SjPubArgs   = @{ SjHome = $SjPHome; SjGhDir = $SjPGh; SjMachine = $SjMachine }
+
+    # --- HARNESS: the fake is what gh resolves to ------------------------------------------
+    $SjE = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail 'fixture detail with nothing to find'
+    Set-PubMode -SjMode $SjPMode -SjWord 'public'
+    $SjHLog = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view '
+    $SjHr = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    Add-Result 'PUB-HARNESS-CONTROL-fake-gh-answers' `
+        (($SjHr.Code -eq 0) -and (Test-PubHas $SjHr.Text "$SjVis public (example/pub)") -and ((Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view example/pub --json visibility') -eq ($SjHLog + 1))) `
+        "a preview through the publish fake must exit 0, print the public line and log one visibility read; exit $($SjHr.Code)"
+
+    # --- PUB1: one finding per planted detail, of the right category -----------------------
+    $SjA = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + $SjPlain.ToUpper() + ' once')
+    $SjB = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + $SjWordT + ' once')
+    $SjC = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + $SjMachine.ToLower() + ' once')
+    $SjD = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + $SjPathJ + ' once')
+    $SjF = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding x' + $SjWordT + 'y once')
+    $SjP1 = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Path', $SjPRepo)
+    $SjP1Parsed = Get-PubSections -SjText $SjP1.Text
+    $SjP1Want = @(@($SjA, $SjCatList), @($SjB, $SjCatList), @($SjC, $SjCatMach), @($SjD, $SjCatPath))
+    $SjP1Ok = ($SjP1.Code -eq 0)
+    $SjP1Why = @()
+    foreach ($SjW in $SjP1Want) {
+        $SjFs = @(Get-PubFindingsOf $SjP1Parsed $SjW[0])
+        if (($SjFs.Count -ne 1) -or ($SjFs[0].Category -cne $SjW[1])) { $SjP1Ok = $false; $SjP1Why += "$($SjW[0]):$($SjFs.Count)" }
+    }
+    $SjP1CtlE = @(Get-PubFindingsOf $SjP1Parsed $SjE).Count
+    $SjP1CtlF = @(Get-PubFindingsOf $SjP1Parsed $SjF).Count
+    $SjP1CtlOk = ($SjP1Parsed.Sections.ContainsKey($SjE)) -and ($SjP1Parsed.Sections.ContainsKey($SjF)) -and ($SjP1CtlE -eq 0) -and ($SjP1CtlF -eq 0) -and ($SjP1Parsed.Sections[$SjE].Count -eq 0)
+    Add-Pair 'PUB1-findings-by-category' `
+        $SjP1Ok "each of the four planted signals must have exactly one finding of its category in the preview; exit $($SjP1.Code), off: [$($SjP1Why -join ' ')]" `
+        $SjP1CtlOk "the clean signal and the one holding the word: entry inside a longer word must have none; clean $SjP1CtlE, longer word $SjP1CtlF" `
+        ($SjP1Ok -and $SjP1CtlOk) 'a planted and an unplanted signal must be answered differently, or the check finds everything or nothing'
+
+    # --- PUB1b: with no list, the list check says so and the other two still run ------------
+    Set-PubList -SjHome $SjPHome -SjLines $null
+    $SjP1b = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Path', $SjPRepo)
+    $SjP1bParsed = Get-PubSections -SjText $SjP1b.Text
+    Set-PubList -SjHome $SjPHome -SjLines $SjList
+    $SjP1bCtl = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    $SjNotChecked = 'private names: NOT CHECKED'
+    $SjP1bCaseOk = (Test-PubHas $SjP1b.Text $SjNotChecked) -and
+        (@(Get-PubFindingsOf $SjP1bParsed $SjA).Count -eq 0) -and
+        (@(Get-PubFindingsOf $SjP1bParsed $SjC | Where-Object { $_.Category -ceq $SjCatMach }).Count -eq 1) -and
+        (@(Get-PubFindingsOf $SjP1bParsed $SjD | Where-Object { $_.Category -ceq $SjCatPath }).Count -eq 1)
+    Add-Pair 'PUB1b-no-list' `
+        $SjP1bCaseOk "with no list the preview must print the NOT CHECKED line, find no list entry, and still find the machine name and the path; exit $($SjP1b.Code)" `
+        (($SjP1bCtl.Code -eq 0) -and -not (Test-PubHas $SjP1bCtl.Text $SjNotChecked)) "with the list in place there must be no NOT CHECKED line; exit $($SjP1bCtl.Code)" `
+        ((Test-PubHas $SjP1b.Text $SjNotChecked) -ne (Test-PubHas $SjP1bCtl.Text $SjNotChecked)) 'a missing and a present list must be answered differently'
+
+    # --- PUB1c: every other path form is a path; a near one is not ---------------------------
+    $SjG  = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + 'C:' + '\' + 'Users' + '\' + 'x once')
+    $SjH2 = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + 'C:' + '/' + 'Users' + '/' + 'x once')
+    $SjI  = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + '/c/' + 'Users' + '/x once')
+    $SjJ  = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail ('fixture detail holding ' + 'C:' + '\' + 'Usersx\y and D:\Program Files\x once')
+    $SjP1c = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Path', $SjPRepo)
+    $SjP1cParsed = Get-PubSections -SjText $SjP1c.Text
+    $SjP1cOk = $true
+    $SjP1cWhy = @()
+    foreach ($SjX in @($SjG, $SjH2, $SjI)) {
+        $SjFs = @(Get-PubFindingsOf $SjP1cParsed $SjX)
+        if (($SjFs.Count -ne 1) -or ($SjFs[0].Category -cne $SjCatPath)) { $SjP1cOk = $false; $SjP1cWhy += "$($SjX):$($SjFs.Count)" }
+    }
+    $SjP1cCtl = @(Get-PubFindingsOf $SjP1cParsed $SjJ).Count
+    $SjP1cCtlOk = ($SjP1cParsed.Sections.ContainsKey($SjJ) -and $SjP1cCtl -eq 0)
+    Add-Pair 'PUB1c-every-path-form' `
+        $SjP1cOk "the single-backslash, forward-slash and /c/ forms must each be exactly one user-path finding; off: [$($SjP1cWhy -join ' ')]" `
+        $SjP1cCtlOk "a text whose Users is not a whole word, beside a path with no Users, must have none; got $SjP1cCtl" `
+        ($SjP1cOk -and $SjP1cCtlOk) 'path forms and a near miss must be answered differently'
+    foreach ($SjX in @($SjG, $SjH2, $SjI, $SjJ)) { Remove-Item -LiteralPath (Get-SignalPath -SjHome $SjPHome -SjId $SjX) -Force }
+
+    # --- PUB1d: an entry the check cannot read is a finding, as section 16 refuses it -------
+    Set-PubList -SjHome $SjPHome -SjLines ($SjList + @('qz"bad' + $SjSfx))
+    $SjP1d = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    Set-PubList -SjHome $SjPHome -SjLines $SjList
+    $SjP1dCtl = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    $SjP1dFs = @(Get-PubFindingsOf (Get-PubSections -SjText $SjP1d.Text) $SjE)
+    $SjP1dCtlFs = @(Get-PubFindingsOf (Get-PubSections -SjText $SjP1dCtl.Text) $SjE)
+    $SjP1dOk = ($SjP1dFs.Count -eq 1) -and ($SjP1dFs[0].Category -ceq $SjCatBad) -and ($SjP1dFs[0].ListLine -eq ($SjList.Count + 1))
+    Add-Pair 'PUB1d-unreadable-entry' `
+        $SjP1dOk "an entry holding a double quote must be a cannot-read finding naming its list line on a clean signal; got $($SjP1dFs.Count)" `
+        ($SjP1dCtlFs.Count -eq 0) "with that line gone the same signal must have none; got $($SjP1dCtlFs.Count)" `
+        ($SjP1dFs.Count -ne $SjP1dCtlFs.Count) 'a list with and without the unreadable line must be answered differently'
+
+    # --- PUB3: the visibility line --------------------------------------------------------
+    Set-PubMode -SjMode $SjPMode -SjWord 'public'
+    $SjV1 = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    Set-PubMode -SjMode $SjPMode -SjWord 'private'
+    $SjVPrivSince = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view '
+    $SjV2 = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    $SjVPrivDelta = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view ') - $SjVPrivSince
+    Set-PubMode -SjMode $SjPMode -SjWord ''
+    $SjV3 = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    Set-PubMode -SjMode $SjPMode -SjWord 'private'
+    $SjVBlockSince = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view '
+    $SjV4 = Invoke-WrapperPub @SjPubArgs -SjOutward 'block' -SjArgs @('signals-push', '-Id', $SjE, '-Path', $SjPRepo)
+    $SjVBlockDelta = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'repo view ') - $SjVBlockSince
+    $SjV3Ok = (Test-PubHas $SjV1.Text "$SjVis public") -and (Test-PubHas $SjV2.Text "$SjVis private") -and (Test-PubHas $SjV3.Text "$SjVis could not tell") -and
+        (Test-PubHas $SjV4.Text "$SjVis could not tell") -and ($SjVBlockDelta -eq 0) -and ($SjV4.Code -eq 0)
+    Add-Pair 'PUB3-visibility-line' `
+        $SjV3Ok "PUBLIC, PRIVATE and a failed read must print public, private and could not tell, and KEEL_OUTWARD=block could not tell with no read logged; block log delta $SjVBlockDelta, block exit $($SjV4.Code)" `
+        ($SjVPrivDelta -eq 1) "the allowed PRIVATE run must log exactly one visibility read; got $SjVPrivDelta" `
+        ($SjVPrivDelta -ne $SjVBlockDelta) 'an allowed and a blocked run must differ in whether the read is made'
+
+    # --- PUB4 (case): -Apply holds every signal while one has an uncleared finding ---------
+    $SjAll = @($SjA, $SjB, $SjC, $SjD, $SjE, $SjF)
+    $SjShas = Get-PubShas -SjHome $SjPHome -SjIds $SjAll
+    $SjApiSince = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjP4 = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Path', $SjPRepo)
+    $SjP4Api = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApiSince
+    $SjShasAfter = Get-PubShas -SjHome $SjPHome -SjIds $SjAll
+    $SjP4Same = $true
+    foreach ($SjX in $SjAll) { if ($SjShas[$SjX] -ne $SjShasAfter[$SjX]) { $SjP4Same = $false } }
+    $SjApiSince2 = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjP4b = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Id', $SjE, '-Path', $SjPRepo)
+    $SjP4bApi = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApiSince2
+    $SjP4bRec = Get-SignalRecord -SjHome $SjPHome -SjId $SjE
+    $SjP4bIssue = 0
+    if (Test-HasKey $SjP4bRec 'issue') { $SjP4bIssue = [int]$SjP4bRec.issue }
+    $SjP4CaseOk = ($SjP4.Code -eq 95) -and ($SjP4Api -eq 0) -and $SjP4Same -and (Test-PubHas $SjP4.Text $SjVis) -and
+        ($SjP4b.Code -eq 0) -and ($SjP4bApi -eq 1) -and ($SjP4bIssue -eq 101) -and (Test-PubHas $SjP4b.Text $SjVis)
+    $SjP4CaseWhy = "held -Apply exit $($SjP4.Code) (want 95), posts $SjP4Api (want 0), records unchanged $SjP4Same; -Apply -Id clean exit $($SjP4b.Code), posts $SjP4bApi (want 1), issue $SjP4bIssue"
+
+    # --- PUB2: a finding never prints the text it found -------------------------------------
+    $SjTerms = @($SjPlain, $SjWordT, $SjMachine, $SjPathJ)
+    $SjRestText = (@($SjP1Parsed.Rest) + @($SjP1Parsed.Sections.Values | ForEach-Object { $_.Findings })) -join "`n"
+    $SjInText = (@($SjP1Parsed.Sections.Values | ForEach-Object { $_.Body })) -join "`n"
+    $SjP2Leak = @($SjTerms | Where-Object { (Test-PubHas $SjRestText $_) -or (Test-PubHas $SjP4.Text $_) }).Count
+    $SjP2Shape = $true
+    $SjP2Why = @()
+    foreach ($SjW in $SjP1Want) {
+        $SjSecW = $SjP1Parsed.Sections[$SjW[0]]
+        $SjFs = @(Get-PubFindingsOf $SjP1Parsed $SjW[0])
+        if ($SjFs.Count -ne 1) { $SjP2Shape = $false; continue }
+        $SjBodyLines = @($SjSecW.Body)
+        $SjBodyStart = [array]::IndexOf($SjBodyLines, 'BODY:')
+        $SjBodyAt = -1
+        for ($SjK = $SjBodyStart + 1; $SjK -lt $SjBodyLines.Count; $SjK++) {
+            if ($SjBodyLines[$SjK] -like 'fixture detail holding*') { $SjBodyAt = $SjK - $SjBodyStart; break }
+        }
+        if (($SjFs[0].Id -ne $SjW[0]) -or ($SjFs[0].Places -cne "title, body line $SjBodyAt")) { $SjP2Shape = $false; $SjP2Why += "$($SjW[0]):[$($SjFs[0].Places)] want body line $SjBodyAt" }
+    }
+    $SjP2CtlIn = @($SjTerms | Where-Object { Test-PubHas $SjInText $_ }).Count
+    Add-Pair 'PUB2-findings-never-print-the-text' `
+        (($SjP2Leak -eq 0) -and $SjP2Shape) "no planted term may occur outside the per-signal text or in the held -Apply's output, and each finding must name its id and places; leaks $SjP2Leak, shape $SjP2Shape [$($SjP2Why -join ' ')]" `
+        ($SjP2CtlIn -eq $SjTerms.Count) "every planted term must occur in the per-signal text, so the search can find one; found $SjP2CtlIn of $($SjTerms.Count)" `
+        (($SjP2CtlIn -eq $SjTerms.Count) -and ($SjP2Leak -eq 0) -and $SjP2Shape) 'the same search must find every term inside the text and none outside it, beside findings that name their places'
+
+    # --- PUB5: a clearance is for one signal, with a reason, and is recorded -------------
+    $SjReason = 'fixture reason one, read by the operator'
+    $SjOthers = @($SjB, $SjC, $SjD)
+    $SjShas5 = Get-PubShas -SjHome $SjPHome -SjIds $SjOthers
+    $SjApi5 = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjP5a = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Id', $SjA, '-Clearance', $SjReason, '-Path', $SjPRepo)
+    $SjApi5a = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi5
+    $SjP5Rec = Get-SignalRecord -SjHome $SjPHome -SjId $SjA
+    $SjApi5b0 = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjP5b = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Clearance', $SjReason, '-Path', $SjPRepo)
+    $SjP5c = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Id', $SjB, '-Clearance', ' ', '-Path', $SjPRepo)
+    $SjApi5bc = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi5b0
+    $SjShas5After = Get-PubShas -SjHome $SjPHome -SjIds $SjOthers
+    $SjP5Same = $true
+    foreach ($SjX in $SjOthers) { if ($SjShas5[$SjX] -ne $SjShas5After[$SjX]) { $SjP5Same = $false } }
+    $SjP5Reason = ''
+    if (Test-HasKey $SjP5Rec 'pushClearance') { $SjP5Reason = [string]$SjP5Rec.pushClearance.reason }
+    Add-Pair 'PUB5-clearance-is-per-signal' `
+        (($SjP5a.Code -eq 0) -and ($SjApi5a -eq 1) -and ($SjP5Reason -ceq $SjReason) -and ($SjP5b.Code -eq 90) -and ($SjP5c.Code -eq 95) -and ($SjApi5bc -eq 0)) `
+        "a clearance with -Id and a reason must post once and record the reason; without -Id 90, with no reason 95, neither posting; exits $($SjP5a.Code)/$($SjP5b.Code)/$($SjP5c.Code), posts $SjApi5a then $SjApi5bc" `
+        $SjP5Same 'the other planted records must be byte-unchanged' `
+        (($SjP5Reason -ceq $SjReason) -and $SjP5Same) 'the cleared record must change and the others must not'
+
+    # Clear and push the machine-name signal too, so one body the fake received carries the name.
+    $SjP5d = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Id', $SjC, '-Clearance', 'fixture reason two', '-Path', $SjPRepo)
+
+    # --- PUB6: the Machine row is a code -------------------------------------------------
+    $SjBodies1 = @(Get-PubBodies -SjBodies $SjPBod | Where-Object { Test-HasKey $_ 'title' })
+    $null = New-PubSignal -SjRepo $SjPRepo2 -SjHome $SjPHome2 -SjGhDir $SjPGh -SjMachine $SjMachine -SjDetail 'fixture detail from the second home'
+    $SjP6Two = Invoke-WrapperPub -SjHome $SjPHome2 -SjGhDir $SjPGh -SjMachine $SjMachine -SjArgs @('signals-push', '-Apply', '-Path', $SjPRepo2)
+    $SjBodies2 = @(Get-PubBodies -SjBodies $SjPBod | Where-Object { Test-HasKey $_ 'title' })
+    $SjCodes = @()
+    foreach ($SjBo in $SjBodies2) {
+        if ([string]$SjBo.body -match '(?m)^\| Machine \| (.+?) \|') { $SjCodes += $Matches[1] } else { $SjCodes += '' }
+    }
+    $SjCodes1 = @($SjCodes | Select-Object -First $SjBodies1.Count)
+    $SjCodeTwo = ''
+    if ($SjCodes.Count -gt $SjBodies1.Count) { $SjCodeTwo = $SjCodes[$SjCodes.Count - 1] }
+    $SjP6Shape = (@($SjCodes | Where-Object { ($_ -cmatch '^m-[0-9a-f]{8}$') -and -not (Test-PubHas $_ $SjMachine) }).Count -eq $SjCodes.Count) -and ($SjCodes.Count -ge 4)
+    $SjP6Same = (@($SjCodes1 | Sort-Object -Unique).Count -eq 1)
+    $SjP6Diff = ($SjCodeTwo -ne '') -and ($SjCodes1.Count -gt 0) -and ($SjCodeTwo -ne $SjCodes1[0])
+    $SjP6Names = $true
+    foreach ($SjX in @($SjA, $SjC, $SjE)) { if ((Get-SignalRecord -SjHome $SjPHome -SjId $SjX).machine -cne $SjMachine) { $SjP6Names = $false } }
+    $SjP6CtlHits = @($SjBodies2 | Where-Object { Test-PubHas ([string]$_.body) $SjMachine }).Count
+    Add-Pair 'PUB6-machine-code' `
+        ($SjP6Shape -and $SjP6Same -and $SjP6Diff -and $SjP6Names -and ($SjP5d.Code -eq 0) -and ($SjP6Two.Code -eq 0)) `
+        "every Machine row must be m- and eight hex, never the machine name, one code per home and another from the second home, and each record must keep the name; rows $($SjCodes.Count), shape $SjP6Shape, same $SjP6Same, differs $SjP6Diff, names kept $SjP6Names, exits $($SjP5d.Code)/$($SjP6Two.Code)" `
+        ($SjP6CtlHits -ge 1) "the same search over the same bodies must find the machine name in the cleared signal's text; found it in $SjP6CtlHits" `
+        ($SjP6Shape -and ($SjP6CtlHits -ge 1)) 'the name must be findable in the bodies and absent from every Machine row'
+
+    # --- PUB6b: a code file that holds no code is refused, not replaced --------------------
+    $SjCodeFile = Join-Path (Join-Path $SjPHome2 '.keel') 'machine-code.txt'
+    $null = New-PubSignal -SjRepo $SjPRepo2 -SjHome $SjPHome2 -SjGhDir $SjPGh -SjMachine $SjMachine -SjDetail 'fixture detail for the code file'
+    [System.IO.File]::WriteAllText($SjCodeFile, '', (New-Object System.Text.UTF8Encoding($false)))
+    $SjP6b = Invoke-WrapperPub -SjHome $SjPHome2 -SjGhDir $SjPGh -SjMachine $SjMachine -SjArgs @('signals-push', '-Path', $SjPRepo2)
+    Remove-Item -LiteralPath $SjCodeFile -Force
+    $SjP6bCtl = Invoke-WrapperPub -SjHome $SjPHome2 -SjGhDir $SjPGh -SjMachine $SjMachine -SjArgs @('signals-push', '-Path', $SjPRepo2)
+    $SjP6bNew = ''
+    if (Test-Path -LiteralPath $SjCodeFile) { $SjP6bNew = ([string](Get-Content -Raw -LiteralPath $SjCodeFile)).Trim() }
+    Add-Pair 'PUB6b-bad-code-file-refused' `
+        (($SjP6b.Code -eq 96) -and (Test-PubHas $SjP6b.Text 'machine-code.txt')) "an empty machine-code.txt must refuse the preview at 96 naming the file; exit $($SjP6b.Code)" `
+        (($SjP6bCtl.Code -eq 0) -and ($SjP6bNew -cmatch '^m-[0-9a-f]{8}$')) "with it deleted the preview must exit 0 and leave a new code; exit $($SjP6bCtl.Code)" `
+        ($SjP6b.Code -ne $SjP6bCtl.Code) 'an empty and a missing code file must be answered differently'
+
+    # --- PUB7: the closing comment is checked ---------------------------------------------
+    $SjK7 = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail 'fixture detail to resolve with a finding'
+    $SjL7 = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail 'fixture detail to resolve cleanly'
+    Set-LinkedRecord -SjHome $SjPHome -SjId $SjK7 -SjNum 71 -SjLink 'https://github.com/example/pub/issues/71'
+    Set-LinkedRecord -SjHome $SjPHome -SjId $SjL7 -SjNum 72 -SjLink 'https://github.com/example/pub/issues/72'
+    $SjResDetail = 'fixture resolution naming ' + $SjPlain
+    $SjApi7 = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjClose7 = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'issue close '
+    $SjR7a = Invoke-WrapperPub @SjPubArgs -SjArgs @('resolve-signal', '-Id', $SjK7, '-As', 'REJECTED', '-Detail', $SjResDetail, '-CloseIssue', '-Path', $SjPRepo)
+    $SjR7aApi = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi7
+    $SjR7aClose = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'issue close ') - $SjClose7
+    $SjR7aRec = Get-SignalRecord -SjHome $SjPHome -SjId $SjK7
+    $SjR7b = Invoke-WrapperPub @SjPubArgs -SjArgs @('resolve-signal', '-Id', $SjK7, '-As', 'REJECTED', '-Detail', $SjResDetail, '-CloseIssue', '-Clearance', 'fixture reason three', '-Path', $SjPRepo)
+    $SjR7bApi = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi7 - $SjR7aApi
+    $SjR7bClose = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'issue close ') - $SjClose7 - $SjR7aClose
+    $SjR7bRec = Get-SignalRecord -SjHome $SjPHome -SjId $SjK7
+    $SjR7Reason = ''
+    if (Test-HasKey $SjR7bRec 'commentClearance') { $SjR7Reason = [string]$SjR7bRec.commentClearance.reason }
+    $SjApi7c = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjClose7c = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'issue close '
+    $SjR7c = Invoke-WrapperPub @SjPubArgs -SjArgs @('resolve-signal', '-Id', $SjL7, '-As', 'REJECTED', '-Detail', 'fixture clean resolution', '-CloseIssue', '-Path', $SjPRepo)
+    $SjR7cApi = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi7c
+    $SjR7cClose = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'issue close ') - $SjClose7c
+    $SjR7CaseOk = ($SjR7a.Code -eq 0) -and ($SjR7aRec.state -eq 'REJECTED') -and ($SjR7aApi -eq 0) -and ($SjR7aClose -eq 0) -and
+        (Test-PubHas $SjR7a.Text '-Clearance') -and (Test-PubHas $SjR7a.Text $SjVis) -and
+        ($SjR7b.Code -eq 0) -and ($SjR7bApi -eq 1) -and ($SjR7bClose -eq 1) -and ($SjR7Reason -ceq 'fixture reason three')
+    Add-Pair 'PUB7-close-comment-checked' `
+        $SjR7CaseOk "a resolution holding a list entry must be recorded with no comment and no close, naming -Clearance and the visibility line; then cleared, one comment and one close with the reason stored; first exit $($SjR7a.Code) posts $SjR7aApi closes $SjR7aClose, cleared exit $($SjR7b.Code) posts $SjR7bApi closes $SjR7bClose" `
+        (($SjR7c.Code -eq 0) -and ($SjR7cApi -eq 1) -and ($SjR7cClose -eq 1)) "a clean resolution must comment and close on the first call; exit $($SjR7c.Code), posts $SjR7cApi, closes $SjR7cClose" `
+        ($SjR7aApi -ne $SjR7cApi) 'a held and a clean comment must be answered differently'
+
+    # --- PUB4 (control): with the planted signals removed, every remaining signal is sent ---
+    foreach ($SjX in @($SjB, $SjD)) { Remove-Item -LiteralPath (Get-SignalPath -SjHome $SjPHome -SjId $SjX) -Force }
+    $null = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail 'fixture detail clean two'
+    $null = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail 'fixture detail clean three'
+    $SjPending = @(Get-ChildItem -LiteralPath (Join-Path (Join-Path $SjPHome '.keel') 'signals') -Filter 'S*.json' | ForEach-Object {
+        Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json } | Where-Object { ($_.state -eq 'OPEN') -and ((-not (Test-HasKey $_ 'issue')) -or ($null -eq $_.issue)) }).Count
+    $SjApi4c = Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api '
+    $SjP4c = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Apply', '-Path', $SjPRepo)
+    $SjP4cApi = (Get-PubLogCount -SjLog $SjPLog -SjPrefix 'api ') - $SjApi4c
+    Add-Pair 'PUB4-apply-holds' `
+        $SjP4CaseOk $SjP4CaseWhy `
+        (($SjP4c.Code -eq 0) -and ($SjP4cApi -eq $SjPending) -and ($SjPending -ge 3)) "with the planted signals removed, -Apply must exit 0 and post each of the $SjPending pending signals; exit $($SjP4c.Code), posts $SjP4cApi" `
+        ($SjP4.Code -ne $SjP4c.Code) 'a store holding a finding and one without must be answered differently'
+
+    # --- PUB9: the wrapper flags the list lines section 16 flags ----------------------------
+    $SjText9  = 'start ' + $SjPlain.ToUpper() + ' mid ' + $SjWordT + ' and ' + $SjNearT.ToLower() + ' end'
+    $SjText9b = 'start ' + $SjPlain.ToUpper() + ' mid ' + $SjWordT + ' and ' + $SjNearT + ' end'
+    $SjS9  = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail $SjText9
+    $SjS9b = New-PubSignal -SjRepo $SjPRepo @SjPubArgs -SjDetail $SjText9b
+    $SjSec16  = @(Get-Section16Lines -SjRoot $SjTempRoot -SjHome $SjPHome -SjTextLine $SjText9)
+    $SjSec16b = @(Get-Section16Lines -SjRoot $SjTempRoot -SjHome $SjPHome -SjTextLine $SjText9b)
+    $SjW9  = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjS9, '-Path', $SjPRepo)
+    $SjW9b = Invoke-WrapperPub @SjPubArgs -SjArgs @('signals-push', '-Id', $SjS9b, '-Path', $SjPRepo)
+    $SjWr9  = @(Get-PubFindingsOf (Get-PubSections -SjText $SjW9.Text) $SjS9 | Where-Object { $_.Category -ceq $SjCatList } | ForEach-Object { $_.ListLine } | Sort-Object -Unique)
+    $SjWr9b = @(Get-PubFindingsOf (Get-PubSections -SjText $SjW9b.Text) $SjS9b | Where-Object { $_.Category -ceq $SjCatList } | ForEach-Object { $_.ListLine } | Sort-Object -Unique)
+    $SjS9Ok  = (($SjSec16 -join ',') -eq ($SjWr9 -join ',')) -and (($SjSec16 -join ',') -eq '2,3')
+    $SjS9bOk = (($SjSec16b -join ',') -eq ($SjWr9b -join ',')) -and (($SjSec16b -join ',') -eq '2,3,4')
+    Add-Pair 'PUB9-matches-section-16' `
+        $SjS9Ok "section 16 and the wrapper must flag the same list lines, the plain and the first word: entry and not the near miss; section 16 [$($SjSec16 -join ',')], wrapper [$($SjWr9 -join ',')]" `
+        $SjS9bOk "with the near miss in the entry's own case both must flag it too; section 16 [$($SjSec16b -join ',')], wrapper [$($SjWr9b -join ',')]" `
+        ((($SjWr9 -join ',') -ne ($SjWr9b -join ',')) -and (($SjSec16 -join ',') -ne ($SjSec16b -join ','))) 'the wrapper and section 16 must each answer the near miss and the exact word differently'
+}
+
+# ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
 $SjTempBase = [System.IO.Path]::GetTempPath()
@@ -1534,8 +2087,9 @@ $SjFailed = 0
 $SjHarnessOk = $false
 $SjSandboxOk = $false
 try {
-    if (-not $LinkOnly) { Invoke-Cases -SjTempRoot $SjTempRoot }
-    Invoke-LinkCases -SjTempRoot $SjTempRoot
+    if (-not $LinkOnly -and -not $PublishOnly) { Invoke-Cases -SjTempRoot $SjTempRoot }
+    if (-not $PublishOnly) { Invoke-LinkCases -SjTempRoot $SjTempRoot }
+    if (-not $LinkOnly) { Invoke-PublishCases -SjTempRoot $SjTempRoot }
 
     foreach ($SjResult in @($script:SjResults)) {
         if (-not $SjResult.Ok) {
@@ -1546,7 +2100,7 @@ try {
         if ($SjResult.Name -eq 'HARNESS-CONTROL-store-is-sandboxed')    { $SjSandboxOk = $SjResult.Ok }
     }
 
-    if ($LinkOnly) { $SjHarnessOk = $true; $SjSandboxOk = $true }
+    if ($LinkOnly -or $PublishOnly) { $SjHarnessOk = $true; $SjSandboxOk = $true }
     if ($SjHarnessOk -ne $true) {
         Write-Output ''
         Write-Output '  HARNESS CONTROL FAILED: judge-signal did not succeed on a freshly filed OPEN scratch signal.'
