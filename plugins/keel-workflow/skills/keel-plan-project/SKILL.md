@@ -134,9 +134,10 @@ Then create the rest of the folder structure inside it:
   private\                 gitignored scratch; only if git is on
 ```
 
-If `git` is on, `git init` and write a `.gitignore` that excludes `private/`. **Do not commit** —
-that is the human's call, always. That includes the handoff and the rebuilt index this session
-leaves behind at Step 6.
+If `git` is on, `git init` and write a `.gitignore` that excludes `private/`. Make the project's
+first commit later, at Step 6, once the operator has approved the charter and goals: it is performed
+and reported under "Whether to ask, or to act and report — reversibility decides"
+(`keel-orchestrator/SKILL.md`).
 
 ## Step 3b — declare the repos, if there are any
 
@@ -281,10 +282,15 @@ into decomposition while the context is warm. Resist it: decomposition done in t
 goal-setting tends to reproduce the goals as epics, one for one, which is a tree that carries no
 information.
 
-**Before you hand back, write the handoff, and do not commit it.** This is the boundary "A project
-planned, nothing decomposed yet" in the "Ending a session" section of `keel-orchestrator/SKILL.md`,
-and that section names it as its one exception: write, repair and rebuild in its order, and stop
-before the commit, which stays the human's.
+**Before you hand back, write the handoff, then, if `git` is on, make the project's first commit.**
+This is the boundary "A project planned, nothing decomposed yet" in the "Ending a session" section
+of `keel-orchestrator/SKILL.md`: write, repair, rebuild and commit, in its order. Show the operator
+the charter and the goals as written and ask them to approve both. Once they have, stage by path the
+files this session wrote (`keel.json`, `.gitignore`, `CHARTER.md`, the handoff,
+`reference/INDEX.md`, and anything else this session put under `plan/` or `reference/`), with
+`private/` kept out by the `.gitignore`, and report the commit, under "Whether to ask, or to act and
+report — reversibility decides" in `keel-orchestrator/SKILL.md`. Until they approve, nothing is
+committed, and the hand-back says so.
 
 ## Must not
 
@@ -296,6 +302,7 @@ before the commit, which stays the human's.
   and the cost of a wrong `yes` is an unused directory.
 - **Accept a value statement missing its abandonment condition.** Two of the three parts is not the
   section — it is the two comfortable parts of it.
-- **Commit anything**, the handoff and the rebuilt index included. `git init` yes; `git commit` is
-  the human's.
+- **Commit before the operator has approved the charter and goals**, or commit a file this session
+  did not write. The first commit is made at Step 6, under "Whether to ask, or to act and report —
+  reversibility decides" in `keel-orchestrator/SKILL.md`.
 - **Put sensitive material in the project folder** while deciding whether it is sensitive.

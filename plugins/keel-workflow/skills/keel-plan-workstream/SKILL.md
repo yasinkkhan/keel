@@ -407,7 +407,9 @@ the next free number; one taken twice is a git conflict at the second pull, and 
 renumbers. The push shrinks that window, it cannot close it. It is reversible in part, observable
 with `git ls-remote`, and inside what the operator has just approved, which is why it is performed
 and reported (`keel-orchestrator/SKILL.md`, "Whether to ask, or to act and report"). The wrapper
-never pushes; this step does. A project that keeps its progress on this machine is unchanged.
+never pushes; this step does. In every other git project the approved plan is committed locally and
+reported, not pushed, under "Whether to ask, or to act and report — reversibility decides" in
+`keel-orchestrator/SKILL.md`.
 
 **In such a project, each phase is planned with an owner**: `add-phase -Owner <person id>`, the
 planner when it is left out. Only the owner may run the phase (exit 88 refuses anyone else), so name
@@ -454,8 +456,10 @@ under `plan/`, which `keel-index.ps1` scans, so `reference/INDEX.md` is wrong un
 and in a project whose commit gate checks the index, the commit is refused until you do (keel's own
 does, in `scripts/check-suite-docs.ps1`). The order and the staging rule are stated once in
 `keel-orchestrator`'s "Ending a session" section — follow it there; the command is under
-"Rebuilding the index" in `keel-project-context`. Amend mode too: an
-amended spec is a document write like any other.
+"Rebuilding the index" in `keel-project-context`. Amend mode too: an amended spec is a document
+write like any other. That commit is made by this session once the operator has approved the spec
+and the prompt is written, and reported, under "Whether to ask, or to act and report —
+reversibility decides" in `keel-orchestrator/SKILL.md`.
 
 ## Amend mode
 
@@ -474,6 +478,10 @@ rest is wrong is the review working.
 **What you are amending against is the spec's own section 1, which is a dated planning snapshot** —
 governed by **"Material keel produced is re-measured before you act on it"** in
 `keel-orchestrator/SKILL.md`.
+
+Commit the amended spec, its index rebuild and any prompt written once the operator approves the
+amendment, and report the commit, under "Whether to ask, or to act and report — reversibility
+decides" in `keel-orchestrator/SKILL.md`.
 
 **Amend mode ends at the amended spec. It does not then run a phase.** Hand back.
 

@@ -4,6 +4,37 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.85.0 - 2026-11-21
+
+- **`keel-workflow` 0.77.0: every approved write is committed locally and reported.** A session that
+  wrote an approved re-plan ended with nothing committed and offered to show a commit's contents
+  first, so its operator had to ask for the commit; and the skill that creates a project left even
+  its first commit to the operator.
+  - **The rule.** `keel-orchestrator`'s section "Whether to ask, or to act and report" now says that
+    in every project whose `keel.json` has `"git": true`, a session commits locally, in the project
+    folder's own repo, each write it makes there that the operator approved (a spec, prompt, epic
+    ledger, charter, goals or decision row) or that a passed gate or a close-out requires (a
+    delivery record, spec append, next prompt, handoff, line-ending repair, index rebuild, close-out
+    stamp and sections, `reference/` notes). Each step's writes are committed together once the step
+    is complete, and each commit is reported by its short hash, subject and files. The section says
+    this is the operator's standing request.
+  - **How the commit is made.** By path, only the files the session wrote, never `git add -A`, `.`
+    or `-u`; a path that already held uncommitted changes is left uncommitted and named; never
+    `--no-verify`, never an amend or a rewrite; a commit a hook refuses is fixed at its cause and
+    made again, or reported as not made.
+  - **What does not change.** Such a commit is not pushed. A project that shares its progress still
+    commits and pushes an approved plan at once, a phase's own change in a declared repo stays its
+    enact step, and `"confirmEveryAct": true` does not reach these commits. No wrapper verb, state field,
+    `keel.json` key or hook changes.
+  - **The skills that point at it.** `keel-plan-project` makes a new project's first commit once the
+    operator has approved its charter and goals, and the orchestrator's "Ending a session" no longer
+    has a project-creation exception. `keel-plan-workstream` (registering the phases, the prompt,
+    amend mode), `keel-plan-epic`, `keel-run-phase` (the record gate, its Must not and its
+    description) and `keel-close-workstream` (its hand-back and its Must not) point at the rule,
+    and the orchestrator's Must NOT list and `PHASE_PROMPT_TEMPLATE.md`'s "Do not" list no longer
+    forbid such a commit.
+  - **The charter.** P6 carries a dated amendment saying the same.
+
 ## marketplace 0.84.0 - 2026-11-21
 
 - **`keel-workflow` 0.76.0: signal records are easy to read and repair.** A report's issue title was

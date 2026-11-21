@@ -380,6 +380,11 @@ clean run.
 
 **Before you hand back, write the handoff** — see "Ending a session — write the handoff before you hand back" in `keel-orchestrator/SKILL.md`.
 
+Then commit this close-out's writes together, once the handoff is written and the index rebuilt
+after it: the stamped spec, its §8 and §9, any `reference/` note, the handoff and
+`reference/INDEX.md`, staged by path and reported, under "Whether to ask, or to act and report —
+reversibility decides" in `keel-orchestrator/SKILL.md`.
+
 ## Must not
 
 - **Propose something with no citable moment.** Drop it silently.
@@ -392,7 +397,8 @@ clean run.
   half governs both. A **local, reversible, observable write inside the project's own folder** —
   stamping the spec, appending §8 or §9, writing a `reference/` note — is **performed and reported**
   instead, under "Whether to ask, or to act and report — reversibility decides" in
-  `keel-orchestrator/SKILL.md`.
+  `keel-orchestrator/SKILL.md`. Their local commit is performed and reported the same way, and this
+  skill does not push it.
 - **Rewrite a delivered phase's record.**
 - **Pad.** A close that says "6 considered, 0 routed, 6 dropped; W4 stamped delivered" is complete
   work.

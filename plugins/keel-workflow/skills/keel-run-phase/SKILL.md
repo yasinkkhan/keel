@@ -1,6 +1,6 @@
 ---
 name: keel-run-phase
-description: Executes exactly ONE phase of an existing keel workstream - reads the spec and the phase prompt, grounds live before changing anything, does the work or records what the human or a third party did, then hands the result to a FRESH verifier subagent that independently checks every W<n>.<p>-C<n> and returns the results table. Dispatched by keel-orchestrator only; never a session entry point, even on "implement phase W4.2" or "just make this change". The phase's ACTOR selects what evidence a check accepts - command output for agent, an artifact you point at for self, the received deliverable for external - and never which gates run. Resolves FACTUAL unknowns by dispatching fresh advisor subagents with self-contained briefs and proceeds; STOPS and asks the human for anything about scope, cost, risk or irreversibility, and for anything that would contradict a recorded spec Decision. Never commits, pushes, files, signs or enacts on its own initiative.
+description: Executes exactly ONE phase of an existing keel workstream - reads the spec and the phase prompt, grounds live before changing anything, does the work or records what the human or a third party did, then hands the result to a FRESH verifier subagent that independently checks every W<n>.<p>-C<n> and returns the results table. Dispatched by keel-orchestrator only; never a session entry point, even on "implement phase W4.2" or "just make this change". The phase's ACTOR selects what evidence a check accepts - command output for agent, an artifact you point at for self, the received deliverable for external - and never which gates run. Resolves FACTUAL unknowns by dispatching fresh advisor subagents with self-contained briefs and proceeds; STOPS and asks the human for anything about scope, cost, risk or irreversibility, and for anything that would contradict a recorded spec Decision. Commits approved writes locally and reports; never pushes, files, signs or enacts on its own initiative.
 ---
 
 # Run one phase
@@ -496,7 +496,9 @@ session" section — follow it there. Here that means: append the record, repair
 byte count shows any are owed, run the rebuild (the command is under "Rebuilding the index" in
 `keel-project-context`), then stage the
 spec **and** the rebuilt `reference/INDEX.md` in one commit. Rebuilding without staging the index
-leaves the gate green and commits a stale one.
+leaves the gate green and commits a stale one. Make that commit, with this gate's other writes in
+the project folder, and report it, under "Whether to ask, or to act and report — reversibility
+decides" in `keel-orchestrator/SKILL.md`.
 
 ### Then render the whole shape
 
@@ -548,8 +550,10 @@ Reconstructing it afterwards does not work — the conversation will have compac
 - **Skip a gate because the change is small**, or because the actor was not an agent.
 - **Claim an act you did not perform.** On `self` and `external` phases you are recording, not doing.
 - **Commit, push, file, sign, send or deploy on your own initiative** — beyond what the
-  reversibility rule in `keel-orchestrator/SKILL.md` permits you to perform and report. Anything
-  irreversible is always previewed and always confirmed.
+  reversibility rule in `keel-orchestrator/SKILL.md` permits you to perform and report. A local
+  commit of an approved or gate-required write in the project folder is the operator's standing
+  request, made and reported under "Whether to ask, or to act and report — reversibility decides"
+  there. Anything irreversible is always previewed and always confirmed.
 - **Expand scope.** If the phase needs more than its scope, that is a finding — stop and hand back
   for re-planning.
 - **Argue with an exit code.** 96 means fix the artifact.

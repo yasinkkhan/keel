@@ -277,6 +277,23 @@ summarises rather than shows the literal text. A confirmation inferred from an e
 Treating the amendment above as covering an act that is irreversible, unobservable, or outside what
 was approved — three conditions, all required.
 
+**Amended 2026-11-21, decided by the maintainer.** A local commit stops being an act that waits for
+a preview. In a project whose folder is a git repo, a session commits locally, in that repo, each
+write it makes there that the operator approved or that a passed gate or a close-out requires, and
+reports the commit by its short hash, subject and files; this is the operator's standing request. It
+stages by path only the files it wrote, leaves a path that already held uncommitted changes
+uncommitted and names it, never skips the repo's hooks, and never amends or rewrites a commit. A new
+project's first commit is made the same way, once its charter and goals are approved. This is a
+second permission beside the 2026-08-21 amendment, not a reading of its three conditions. Pushes are
+unchanged: such a commit is not pushed by this rule, and a phase's own change in a repo it declares,
+the project folder included, stays that phase's enactment. `"confirmEveryAct": true` does not reach
+these commits; it still restores the preview for pushes, enactments, tracker writes and signal
+pushes. **Why.** A session in another project wrote an approved re-plan and stopped with nothing
+committed, offering to preview a commit later, and its operator had to ask for the commit they had
+expected; the skill that creates a project left even its first commit to the operator. The rule is
+stated once, in the same section of `keel-orchestrator` as the 2026-08-21 amendment. **In effect
+from keel-workflow 0.77.0.** The rest of this principle stands.
+
 ---
 
 ## B. Knowledge

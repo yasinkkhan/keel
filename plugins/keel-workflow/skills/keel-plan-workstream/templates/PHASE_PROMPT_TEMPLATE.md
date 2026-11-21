@@ -133,8 +133,9 @@ keel-state.ps1 set-waiting -Phase W{{N}}.{{p}} -WaitingOn "{{who}}" -ReviewOn {{
 - Verify your own change in your own context — the verify gate needs a fresh subagent (charter P5).
 - Commit, push, enact, or write to a tracker without an exact preview and explicit confirmation —
   beyond what "Whether to ask, or to act and report — reversibility decides" in
-  `keel-orchestrator/SKILL.md` permits you to perform and report. Anything irreversible is always
-  previewed and always confirmed.
+  `keel-orchestrator/SKILL.md` permits you to perform and report. A local commit of an approved or
+  gate-required write in the project folder is made and reported under that section, not previewed.
+  Anything irreversible is always previewed and always confirmed.
 - Expand scope. If this phase turns out to need more, that is a finding: stop and hand back for
   re-planning rather than absorbing it.
 - Record a check as passed without naming the file or command that decided it.

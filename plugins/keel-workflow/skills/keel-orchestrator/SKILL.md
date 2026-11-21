@@ -842,6 +842,34 @@ observable but *outside* what was approved — a file nobody was shown, an extra
 added along the way — asks, and reaching for this clause to cover it is itself the signal that it is
 out of scope.
 
+**A local commit of an approved write is performed and reported, in every git project.** In a
+project whose `keel.json` has `"git": true`, commit locally, in the project folder's own repo, each
+write you make there that the operator approved or that a passed gate or a close-out requires, and
+report the commit rather than previewing it or waiting to be told. Approved means a spec, a prompt,
+an epic ledger, a charter, goals or a decision row, once the operator has approved it. Required
+means what a passed gate or a close-out writes: a delivery record, a spec append, the next prompt, a
+handoff, a line-ending repair, an index rebuild, a close-out's stamp and sections, a `reference/`
+note. Commit each step's writes together once the step is complete and the index is rebuilt, so a
+session that ends early leaves at most the step in progress uncommitted. Report each commit by its
+short hash, its subject and the files it holds.
+
+**This is the operator's standing request.** A session's own default of committing only when asked
+does not override it: the operator has asked once, here, for every such commit, so that they are not
+asked again each time.
+
+**How such a commit is made.** Stage by path only the files this session wrote, never with
+`git add -A`, `git add .` or `git add -u`. A path that already held uncommitted changes before
+this session wrote it is left uncommitted and named in the report, and so is anything else left
+uncommitted. Never pass `--no-verify`, and never amend or rewrite a commit. A commit the project's
+hook refuses is fixed at its cause and made again, or reported as not made. The message is a subject
+line, a blank line, then the body.
+
+**Pushes are unchanged.** A commit made under this rule is not pushed by it. A project that shares
+its progress still commits and pushes an approved plan at once, as its planning skills say, and
+every other push is previewed, or performed and reported under the three conditions above. A phase's
+own change in a declared repo, the files its patch carries, is not covered here even where that repo
+is the project folder itself: it stays that phase's enact step.
+
 **This decides *whether* to ask, never *how*.** When you do ask, "Asking the human — the question
 must be answerable without keel's vocabulary" above still governs every word of it.
 
@@ -850,7 +878,10 @@ means the rule above. **Stated plainly: that setting is honoured by the prose yo
 nothing else.** The `human` gate is deliberately artifact-free and `enact` is recorded after the act,
 so no exit code can detect a confirmation that did not happen, and a typo in the field fails
 silently. It is a convention, not a contract (P4) — it sits in `keel.json` because that is where a
-project's choices live and because it is greppable, not because it is enforced.
+project's choices live and because it is greppable, not because it is enforced. **It does not reach
+a local commit made under the commit rule above**: a project that sets it still has its pushes,
+enactments, tracker writes and signal pushes previewed, and its local commits of approved writes
+performed and reported.
 
 ## Step 5 — loops
 
@@ -926,7 +957,7 @@ print nothing, and all three are places sessions actually end:
 | Boundary | `status` prints a brief? | Write a handoff |
 |---|---|---|
 | Next phase named, prompt written | **yes** — the phase prompt *is* the brief | no |
-| A project planned, nothing decomposed yet | no | **yes**, not committed (see below) |
+| A project planned, nothing decomposed yet | no | **yes** |
 | Next phase named, no prompt — every express workstream, by design | no | **yes** |
 | Nothing pending — the close-out boundary | no | **yes** |
 
@@ -950,15 +981,15 @@ detecting it (charter P11).
 the final gate is stale the moment that gate lands. Re-running with the same `-Next` overwrites the
 same file rather than leaving two.
 
-**Then rebuild the document index, and commit both together** - at every boundary but one, below.
-The handoff is a document under
+**Then rebuild the document index, and commit both together**, at every boundary, the session that
+creates a project included. The commit is performed and reported, not previewed, under "Whether to
+ask, or to act and report — reversibility decides" above. The handoff is a document under
 `plan/handoffs/`, which `keel-index.ps1` indexes, so writing it leaves `reference/INDEX.md` wrong
 until it is rebuilt — and in a project whose commit gate checks the index, the commit is refused
 until you do. (Keel's own does, in `scripts/check-suite-docs.ps1`; not every project has one, and the
 rebuild is owed either way.) "Write it last" and "rebuild after any
 document write" are not two unordered obligations — they run in one order and no other:
-**write → repair → rebuild → commit together.** At project creation it stops at rebuild; see the
-exception below.
+**write → repair → rebuild → commit together.**
 
 **`repair` is the line-ending step, and it sits there because it is itself a write.** Where the tool
 that wrote a file and the project's `.gitattributes` disagree about line terminators, the fix is to
@@ -987,11 +1018,6 @@ Stage the handoff **and** the rebuilt `reference/INDEX.md` in the same commit. T
 working tree and never the git index, so a rebuild you do not stage passes the gate and commits a
 stale index anyway.
 
-**The one exception: the session that creates a project commits nothing.** At the boundary "A
-project planned, nothing decomposed yet", where `keel-plan-project` ends, the order runs write ->
-repair -> rebuild and stops there. That skill leaves every commit to the human, the project's first
-included, so the handoff and the rebuilt `reference/INDEX.md` wait in the working tree for them.
-
 ## Must NOT
 
 - **Do the work.** Dispatch `keel-run-phase`.
@@ -1002,8 +1028,10 @@ included, so the handoff and the rebuilt `reference/INDEX.md` wait in the workin
 - **Invent a phase.** The wrapper exits 94 on an undeclared phase; that is correct.
 - **Infer run order from phase numbers.** It is declared data.
 - **Commit, push, enact, or write to a tracker on your own initiative** — beyond what "Whether to
-  ask, or to act and report" above permits you to perform and report. Everything irreversible is
-  previewed in its exact final form and confirmed (charter P6).
+  ask, or to act and report" above permits you to perform and report. A local commit of an approved
+  or gate-required write is not on your own initiative: it is the operator's standing request, made
+  and reported under that section. Everything irreversible is previewed in its exact final form and
+  confirmed (charter P6).
 - **Mark anything delivered that the wrapper has not recorded.** If it is not in the state file, it
   did not happen.
 - **Edit `plugins/**`.** If keel is wrong, file a signal (charter P25).

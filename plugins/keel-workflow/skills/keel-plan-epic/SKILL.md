@@ -144,7 +144,10 @@ root `keel-index.ps1` scans, so `reference/INDEX.md` is wrong until it is rebuil
 whose commit gate checks the index, the commit is refused until you do (keel's own does, in
 `scripts/check-suite-docs.ps1`). The order and the staging rule are stated once in
 `keel-orchestrator`'s "Ending a session" section — follow it there. The command is under
-"Rebuilding the index" in `keel-project-context`.
+"Rebuilding the index" in `keel-project-context`. In every git project the ledger and the rebuilt
+index are committed locally once the operator approves them, and the commit reported, under "Whether
+to ask, or to act and report — reversibility decides" in `keel-orchestrator/SKILL.md`; a project
+that shares its progress also pushes it, as "Decomposing an area" says.
 
 ## What this skill does not do
 
