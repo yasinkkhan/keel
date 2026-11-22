@@ -4,6 +4,61 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.86.0 - 2026-11-22
+
+- **`keel-workflow` 0.78.0: the state can hold the order between workstreams, and `status` walks
+  it.** Until now `status` named next only from phases' run orders, which are unique within one
+  workstream: two workstreams each holding a phase at the same run order made it decline to choose,
+  and a workstream with no phases, or one whose phases were all finished, was work it could not name
+  at all. The order lived only in a project's own prose. No release carries this yet; it reaches an
+  installed copy with the next one.
+  - **Order on workstreams and phases.** A workstream may carry an `order`, and so may a single
+    phase, which is then placed in the sequence on its own instead of running inside its workstream.
+    The project's sequence is its unfinished workstreams and placed phases by order; `tree` and
+    `order` print each one's position (`#1`, `#2`), and an epic's line in `tree` shows the
+    position of its first unfinished workstream (`order: from #1`). Epics store no order.
+  - **The `order` verb.** With no arguments it prints the sequence: a header with the counts, then
+    one line per position with the id, title, parent and the item the walk would name for it; with
+    nothing placed it says so and writes nothing. `order -Id <id> -Before <id>` (or `-After <id>`,
+    `-First`, `-Last`) moves one workstream or phase between its neighbours and rewrites no other
+    record; an epic's id moves all its unfinished workstreams as one block, keeping their order among
+    themselves, while a placed phase keeps its own position. `order -Set <ids in order>` places many
+    at once, which is how a project adopts an order; it must list every unfinished item already
+    placed, and refuses at exit 90 otherwise. No input names a number: each one is computed between
+    two neighbours, so one writer cannot make two items share a place. Order belongs to no one, so
+    in a project that shares its progress anyone may place work, while a phase keeps its owner.
+  - **The walk.** Once anything is placed, `status` walks the sequence: a placed phase is named if
+    it can run; a workstream gives its first runnable phase by run order, `next: plan W<n>  (<title>
+    - no phases yet)` when it has no phases, and `next: close W<n>  (<title> - every phase
+    finished)` when all are finished; a workstream or phase that cannot run is passed over. The order
+    decides, so there is no ambiguity warning. An open workstream with no place prints `WARNING: <n>
+    open workstream(s) have no place in the order: <ids>. Place each with: order -Id <id> -After
+    <id>` and is never named; a pending phase under a closed workstream gets a line of its own.
+    `add-workstream` in an ordered project places the new workstream right after the last one under
+    its parent epic, or last. In a project that shares its progress, `next:` is the first item of
+    the walk you own, `others:` gives everyone else's by the same walk, and a `plan` or `close`
+    item, which belongs to nobody, is printed to everyone on an `unowned:` line.
+  - **Needs on whole workstreams.** `add-workstream -Needs <ids>` and `revise-workstream -Needs
+    <ids|none>` declare the phases or workstreams a workstream needs delivered first, with the
+    refusals a phase's needs have (itself or one of its own phases and a cycle at 90, an unknown id at
+    94). Until a need is met none of the workstream's phases is named next, in any project, and
+    `status` prints `<id> waits on ...` as it does for a phase. `-Needs` alone is accepted on a
+    workstream that has delivered phases, and refused on a closed one. `tree` prints a workstream's
+    needs.
+  - **Shared progress.** A node file carries `order` and `needs`, and a placed phase's
+    `phase.json` carries `order`, only when they are set. After a merge, `status` and `tree` warn
+    when two unfinished items share an order (neither is named next), when a workstream's need names
+    no file, and when needs form a cycle through a workstream. Because an older keel rewrites a file it
+    changes with only the fields it knows, `status` also warns when an unfinished item's file held
+    `order` or `needs` at an earlier commit and no longer does, and when a phase an older keel handed
+    over lost its place.
+  - **What does not change.** A project that places nothing and declares no workstream need prints
+    exactly what it printed, line for line, and no verb gains a required parameter.
+  - **`scripts/test-ordered-plan.ps1`**, a new suite that `check-suite-docs.ps1 -Strict` runs, checks
+    the walk, the verb, the placement, workstream needs, the shared files and checks and the
+    session-start hook, each case beside a control; `-AgainstWrapper <path>` runs it against another
+    copy, and `-RealProjects` compares `status` and `tree` on this machine's projects, read only.
+
 ## marketplace 0.85.0 - 2026-11-21
 
 - **`keel-workflow` 0.77.0: every approved write is committed locally and reported.** A session that

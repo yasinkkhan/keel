@@ -1725,5 +1725,64 @@ if ($Strict) {
     }
 }
 
+# --- 22. the order between workstreams still behaves: run its committed suite ----
+#
+# The ninth sibling of sections 9, 11, 14, 15, 17, 19, 20 and 21. scripts/test-ordered-plan.ps1
+# builds projects that place their workstreams in an order and checks the walk status names next
+# by, the 'order' verb and its refusals, needs on whole workstreams, tree's positions, the same in a
+# project that shares its progress through its repo, and that a project that places nothing prints
+# what the baseline wrapper prints. A checker that is not wired to anything is a violation of
+# charter P11.
+#
+# It makes a few hundred wrapper calls, each in its own powershell.exe, so it costs several
+# minutes. -Strict ONLY, like the other suites, so the commit gate stays fast. Its two modes,
+# -AgainstWrapper and -RealProjects, are human-invoked and not run here.
+if ($Strict) {
+    $opSuitePath = Join-Path $RepoRoot 'scripts\test-ordered-plan.ps1'
+    if (-not (Test-Path -LiteralPath $opSuitePath)) {
+        Problem 'scripts/test-ordered-plan.ps1 is missing. The order between workstreams ships with the suite that re-checks it (charter P11).'
+    }
+    else {
+        # Native call, so no bare 2>&1 and no reliance on $ErrorActionPreference.
+        # The EXIT CODE decides.
+        $opSuitePrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $opSuiteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $opSuitePath
+        $opSuiteCode   = $LASTEXITCODE
+        $ErrorActionPreference = $opSuitePrior
+
+        if ($opSuiteCode -ne 0) {
+            Problem "scripts/test-ordered-plan.ps1 reported failures (exit $opSuiteCode). The order between workstreams does not behave as specified."
+            foreach ($opSuiteLine in @($opSuiteOutput)) {
+                if (-not [string]::IsNullOrWhiteSpace($opSuiteLine)) { Note $opSuiteLine }
+            }
+        }
+        else {
+            # A DECLARED coupling to another script's output wording, taken openly as sections
+            # 9, 11, 14, 15, 17, 19, 20 and 21 take theirs: the count is parsed from the suite's
+            # summary line, and an unparseable summary is a PROBLEM, never a zero and never a
+            # silent skip. Explicit loop, not a Where-Object, for the reason section 20 gives.
+            $opSuiteCases = -1
+            $opSuiteFails = -1
+            foreach ($opSuiteLine in @($opSuiteOutput)) {
+                if ($opSuiteLine -match '^test-ordered-plan:\s+(\d+)\s+case\(s\),\s+(\d+)\s+failure\(s\)') {
+                    $opSuiteCases = [int]$Matches[1]
+                    $opSuiteFails = [int]$Matches[2]
+                }
+            }
+            if ($opSuiteCases -lt 0) {
+                Problem ("scripts/test-ordered-plan.ps1 exited 0 but its summary line could not be parsed, so this gate cannot say how many cases actually ran. " +
+                         "Expected a line matching: test-ordered-plan: <n> case(s), <n> failure(s). If the suite's output format moved, move this pattern with it.")
+                foreach ($opSuiteLine in @($opSuiteOutput)) {
+                    if (-not [string]::IsNullOrWhiteSpace($opSuiteLine)) { Note $opSuiteLine }
+                }
+            }
+            else {
+                Ran ("ordered plan suite: {0} case(s), {1} failure(s) (scripts/test-ordered-plan.ps1)" -f $opSuiteCases, $opSuiteFails)
+            }
+        }
+    }
+}
+
 # --- verdict ----------------------------------------------------------------
 Write-Verdict

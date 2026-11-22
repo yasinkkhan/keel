@@ -105,6 +105,14 @@ param(
     # The phases (W<n>.<p>) and workstreams (W<n>) a phase needs delivered first, comma-separated,
     # for 'add-phase' and 'revise-phase'; 'none' declares no needs.
     [string]$Needs,
+    # The order between workstreams, for 'order': -Id <item> with one of -Before <id>, -After <id>,
+    # -First or -Last moves one item (or an epic's workstreams, as a block) between its neighbours;
+    # -Set <ids> places many at once, in that order.
+    [string]$Before,
+    [string]$After,
+    [switch]$First,
+    [switch]$Last,
+    [string]$Set,
     [string]$Repo,
     # The repo a signal record's issues moved FROM, for 'signals-relink'. The repo they moved to is
     # -Repo, or the stored destination.
@@ -812,7 +820,13 @@ function New-SpForm {
         if ([string](Get-Prop $SpObj 'role' '') -eq 'epic') { $spF['groups'] = Get-Prop $SpObj 'groups' $null }
         else { $spF['status'] = Get-Prop $SpObj 'status' $null }
         foreach ($spN in @('created', 'revisedAt', 'closedAt', 'abandonedReason', 'abandonedAt')) { $spF[$spN] = Get-Prop $SpObj $spN $null }
+        # The order and a workstream's needs, only when the node carries them, so a project that
+        # places nothing writes HEAD's bytes. A cleared list of needs keeps its key (an empty list),
+        # which is what tells a cleared list from one an older keel dropped (Get-OrderDropLines).
+        if ($null -ne (Get-OrderValue $SpObj)) { $spF['order'] = Get-OrderValue $SpObj }
+        if ($null -ne $SpObj.PSObject.Properties['needs']) { $spF['needs'] = @(@($SpObj.needs) | Where-Object { $null -ne $_ }) }
     }
+    if ($SpKind -eq 'decl' -and $null -ne (Get-OrderValue $SpObj)) { $spF['order'] = Get-OrderValue $SpObj }
     if ($SpKind -eq 'run' -and [string](Get-Prop $SpObj 'stage' '') -eq 'handed-over') {
         $spF['handedOverTo'] = Get-Prop $SpObj 'handedOverTo' $null
         $spF['handOverReason'] = Get-Prop $SpObj 'handOverReason' $null
@@ -974,6 +988,8 @@ function New-SpMemPhase {
     $spP['capLifts'] = @()
     $spP['abandonedReason'] = Get-Prop $SpRun 'abandonedReason' $null
     foreach ($spN in @('revisedAt', 'owner', 'needs', 'continues')) { $spP[$spN] = Get-Prop $SpDecl $spN $null }
+    # A placed phase's order, only when its declaration carries one.
+    if ($null -ne (Get-OrderValue $SpDecl)) { $spP['order'] = Get-OrderValue $SpDecl }
     if ($null -eq $spP['needs']) { $spP['needs'] = @() } else { $spP['needs'] = @($spP['needs']) }
     foreach ($spN in @('handedOverTo', 'handOverReason')) {
         if ($null -ne $SpRun.PSObject.Properties[$spN]) { $spP[$spN] = $SpRun.PSObject.Properties[$spN].Value }
@@ -1256,7 +1272,7 @@ function Assert-PhaseOwner {
 # rule is refused by the code that refuses it for one writer (92 for a run order).
 function Get-SpMergeProblems {
     param([string]$MpSlug, $MpState)
-    $mpOut = @{ Lines = (New-Object System.Collections.Generic.List[string]); Clash = @{} }
+    $mpOut = @{ Lines = (New-Object System.Collections.Generic.List[string]); Clash = @{}; OrderClash = @{} }
     $mpPhases = @(Get-Phases $MpState)
     $mpNodes = @(Get-Nodes $MpState)
     $mpNodeIds = @{}
@@ -1347,6 +1363,68 @@ function Get-SpMergeProblems {
         if ($mpCycIds.Count -eq 2) { $mpCycText = "phases $($mpCycIds -join ' and ') need each other in a cycle, so neither" }
         else { $mpCycText = "phases $(($mpCycIds[0..($mpCycIds.Count - 2)]) -join ', ') and $($mpCycIds[-1]) need each other in a cycle, so none of them" }
         $mpOut.Lines.Add("$mpCycText can be named as next. Re-declare one's needs with revise-phase -Phase $($mpCycIds[0]) -Needs <ids, or none>.")
+    }
+
+    # Two unfinished items at one order: no single writer can make one, since every placing call
+    # computes a number strictly between two distinct neighbours, so only a merge does. Neither is
+    # named as next; the walk skips every item in OrderClash.
+    # Grouped by comparing neighbours in the sorted sequence, never by the number's text: 6 and 6.0
+    # are one order.
+    $mpSeqItems = @((Get-OrderSequence $MpState).Items)
+    $mpGroupsO = New-Object System.Collections.Generic.List[object]
+    foreach ($mpIt in $mpSeqItems) {
+        if ($mpGroupsO.Count -gt 0 -and $mpGroupsO[$mpGroupsO.Count - 1].Order -eq $mpIt.Order) { $mpGroupsO[$mpGroupsO.Count - 1].Ids.Add($mpIt.Id) }
+        else {
+            $mpNewG = [pscustomobject]@{ Order = $mpIt.Order; Ids = (New-Object System.Collections.Generic.List[string]) }
+            $mpNewG.Ids.Add($mpIt.Id)
+            $mpGroupsO.Add($mpNewG)
+        }
+    }
+    foreach ($mpG in $mpGroupsO) {
+        $mpSame = @($mpG.Ids)
+        $mpOk = Format-Order $mpG.Order
+        if ($mpSame.Count -lt 2) { continue }
+        foreach ($mpI in $mpSame) { $mpOut.OrderClash[$mpI] = $true }
+        if ($mpSame.Count -eq 2) {
+            $mpOut.Lines.Add("$($mpSame[0]) and $($mpSame[1]) share order $mpOk, so neither is named as next. Move one with order -Id $($mpSame[1]) -After $($mpSame[0]).")
+        }
+        else {
+            $mpOut.Lines.Add("$(($mpSame[0..($mpSame.Count - 2)]) -join ', ') and $($mpSame[-1]) share order $mpOk, so none of them is named as next. Move all but $($mpSame[0]) with order -Id <id> -After <id>.")
+        }
+    }
+
+    # A workstream's need on an id with no file, as a phase's need above.
+    foreach ($mpN in $mpNodes) {
+        if ([string](Get-Prop $mpN 'role' '') -ne 'workstream') { continue }
+        foreach ($mpNeedId in @(Get-NeedIds $mpN)) {
+            if ($mpNeedId -match '^W\d+$') {
+                if (-not $mpNodeIds.ContainsKey($mpNeedId)) { $mpOut.Lines.Add("workstream $($mpN.id) needs $mpNeedId, which has no file under progress/nodes/. $mpPull") }
+            }
+            elseif (-not $mpPhaseIds.ContainsKey($mpNeedId)) {
+                $mpOut.Lines.Add("workstream $($mpN.id) needs $mpNeedId, which has no file under progress/phases/ or progress/closed/. $mpPull")
+            }
+        }
+    }
+
+    # A cycle that runs through a workstream's needs. One made of phase needs alone is the check
+    # above's, so a group whose members are all phases and which that check already names is left
+    # to it.
+    if (Test-AnyWsNeeds $MpState) {
+        $mpPhaseCycles = @{}
+        foreach ($mpCyc in @(Get-NeedCycles $MpState)) { $mpPhaseCycles[(@($mpCyc.Ids) -join '|')] = $true }
+        foreach ($mpWc in @(Get-WsNeedCycles $MpState)) {
+            $mpWcIds = @(@($mpWc.Ids) | ForEach-Object { $_.Substring(2) })
+            $mpWcWs = @(@($mpWc.Ids) | Where-Object { $_ -like 'W:*' } | ForEach-Object { $_.Substring(2) })
+            if ($mpWcWs.Count -eq 0 -and $mpPhaseCycles.ContainsKey((@($mpWcIds | Sort-Object) -join '|'))) { continue }
+            $mpNamed = @($mpWcWs | Where-Object { @(Get-NeedIds (Find-Node $MpState $_)).Count -gt 0 })
+            if ($mpNamed.Count -eq 0) {
+                $mpNamed = @($mpWcIds | ForEach-Object { Ws-Of-Phase $_ } | Where-Object { $mpNodeIds.ContainsKey($_) -and @(Get-NeedIds $mpNodeIds[$_]).Count -gt 0 } | Select-Object -First 1)
+            }
+            $mpFix = if ($mpNamed.Count -gt 0) { $mpNamed[0] } else { $mpWcIds[0] }
+            if ($mpWcIds.Count -eq 2) { $mpWcText = "$($mpWcIds -join ' and ') need each other in a cycle, so neither" }
+            else { $mpWcText = "$(($mpWcIds[0..($mpWcIds.Count - 2)]) -join ', ') and $($mpWcIds[-1]) need each other in a cycle, so none of them" }
+            $mpOut.Lines.Add("$mpWcText can be named as next. Re-declare one workstream's needs with revise-workstream -Id $mpFix -Needs <ids, or none>.")
+        }
     }
 
     # A gate entry written by someone other than the phase's owner. The owner cannot change once work
@@ -2747,6 +2825,13 @@ function Read-NeedsParam {
     }
     $rnPath = Find-NeedPath $rnIndex $RnPhaseId $RnWsId @($rnIds) $RnIsNew
     if ($rnPath) { Fail 90 "-Needs would close a cycle of needs: $rnPath. No phase in it could ever be named as next. Nothing was written." }
+    # Only once a workstream carries needs can a cycle run through one, so a project with none asks
+    # nothing more than it did.
+    if (Test-AnyWsNeeds $RnState) {
+        $rnNewPhase = if ($RnIsNew) { $RnPhaseId } else { '' }
+        $rnWsPath = Find-WsNeedPath $RnState @("P:$RnPhaseId") @{ "P:$RnPhaseId" = $rnIds.ToArray() } $rnNewPhase $RnWsId
+        if ($rnWsPath) { Fail 90 "-Needs would close a cycle of needs: $rnWsPath. No phase in it could ever be named as next. Nothing was written." }
+    }
     $rnAt = Now
     return @($rnIds | ForEach-Object { [pscustomobject]@{ id = $_; at = $rnAt } })
 }
@@ -2864,7 +2949,13 @@ function Get-RevisionSig {
     # What a revise must change for the phase or workstream to count as revised, for the warning a
     # phase needing it gets: never a prompt path, and never a need re-declared unchanged.
     param($RsObj, [string]$RsKind)
-    if ($RsKind -eq 'node') { return "$(Get-Prop $RsObj 'title' '')`n$((@(Get-Prop $RsObj 'goals' @())) -join ',')" }
+    if ($RsKind -eq 'node') {
+        $rsNode = "$(Get-Prop $RsObj 'title' '')`n$((@(Get-Prop $RsObj 'goals' @())) -join ',')"
+        # A workstream's needs count too, but only when it has the key, so one with none signs as
+        # it always did.
+        if ($null -ne $RsObj.PSObject.Properties['needs']) { $rsNode += "`n" + ((@(Get-NeedIds $RsObj)) -join ',') }
+        return $rsNode
+    }
     $rsParts = @(
         [string](Get-Prop $RsObj 'scope' ''), [string](Get-Prop $RsObj 'actor' ''),
         ((@(Get-Prop $RsObj 'repos' @())) -join ','), [string](Get-Prop $RsObj 'due' ''),
@@ -2872,6 +2963,523 @@ function Get-RevisionSig {
         ((@(Get-NeedIds $RsObj)) -join ',')
     )
     return ($rsParts -join "`n")
+}
+
+# -------------------------------------------------------------------- order --
+# THE ORDER between workstreams. A workstream node may carry 'order', and so may a phase, which is
+# then a placed phase, walked at its own position instead of inside its workstream. The project's
+# sequence is its unfinished workstreams and unfinished placed phases that carry one, by order; an
+# item's position is its rank in that sequence, and positions are what every line prints. Neither
+# key exists until 'order' or 'add-workstream' in an ordered project writes it, so a project that
+# places nothing stores and prints what it always did. Orders are [decimal]: a decimal is written to
+# JSON in full and read back equal, where a double is not, so a number between two neighbours is
+# always one more decimal, and placing one item never rewrites another. No input names a number,
+# so one writer cannot make two unfinished items share one; only a merge can, and the read-time
+# check names it. Order is preference and needs are dependency: a workstream may also carry needs,
+# the list a phase carries, and is held while one is not met, in any project.
+
+function Get-OrderValue {
+    # An item's order as a [decimal], or $null when it has none.
+    param($OvObj)
+    if ($null -eq $OvObj) { return $null }
+    $ovP = $OvObj.PSObject.Properties['order']
+    if ($null -eq $ovP -or $null -eq $ovP.Value -or [string]$ovP.Value -eq '') { return $null }
+    return [decimal]$ovP.Value
+}
+
+function Format-Order {
+    # A stored order as text, trailing zeros dropped, the same on every machine.
+    param($FoVal)
+    return ([decimal]$FoVal).ToString('0.############################', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-WsFinished {
+    param($TwNode)
+    return ($SpClosedStatuses -contains [string](Get-Prop $TwNode 'status' ''))
+}
+
+function Test-ProjectOrdered {
+    # Ordered once any workstream or phase carries an order, finished or not, so a project stays
+    # adopted after its first ordered workstream closes.
+    param($ToState)
+    foreach ($toN in @(Get-Nodes $ToState)) {
+        if ([string](Get-Prop $toN 'role' '') -eq 'workstream' -and $null -ne (Get-OrderValue $toN)) { return $true }
+    }
+    foreach ($toP in @(Get-Phases $ToState)) { if ($null -ne (Get-OrderValue $toP)) { return $true } }
+    return $false
+}
+
+function Test-AnyWsNeeds {
+    param($TnState)
+    foreach ($tnN in @(Get-Nodes $TnState)) {
+        if ([string](Get-Prop $tnN 'role' '') -eq 'workstream' -and @(Get-NeedIds $tnN).Count -gt 0) { return $true }
+    }
+    return $false
+}
+
+function Get-OrderSequence {
+    # The sequence, each item { Kind (ws|phase); Id; Obj; Order; Pos }, by order then id, and the
+    # unfinished workstreams that carry no order, in state order. A hashtable, so neither list
+    # unrolls on the way out.
+    param($OsState)
+    $osItems = New-Object System.Collections.Generic.List[object]
+    $osUnplaced = New-Object System.Collections.Generic.List[string]
+    foreach ($osN in @(Get-Nodes $OsState)) {
+        if ([string](Get-Prop $osN 'role' '') -ne 'workstream' -or (Test-WsFinished $osN)) { continue }
+        $osO = Get-OrderValue $osN
+        if ($null -eq $osO) { $osUnplaced.Add([string]$osN.id); continue }
+        $osItems.Add([pscustomobject]@{ Kind = 'ws'; Id = [string]$osN.id; Obj = $osN; Order = $osO; Pos = 0 })
+    }
+    foreach ($osP in @(Get-Phases $OsState)) {
+        if (Test-NeedFinished $osP) { continue }
+        $osO = Get-OrderValue $osP
+        if ($null -eq $osO) { continue }
+        $osItems.Add([pscustomobject]@{ Kind = 'phase'; Id = [string]$osP.id; Obj = $osP; Order = $osO; Pos = 0 })
+    }
+    $osSorted = @($osItems | Sort-Object -Property Order, Id)
+    $osPos = @{}
+    for ($osI = 0; $osI -lt $osSorted.Count; $osI++) { $osSorted[$osI].Pos = $osI + 1; $osPos[$osSorted[$osI].Id] = $osI + 1 }
+    return @{ Items = $osSorted; Unplaced = $osUnplaced.ToArray(); Pos = $osPos }
+}
+
+function Get-WsDescendants {
+    # The unfinished workstreams under an epic, nested epics included.
+    param($WdState, [string]$WdEpic)
+    $wdOut = New-Object System.Collections.Generic.List[object]
+    $wdQueue = New-Object System.Collections.Generic.Queue[string]
+    $wdQueue.Enqueue($WdEpic)
+    $wdSeen = @{}
+    while ($wdQueue.Count -gt 0) {
+        $wdCur = $wdQueue.Dequeue()
+        if ($wdSeen.ContainsKey($wdCur)) { continue }
+        $wdSeen[$wdCur] = $true
+        foreach ($wdN in @(Get-Nodes $WdState | Where-Object { [string](Get-Prop $_ 'parent' '') -eq $wdCur })) {
+            $wdRole = [string](Get-Prop $wdN 'role' '')
+            if ($wdRole -eq 'epic') { $wdQueue.Enqueue([string]$wdN.id) }
+            elseif ($wdRole -eq 'workstream' -and -not (Test-WsFinished $wdN)) { $wdOut.Add($wdN) }
+        }
+    }
+    return $wdOut.ToArray()
+}
+
+function Get-OrderBetween {
+    # Count numbers strictly between two distinct neighbouring orders, evenly spaced; $null for a
+    # side means the end of the sequence. With neither side, 1 to Count.
+    param($ObLo, $ObHi, [int]$ObCount)
+    $obOut = New-Object System.Collections.Generic.List[decimal]
+    if ($null -eq $ObLo -and $null -eq $ObHi) {
+        for ($obI = 1; $obI -le $ObCount; $obI++) { $obOut.Add([decimal]$obI) }
+        return $obOut.ToArray()
+    }
+    if ($null -eq $ObLo) { $ObLo = [decimal]$ObHi - [decimal]($ObCount + 1) }
+    elseif ($null -eq $ObHi) { $ObHi = [decimal]$ObLo + [decimal]($ObCount + 1) }
+    $obLoD = [decimal]$ObLo
+    $obHiD = [decimal]$ObHi
+    $obPrev = $obLoD
+    for ($obI = 1; $obI -le $ObCount; $obI++) {
+        $obV = $obLoD + (($obHiD - $obLoD) * [decimal]$obI) / [decimal]($ObCount + 1)
+        if ($obV -le $obPrev -or $obV -ge $obHiD) {
+            Fail 90 "There is no number left between these two places in the order: they have been split too many times. Number the whole order again with: order -Set <ids in order>. Nothing was written."
+        }
+        $obOut.Add($obV)
+        $obPrev = $obV
+    }
+    return $obOut.ToArray()
+}
+
+function Get-WsNeedHeld {
+    # Each unfinished workstream with a need not met, by id: the list of { Need; State }.
+    param($WhState, [string]$WhSlug)
+    $whOut = @{}
+    $whIndex = $null
+    foreach ($whN in @(Get-Nodes $WhState)) {
+        if ([string](Get-Prop $whN 'role' '') -ne 'workstream' -or (Test-WsFinished $whN)) { continue }
+        $whNeeds = @(Get-Prop $whN 'needs' @())
+        if ($whNeeds.Count -eq 0) { continue }
+        if ($null -eq $whIndex) { $whIndex = Get-NeedIndex $WhState }
+        $whList = New-Object System.Collections.Generic.List[object]
+        foreach ($whNd in $whNeeds) {
+            $whSt = Get-NeedState $whIndex $WhState $WhSlug $whNd
+            if ($whSt.Kind -ne 'met') { $whList.Add([pscustomobject]@{ Need = $whNd; State = $whSt }) }
+        }
+        if ($whList.Count -gt 0) { $whOut[[string]$whN.id] = $whList }
+    }
+    return $whOut
+}
+
+function Get-WnEdges {
+    # What one vertex of the needs graph waits on. A vertex is 'P:<phase id>' or 'W:<workstream id>'.
+    # A phase waits on its needs and on its workstream's needs; a workstream on its unfinished phases
+    # (it closes after them) and on its needs. A finished item waits on nothing. -WeOverride maps a
+    # vertex to the needs about to be written for it; -WeNewPhase is a phase being added to -WeNewWs.
+    param($WeIndex, $WeState, [string]$WeV, [hashtable]$WeOverride, [string]$WeNewPhase, [string]$WeNewWs)
+    $weOut = New-Object System.Collections.Generic.List[string]
+    $weKind = $WeV.Substring(0, 1)
+    $weId = $WeV.Substring(2)
+    $weIds = New-Object System.Collections.Generic.List[string]
+    if ($weKind -eq 'P') {
+        $weP = $null
+        if ($WeIndex.Phase.ContainsKey($weId)) { $weP = $WeIndex.Phase[$weId] }
+        if ($null -ne $weP -and (Test-NeedFinished $weP)) { return @() }
+        $weWsId = ''
+        if ($null -ne $weP) { $weWsId = [string](Get-Prop $weP 'ws' '') } elseif ($weId -eq $WeNewPhase) { $weWsId = $WeNewWs }
+        if ($WeOverride.ContainsKey($WeV)) { foreach ($weX in @($WeOverride[$WeV])) { $weIds.Add([string]$weX) } }
+        elseif ($null -ne $weP) { foreach ($weX in @(Get-NeedIds $weP)) { $weIds.Add($weX) } }
+        if ($weWsId) {
+            if ($WeOverride.ContainsKey("W:$weWsId")) { foreach ($weX in @($WeOverride["W:$weWsId"])) { $weIds.Add([string]$weX) } }
+            else {
+                $weWsN = Find-Node $WeState $weWsId
+                if ($null -ne $weWsN -and -not (Test-WsFinished $weWsN)) { foreach ($weX in @(Get-NeedIds $weWsN)) { $weIds.Add($weX) } }
+            }
+        }
+    }
+    else {
+        $weN = Find-Node $WeState $weId
+        if ($null -ne $weN -and (Test-WsFinished $weN)) { return @() }
+        if ($WeIndex.Ws.ContainsKey($weId)) {
+            foreach ($wePid in $WeIndex.Ws[$weId]) { if (-not (Test-NeedFinished $WeIndex.Phase[$wePid])) { $weOut.Add("P:$wePid") } }
+        }
+        if ($WeNewPhase -and $WeNewWs -eq $weId) { $weOut.Add("P:$WeNewPhase") }
+        if ($WeOverride.ContainsKey($WeV)) { foreach ($weX in @($WeOverride[$WeV])) { $weIds.Add([string]$weX) } }
+        elseif ($null -ne $weN) { foreach ($weX in @(Get-NeedIds $weN)) { $weIds.Add($weX) } }
+    }
+    foreach ($weNd in $weIds) {
+        if ($weNd -match '^W\d+$') { $weOut.Add("W:$weNd") }
+        else { foreach ($weCp in (Get-NeedChain $WeIndex $weNd).Phases) { $weOut.Add("P:$([string]$weCp.id)") } }
+    }
+    return $weOut.ToArray()
+}
+
+function Find-WsNeedPath {
+    # A path of needs from one of the given vertices back to itself, as 'W3 -> W2 -> W2.1 -> W3', or
+    # $null, in the graph Get-WnEdges describes. The starts are the vertices whose edges the write
+    # changes: a workstream and its unfinished phases, or one phase.
+    param($FwState, [string[]]$FwStarts, [hashtable]$FwOverride, [string]$FwNewPhase = '', [string]$FwNewWs = '')
+    $fwIndex = Get-NeedIndex $FwState
+    foreach ($fwStart in @($FwStarts)) {
+        $fwPrev = @{}
+        $fwQueue = New-Object System.Collections.Generic.Queue[string]
+        $fwQueue.Enqueue($fwStart)
+        $fwPrev[$fwStart] = ''
+        while ($fwQueue.Count -gt 0) {
+            $fwCur = $fwQueue.Dequeue()
+            foreach ($fwT in @(Get-WnEdges $fwIndex $FwState $fwCur $FwOverride $FwNewPhase $FwNewWs)) {
+                if ($fwT -eq $fwStart) {
+                    $fwPath = New-Object System.Collections.Generic.List[string]
+                    $fwPath.Add($fwStart.Substring(2))
+                    $fwBack = $fwCur
+                    while ($fwBack -ne $fwStart) { $fwPath.Insert(0, $fwBack.Substring(2)); $fwBack = $fwPrev[$fwBack] }
+                    $fwPath.Insert(0, $fwStart.Substring(2))
+                    return ($fwPath -join ' -> ')
+                }
+                if ($fwPrev.ContainsKey($fwT)) { continue }
+                $fwPrev[$fwT] = $fwCur
+                $fwQueue.Enqueue($fwT)
+            }
+        }
+    }
+    return $null
+}
+
+function Get-WsNeedCycles {
+    # The groups of unfinished items whose needs form a cycle through the graph Get-WnEdges
+    # describes, each { Ids } in vertex order (workstreams and phases). Only a merge makes one.
+    param($WcState)
+    $wcIndex = Get-NeedIndex $WcState
+    $wcVerts = New-Object System.Collections.Generic.List[string]
+    foreach ($wcN in @(Get-Nodes $WcState)) {
+        if ([string](Get-Prop $wcN 'role' '') -eq 'workstream' -and -not (Test-WsFinished $wcN)) { $wcVerts.Add("W:$([string]$wcN.id)") }
+    }
+    foreach ($wcP in @(Get-Phases $WcState)) { if (-not (Test-NeedFinished $wcP)) { $wcVerts.Add("P:$([string]$wcP.id)") } }
+    $wcReach = @{}
+    foreach ($wcV in $wcVerts) {
+        $wcSeen = @{}
+        $wcQueue = New-Object System.Collections.Generic.Queue[string]
+        $wcQueue.Enqueue($wcV)
+        while ($wcQueue.Count -gt 0) {
+            foreach ($wcT in @(Get-WnEdges $wcIndex $WcState $wcQueue.Dequeue() @{} '' '')) {
+                if ($wcSeen.ContainsKey($wcT)) { continue }
+                $wcSeen[$wcT] = $true
+                $wcQueue.Enqueue($wcT)
+            }
+        }
+        $wcReach[$wcV] = $wcSeen
+    }
+    $wcGroups = [ordered]@{}
+    foreach ($wcA in $wcVerts) {
+        if (-not $wcReach[$wcA].ContainsKey($wcA)) { continue }
+        $wcMembers = @($wcVerts | Where-Object { $wcReach[$wcA].ContainsKey($_) -and $wcReach.ContainsKey($_) -and $wcReach[$_].ContainsKey($wcA) })
+        $wcGroups[$wcMembers -join '|'] = [pscustomobject]@{ Ids = $wcMembers }
+    }
+    return @($wcGroups.Values)
+}
+
+function Read-WsNeedsParam {
+    # A workstream's -Needs as the list to store, or a refusal before anything is written. 'none' is
+    # an empty list.
+    param($RwState, [string]$RwWsId, [string]$RwRaw, [string]$RwSlug)
+    if ($RwRaw.Trim() -eq 'none') { return @() }
+    $rwIds = New-Object System.Collections.Generic.List[string]
+    foreach ($rwI in @(Split-Csv $RwRaw)) { if (-not $rwIds.Contains($rwI)) { $rwIds.Add($rwI) } }
+    if ($rwIds.Count -eq 0) { Fail 90 "-Needs names no id. Give phase or workstream ids, comma-separated, or none for no needs. Nothing was written." }
+    $rwPull = if (Test-SharedProgress $RwSlug) { ' If someone else added it, pull first.' } else { '' }
+    $rwIndex = Get-NeedIndex $RwState
+    foreach ($rwI in $rwIds) {
+        if ($rwI -cnotmatch '^W\d+$' -and $rwI -cnotmatch '^W\d+\.\d+[a-z]?$') {
+            Fail 90 "-Needs '$rwI' is not a phase or workstream id. Expected W<n>.<p> for a phase (e.g. W4.2 or W4.5b) or W<n> for a whole workstream (e.g. W4). Nothing was written."
+        }
+        if ($rwI -ceq $RwWsId) { Fail 90 "Workstream '$RwWsId' cannot need itself. Nothing was written." }
+        if ($rwI -match '^W\d+\.' -and (Ws-Of-Phase $rwI) -ceq $RwWsId) {
+            Fail 90 "Workstream '$RwWsId' cannot need its own phase $($rwI): the phase is part of it, so the need could never be met. Order the phases of one workstream by run order. Nothing was written."
+        }
+        if ($rwI -match '^W\d+$') {
+            $rwNode = Find-Node $RwState $rwI
+            if ($null -eq $rwNode -or [string](Get-Prop $rwNode 'role' '') -ne 'workstream') { Fail 94 "-Needs '$rwI' names no workstream on this copy.$rwPull Nothing was written." }
+        }
+        elseif (-not $rwIndex.Phase.ContainsKey($rwI)) { Fail 94 "-Needs '$rwI' names no phase on this copy.$rwPull Nothing was written." }
+    }
+    $rwStarts = New-Object System.Collections.Generic.List[string]
+    $rwStarts.Add("W:$RwWsId")
+    if ($rwIndex.Ws.ContainsKey($RwWsId)) {
+        foreach ($rwPid in $rwIndex.Ws[$RwWsId]) { if (-not (Test-NeedFinished $rwIndex.Phase[$rwPid])) { $rwStarts.Add("P:$rwPid") } }
+    }
+    $rwPath = Find-WsNeedPath $RwState $rwStarts.ToArray() @{ "W:$RwWsId" = $rwIds.ToArray() }
+    if ($rwPath) { Fail 90 "-Needs would close a cycle of needs: $rwPath. Nothing in it could ever be named as next. Nothing was written." }
+    $rwAt = Now
+    return @($rwIds | ForEach-Object { [pscustomobject]@{ id = $_; at = $rwAt } })
+}
+
+function Get-OrderWalk {
+    # The walk of an ordered project. Each item of the sequence in turn: a placed phase is named if
+    # runnable; a workstream, unless its own need is not met, gives 'plan W<n>' when it has no phases
+    # at all, else its first runnable phase by run order among those not placed and carrying a run
+    # order, else 'close W<n>' when every phase it has is finished; an item in an order clash after a
+    # merge is skipped. With -WkByOwner the choice of a phase is one person's: a placed phase counts
+    # only if they own it, and a workstream's phase only if they own it, while the derived items are
+    # read from the whole workstream and belong to nobody: they are collected in Derived and never
+    # named. Returns { Next; Derived; Held; Waiting; Skipped }, Next $null when nothing is named.
+    param($WkState, $WkItems, $WkPhHeld, $WkWsHeld, $WkClash, [bool]$WkByOwner, [string]$WkOwner)
+    $wkOut = [pscustomobject]@{ Next = $null; Derived = (New-Object System.Collections.Generic.List[object]); Held = $false; Waiting = $false; Skipped = $false }
+    $wkIndex = Get-NeedIndex $WkState
+    foreach ($wkIt in @($WkItems)) {
+        if ($WkClash.ContainsKey($wkIt.Id)) { $wkOut.Skipped = $true; continue }
+        if ($wkIt.Kind -eq 'phase') {
+            $wkP = $wkIt.Obj
+            if ($WkByOwner -and [string](Get-Prop $wkP 'owner' '') -cne $WkOwner) { continue }
+            if ([string](Get-Prop $wkP 'stage' '') -eq 'waiting') { $wkOut.Waiting = $true; continue }
+            if ($WkPhHeld.ContainsKey([string]$wkP.id) -or $WkWsHeld.ContainsKey([string](Get-Prop $wkP 'ws' ''))) { $wkOut.Held = $true; continue }
+            if ($null -eq $wkOut.Next) { $wkOut.Next = [pscustomobject]@{ Kind = 'phase'; Id = [string]$wkP.id; Obj = $wkP } }
+            continue
+        }
+        $wkN = $wkIt.Obj
+        if ($WkWsHeld.ContainsKey($wkIt.Id)) { $wkOut.Held = $true; continue }
+        $wkAll = @()
+        if ($wkIndex.Ws.ContainsKey($wkIt.Id)) { $wkAll = @($wkIndex.Ws[$wkIt.Id] | ForEach-Object { $wkIndex.Phase[$_] }) }
+        $wkDerived = $null
+        if ($wkAll.Count -eq 0) { $wkDerived = 'plan' }
+        elseif (@($wkAll | Where-Object { -not (Test-NeedFinished $_) }).Count -eq 0) { $wkDerived = 'close' }
+        if ($null -ne $wkDerived) {
+            $wkItem = [pscustomobject]@{ Kind = $wkDerived; Id = $wkIt.Id; Obj = $wkN }
+            if ($WkByOwner) { $wkOut.Derived.Add($wkItem) }
+            elseif ($null -eq $wkOut.Next) { $wkOut.Next = $wkItem }
+            continue
+        }
+        $wkCands = @($wkAll | Where-Object {
+            -not (Test-NeedFinished $_) -and $null -eq (Get-OrderValue $_) -and (Get-Prop $_ 'runOrder' -1) -ge 0 -and
+            (-not $WkByOwner -or [string](Get-Prop $_ 'owner' '') -ceq $WkOwner)
+        } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } }, id)
+        foreach ($wkC in $wkCands) {
+            if ([string](Get-Prop $wkC 'stage' '') -eq 'waiting') { $wkOut.Waiting = $true; continue }
+            if ($WkPhHeld.ContainsKey([string]$wkC.id)) { $wkOut.Held = $true; continue }
+            if ($null -eq $wkOut.Next) { $wkOut.Next = [pscustomobject]@{ Kind = 'phase'; Id = [string]$wkC.id; Obj = $wkC } }
+            break
+        }
+    }
+    return $wkOut
+}
+
+function Format-DerivedItem {
+    # A derived item as 'next:' and 'unowned:' print it.
+    param($FdItem, [switch]$FdShort)
+    $fdTitle = [string](Get-Prop $FdItem.Obj 'title' '')
+    if ($FdShort) { return "$($FdItem.Kind) $($FdItem.Id) ($fdTitle)" }
+    if ($FdItem.Kind -eq 'plan') { return "$($FdItem.Kind) $($FdItem.Id)  ($fdTitle - no phases yet)" }
+    return "$($FdItem.Kind) $($FdItem.Id)  ($fdTitle - every phase finished)"
+}
+
+function Get-OrderNextText {
+    # One person's next by the walk, in a few words, for the 'others:' line.
+    param($OtWalk)
+    if ($null -ne $OtWalk.Next) { return [string]$OtWalk.Next.Id }
+    if ($OtWalk.Held) { return 'waiting or waits on other work' }
+    if ($OtWalk.Waiting) { return 'waiting' }
+    return 'nothing placed in the order'
+}
+
+function Get-OrderOrphans {
+    # Pending phases the order can never reach: not placed, under a workstream that is closed or has
+    # no node on this copy.
+    param($OoState)
+    $ooOut = New-Object System.Collections.Generic.List[string]
+    foreach ($ooP in @(Get-Phases $OoState)) {
+        if ((Test-NeedFinished $ooP) -or $null -ne (Get-OrderValue $ooP)) { continue }
+        $ooN = Find-Node $OoState ([string](Get-Prop $ooP 'ws' ''))
+        if ($null -eq $ooN -or (Test-WsFinished $ooN)) { $ooOut.Add([string]$ooP.id) }
+    }
+    return $ooOut.ToArray()
+}
+
+function Write-OrderWarnings {
+    # The two lines an ordered project prints about work the walk cannot reach, each starting
+    # 'WARNING:' so keel-session-start.ps1 forwards it. Sets $script:OrderUnreached rather than
+    # returning a count, because a function that prints and returns hands back both.
+    param($OwSeq, $OwState)
+    $owUnplaced = @($OwSeq.Unplaced)
+    if ($owUnplaced.Count -gt 0) {
+        Say "  WARNING: $($owUnplaced.Count) open workstream(s) have no place in the order: $($owUnplaced -join ', '). Place each with: order -Id <id> -After <id>"
+    }
+    $owOrphans = @(Get-OrderOrphans $OwState)
+    if ($owOrphans.Count -gt 0) {
+        Say "  WARNING: $($owOrphans.Count) pending phase(s) sit under a closed workstream, so the order never reaches them: $($owOrphans -join ', '). Place each with: order -Id <id> -After <id>"
+    }
+    $script:OrderUnreached = ($owUnplaced.Count + $owOrphans.Count) -gt 0
+}
+
+function Get-OrderItemText {
+    # What the walk would name for one item alone, for the 'order' listing.
+    param($OiState, $OiItem, $OiPhHeld, $OiWsHeld)
+    $oiWalk = Get-OrderWalk $OiState @($OiItem) $OiPhHeld $OiWsHeld @{} $false ''
+    if ($null -ne $oiWalk.Next) {
+        if ($oiWalk.Next.Kind -eq 'phase') { return [string]$oiWalk.Next.Id }
+        return "$($oiWalk.Next.Kind) $($oiWalk.Next.Id)"
+    }
+    if ($OiItem.Kind -eq 'ws' -and $OiWsHeld.ContainsKey($OiItem.Id)) {
+        return ('waits on ' + ((@($OiWsHeld[$OiItem.Id] | ForEach-Object { [string](Get-Prop $_.Need 'id' '') })) -join ', '))
+    }
+    $oiPhases = @()
+    if ($OiItem.Kind -eq 'phase') { $oiPhases = @($OiItem.Obj) }
+    else {
+        $oiPhases = @(Get-Phases $OiState | Where-Object { $_.ws -eq $OiItem.Id -and -not (Test-NeedFinished $_) -and $null -eq (Get-OrderValue $_) } |
+            Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)
+    }
+    foreach ($oiP in $oiPhases) {
+        $oiPid = [string]$oiP.id
+        if ($OiPhHeld.ContainsKey($oiPid)) {
+            return "$oiPid waits on " + ((@($OiPhHeld[$oiPid] | ForEach-Object { [string](Get-Prop $_.Need 'id' '') })) -join ', ')
+        }
+        $oiWsId = [string](Get-Prop $oiP 'ws' '')
+        if ($OiWsHeld.ContainsKey($oiWsId)) {
+            return "$oiPid waits on " + ((@($OiWsHeld[$oiWsId] | ForEach-Object { [string](Get-Prop $_.Need 'id' '') })) -join ', ')
+        }
+        if ([string](Get-Prop $oiP 'stage' '') -eq 'waiting') { return "$oiPid waiting" }
+    }
+    return 'nothing runnable'
+}
+
+function Get-OrderDropLines {
+    # A shared project only: each unfinished item whose file held 'order' or 'needs' at an earlier
+    # commit and no longer does. A keel older than this one rewrites a node or a phase declaration it
+    # changes with only the fields it knows, and never one it does not change (both measured), so a
+    # key that vanishes is that keel's write. Read from two local git calls over progress/nodes and
+    # progress/phases: the uncommitted diff, and the last 100 commits (a drop older than that is not
+    # reported). A key line removed with none added for that key, in a file the diff does not
+    # delete (a fold deletes phase files on purpose), whose working copy now lacks the key. A finished
+    # item is left out: the remedy refuses it, and an older close or abandon rewrites the node it
+    # finishes. Plus, needing no git, a hand-over an older keel made: an unfinished phase continuing
+    # one that held an order, holding none itself. Returns the lines, each printed after 'WARNING: '.
+    param($OdProj, $OdState)
+    $odOut = New-Object System.Collections.Generic.List[string]
+    $odRoot = $OdProj.Root
+    $odDrops = [ordered]@{}
+    $odMark = [string][char]1
+    $odCalls = @(
+        , @('-C', $odRoot, 'diff', 'HEAD', '-U0', '--no-renames', '--no-color', '--', 'progress/nodes', 'progress/phases')
+        , @('-C', $odRoot, 'log', '-n', '100', '-p', '-U0', '--no-renames', '--no-color', '--format=%x01%H', '--', 'progress/nodes', 'progress/phases')
+    )
+    foreach ($odArgs in $odCalls) {
+        $odRes = Invoke-Native -Exe 'git' -Arguments $odArgs -NativeSplitStderr
+        if ($odRes.NotFound -or $odRes.Code -ne 0) { continue }
+        $odFile = $null; $odDel = $false; $odRm = @{}; $odAdd = @{}
+        foreach ($odLine in @(@($odRes.Output) + @($odMark + 'END'))) {
+            $odStart = ($odLine -like 'diff --git *') -or ($odLine.StartsWith($odMark))
+            if ($odStart -and $null -ne $odFile) {
+                if (-not $odDel) {
+                    foreach ($odK in @($odRm.Keys)) { if (-not $odAdd.ContainsKey($odK)) { $odDrops["$odFile|$odK"] = @($odFile, $odK) } }
+                }
+                $odFile = $null
+            }
+            if ($odLine -like 'diff --git *') {
+                $odM = [regex]::Match($odLine, '^diff --git a/(\S+) b/')
+                $odFile = if ($odM.Success) { $odM.Groups[1].Value } else { $null }
+                $odDel = $false; $odRm = @{}; $odAdd = @{}
+                continue
+            }
+            if ($null -eq $odFile) { continue }
+            if ($odLine -like 'deleted file mode*') { $odDel = $true; continue }
+            if ($odLine.StartsWith('---') -or $odLine.StartsWith('+++')) { continue }
+            $odKm = [regex]::Match($odLine, '^([-+])\s*"(order|needs)"\s*:')
+            if ($odKm.Success) {
+                if ($odKm.Groups[1].Value -eq '-') { $odRm[$odKm.Groups[2].Value] = $true } else { $odAdd[$odKm.Groups[2].Value] = $true }
+            }
+        }
+    }
+    foreach ($odD in @($odDrops.Values)) {
+        $odPath = [string]$odD[0]; $odKey = [string]$odD[1]
+        $odItem = $null; $odKind = ''
+        $odNm = [regex]::Match($odPath, '^progress/nodes/(W\d+)\.json$')
+        $odPm = [regex]::Match($odPath, '^progress/phases/(W\d+\.\d+[a-z]?)/phase\.json$')
+        if ($odNm.Success) { $odItem = Find-Node $OdState $odNm.Groups[1].Value; $odKind = 'ws' }
+        elseif ($odPm.Success -and $odKey -eq 'order') { $odItem = Find-Phase $OdState $odPm.Groups[1].Value; $odKind = 'phase' }
+        if ($null -eq $odItem) { continue }
+        if ($odKind -eq 'ws' -and (Test-WsFinished $odItem)) { continue }
+        if ($odKind -eq 'phase' -and (Test-NeedFinished $odItem)) { continue }
+        $odFull = Join-Path $odRoot ($odPath -replace '/', '\')
+        if (-not (Test-Path -LiteralPath $odFull)) { continue }
+        $odNow = $null
+        try { $odNow = [System.IO.File]::ReadAllText($odFull, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $odNow = $null }
+        if ($null -eq $odNow -or $null -ne $odNow.PSObject.Properties[$odKey]) { continue }
+        $odId = [string]$odItem.id
+        if ($odKey -eq 'order') {
+            $odOut.Add("$odPath held order at an earlier commit and no longer does - a keel older than this one rewrote it. Place it again with: order -Id $odId -After <id>")
+        }
+        else {
+            $odOut.Add("$odPath held needs at an earlier commit and no longer does - a keel older than this one rewrote it. Declare them again with: revise-workstream -Id $odId -Needs <ids>")
+        }
+    }
+    foreach ($odP in @(Get-Phases $OdState)) {
+        if ((Test-NeedFinished $odP) -or $null -ne (Get-OrderValue $odP)) { continue }
+        $odCont = [string](Get-Prop $odP 'continues' '')
+        if (-not $odCont) { continue }
+        $odPrev = Find-Phase $OdState $odCont
+        if ($null -eq $odPrev -or $null -eq (Get-OrderValue $odPrev)) { continue }
+        $odOut.Add("$($odP.id) continues $odCont, which held a place in the order, but holds none itself - a keel older than this one handed it over. Place it again with: order -Id $($odP.id) -After <id>")
+    }
+    return $odOut.ToArray()
+}
+
+function Write-WsNeedLines {
+    # What each held workstream waits on, in state order: one line per need not met, as a phase's.
+    param($WnHeld, $WnState)
+    foreach ($wnN in @(Get-Nodes $WnState | Where-Object { $WnHeld.ContainsKey([string]$_.id) })) {
+        $wnId = [string]$wnN.id
+        foreach ($wnH in $WnHeld[$wnId]) {
+            $wnNeedId = [string](Get-Prop $wnH.Need 'id' '')
+            switch ($wnH.State.Kind) {
+                'waiting' {
+                    Say "  $wnId waits on $($wnH.State.Text)"
+                    if ($wnH.State.Revised) {
+                        Say "  WARNING: $wnId needs $wnNeedId, which was revised after the need was declared ($(Get-Prop $wnH.Need 'at' '?')). Check the need still holds, then re-declare it with revise-workstream -Needs."
+                    }
+                }
+                'never' {
+                    $wnRest = @(@(Get-NeedIds $wnN) | Where-Object { $_ -ne $wnNeedId })
+                    $wnRestText = if ($wnRest.Count -gt 0) { $wnRest -join ',' } else { 'none' }
+                    Say "  WARNING: $wnId needs $($wnH.State.Text), which was abandoned, so the need can never be met. Re-declare $wnId's needs without it: revise-workstream -Id $wnId -Needs $wnRestText."
+                }
+                default { Say "  $wnId waits on $($wnH.State.Text), which names no phase or workstream on this copy." }
+            }
+        }
+    }
 }
 
 # ------------------------------------------------------------------ reports --
@@ -4102,7 +4710,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              ack-keel-version  handoff  share-progress  join"
     Write-Output "  Repos:      add-repo  repos"
     Write-Output "  Structure:  add-goal  set-goal-status  add-epic  add-workstream  add-phase"
-    Write-Output "              revise-epic  revise-workstream  revise-phase"
+    Write-Output "              revise-epic  revise-workstream  revise-phase  order"
     Write-Output "  Execution:  set-stage  set-waiting  clear-waiting  record-verdict"
     Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  hand-over"
     Write-Output "              close"
@@ -4112,7 +4720,17 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  'revise-phase -Correction' appends a dated note to a DELIVERED phase; its scope stays."
     Write-Output "  'add-phase -Needs <ids>' and 'revise-phase -Needs <ids|none>' declare the phases (W4.2) or"
     Write-Output "  workstreams (W4) a phase needs delivered first; status names it next only once they are."
+    Write-Output "  'add-workstream -Needs <ids>' and 'revise-workstream -Needs <ids|none>' declare the work a whole"
+    Write-Output "  workstream needs first; until it is delivered none of its phases is named next, in any project."
     Write-Output "  'abandon -Ws' records a workstream that never ran, with a reason. It is one-way."
+    Write-Output ""
+    Write-Output "  'order' prints the order between workstreams. 'order -Set <ids in order>' places workstreams"
+    Write-Output "  and phases; it must list every unfinished item already placed (exit 90 otherwise). 'order -Id"
+    Write-Output "  <id> -Before <id>' (or -After <id>, -First, -Last) moves one, rewriting no other record; an"
+    Write-Output "  epic id moves all its unfinished workstreams as one block. Once anything is placed, status"
+    Write-Output "  walks the order: a workstream gives its first runnable phase, 'plan W<n>' when it has no"
+    Write-Output "  phases and 'close W<n>' when all are finished, and 'add-workstream' places the new one"
+    Write-Output "  after its epic's last. With nothing placed, status names next as it always has."
     Write-Output ""
     Write-Output "  A verify PASS or INCONCLUSIVE records a fingerprint of what it verified. The human,"
     Write-Output "  enact and record gates, and 'status', WARN when it has moved - they never refuse."
@@ -4712,6 +5330,9 @@ switch ($Command) {
     $phases = @(Get-Phases $state)
     $nodes  = @(Get-Nodes $state)
     $goalList = @(Get-GoalList $state)
+    # An ordered project walks its sequence for next; one with no order anywhere prints what it
+    # always printed (see the order section).
+    $stOrdered = Test-ProjectOrdered $state
 
     # No [active] bracket closes this line, for the reason written beside the 'list' row
     # above - the field has one possible value.
@@ -4736,6 +5357,7 @@ switch ($Command) {
         Write-SpRemoteLines $proj $cfg
         $stMerge = Get-SpMergeProblems $proj.Slug $state
         foreach ($stLine in @($stMerge.Lines)) { Say "  WARNING: after a merge, $stLine" }
+        foreach ($stDrop in @(Get-OrderDropLines $proj $state)) { Say "  WARNING: $stDrop" }
         $stMe = Get-SpMe $proj.Slug
     }
 
@@ -4756,15 +5378,18 @@ switch ($Command) {
 
     # A project with goals but nothing decomposed is a real session boundary - it is
     # where keel-plan-project ends - so the handoff reports here too, before the exit.
-    if ($phases.Count -eq 0) { Say '  No phases declared yet.'; Write-HandoffLine $proj $state; Write-UnpushedCommitsLine $proj $cfg; exit 0 }
+    # An ordered project goes on to its walk, which names 'plan W<n>' for a workstream with no phases.
+    if ($phases.Count -eq 0 -and -not $stOrdered) { Say '  No phases declared yet.'; Write-HandoffLine $proj $state; Write-UnpushedCommitsLine $proj $cfg; exit 0 }
 
     # ---- phase table
-    Write-Output ''
-    Write-Output ("  {0,-9} {1,-9} {2,-9} {3,-15}" -f 'PHASE', 'ORDER', 'ACTOR', 'STAGE')
-    foreach ($p in @($phases | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
-        Write-Output (Format-PhaseLine $p $proj.Slug)
+    if ($phases.Count -gt 0) {
+        Write-Output ''
+        Write-Output ("  {0,-9} {1,-9} {2,-9} {3,-15}" -f 'PHASE', 'ORDER', 'ACTOR', 'STAGE')
+        foreach ($p in @($phases | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
+            Write-Output (Format-PhaseLine $p $proj.Slug)
+        }
+        Write-Output ''
     }
-    Write-Output ''
 
     # ---- what runs next, by DECLARED order only
     $pending = @($phases | Where-Object { @('delivered', 'abandoned', 'handed-over') -notcontains (Get-Prop $_ 'stage' '') })
@@ -4787,16 +5412,48 @@ switch ($Command) {
     }
     # A phase with a need not yet met is held back: never named as next, here or on 'others:'.
     $stHeld = Get-HeldPhases $state $proj.Slug $pending
+    # A workstream with a need not met holds every phase of it, in any project. With no workstream
+    # need $stHeldAll is $stHeld, so a project that declares none chooses next as it always did.
+    $stWsHeld = Get-WsNeedHeld $state $proj.Slug
+    $stHeldAll = @{}
+    foreach ($stHk in @($stHeld.Keys)) { $stHeldAll[$stHk] = $stHeld[$stHk] }
+    foreach ($stHp0 in $pending) { if ($stWsHeld.ContainsKey([string](Get-Prop $stHp0 'ws' ''))) { $stHeldAll[[string]$stHp0.id] = @() } }
     $ordered = @($stPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
-    $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' -and -not $stHeld.ContainsKey([string]$_.id) })
-    $stHeldOrdered = @($ordered | Where-Object { $stHeld.ContainsKey([string]$_.id) }).Count -gt 0
+    $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' -and -not $stHeldAll.ContainsKey([string]$_.id) })
+    $stHeldOrdered = @($ordered | Where-Object { $stHeldAll.ContainsKey([string]$_.id) }).Count -gt 0
     $stClashNext = $false
     if ($stShared -and $runnable.Count -gt 0) {
         $stLow0 = Get-Prop $runnable[0] 'runOrder' -1
         $stTied0 = @($runnable | Where-Object { (Get-Prop $_ 'runOrder' -1) -eq $stLow0 })
         $stClashNext = ($stTied0.Count -eq 1) -and $stMerge.Clash.ContainsKey([string]$runnable[0].id)
     }
-    if ($stClashNext) {
+    # ---- an ordered project: the walk names next, and the lines below print what it named
+    $stWalk = $null
+    $stSeq = $null
+    $stOClash = @{}
+    $script:OrderUnreached = $false
+    if ($stOrdered) {
+        $stSeq = Get-OrderSequence $state
+        Write-OrderWarnings $stSeq $state
+        if ($null -ne $stMerge) { $stOClash = $stMerge.OrderClash }
+        $stMeIdW = if ($stMine) { [string](Get-Prop $stMe 'id' '') } else { '' }
+        $stWalk = Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $stMine $stMeIdW
+        $stClashNext = $false
+        $runnable = @()
+        if ($null -ne $stWalk.Next -and $stWalk.Next.Kind -eq 'phase') { $runnable = @($stWalk.Next.Obj) }
+    }
+    if ($stOrdered -and $null -ne $stWalk.Next -and $stWalk.Next.Kind -ne 'phase') {
+        Say "  next: $(Format-DerivedItem $stWalk.Next)"
+    }
+    elseif ($stOrdered -and $null -eq $stWalk.Next) {
+        $stYou = if ($stMine) { ' you own' } else { '' }
+        if ($stWalk.Held) { Say "  next: nothing runnable - every pending phase$stYou is waiting or waits on other work (see the waits on lines below)." }
+        elseif ($stWalk.Waiting) { Say "  next: nothing runnable - every pending phase$stYou is waiting." }
+        elseif ($stWalk.Skipped -or $script:OrderUnreached) { Say '  next: none named - the open work left has no place in the order (see the warnings above).' }
+        elseif ($stMine) { Say '  next: nothing pending that you own.' }
+        else { Say '  next: nothing pending.' }
+    }
+    elseif ($stClashNext) {
         $stC = $stMerge.Clash[[string]$runnable[0].id]
         Say "  next: none named - $($runnable[0].id) shares run order $($stC.Order) in $($stC.Ws) with $($stC.Others -join ', ') after a merge (see the warning above)."
     }
@@ -4922,9 +5579,14 @@ switch ($Command) {
             if ($stPeId -ceq $stMeId) { continue }
             $stTheirs = @($pending | Where-Object { [string](Get-Prop $_ 'owner' '') -ceq $stPeId })
             if ($stTheirs.Count -eq 0) { continue }
-            $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $(Get-SpNextText $stTheirs $stMerge.Clash $stHeld)")
+            $stTheirText = if ($stOrdered) { Get-OrderNextText (Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $true $stPeId) } else { Get-SpNextText $stTheirs $stMerge.Clash $stHeldAll }
+            $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $stTheirText")
         }
         if ($stOthers.Count -gt 0) { Say "  others: $($stOthers -join '; ')" }
+        # The derived items of the walk belong to nobody, so everyone is shown them, on one line.
+        if ($stOrdered -and $stWalk.Derived.Count -gt 0) {
+            Say "  unowned: $((@($stWalk.Derived | ForEach-Object { Format-DerivedItem $_ -FdShort })) -join '; ')"
+        }
     }
 
     # ---- what each held phase waits on, in table order, everyone's: one line per need not met.
@@ -4951,6 +5613,8 @@ switch ($Command) {
             }
         }
     }
+    # ---- and what each held workstream waits on, the same way. Silent when none has a need.
+    if ($stWsHeld.Count -gt 0) { Write-WsNeedLines $stWsHeld $state }
 
     # ---- the handoff the LAST session wrote for this one
     Write-HandoffLine $proj $state
@@ -5131,6 +5795,8 @@ switch ($Command) {
         Write-Output ("  {0}  {1}{2}" -f $g.id, $g.text, $mark)
     }
     Write-Output ''
+    # Positions in the order, empty in a project that places nothing, so its tree is what it was.
+    $trPos = (Get-OrderSequence $state).Pos
 
     function Show-Node {
         param($State, $NodeId, [int]$Depth)
@@ -5149,12 +5815,23 @@ switch ($Command) {
                     $stMark = "  [$stVal$when]"
                 }
             }
-            Write-Output ("{0}{1} [{2}] {3}{4}{5}" -f $pad, $n.id, $n.role, $n.title, $gs, $stMark)
+            $trPosMark = ''
+            $trWsNeeds = ''
+            if ($n.role -eq 'workstream') {
+                if ($trPos.ContainsKey([string]$n.id)) { $trPosMark = "  #$($trPos[[string]$n.id])" }
+                $trWsNeedIds = @(Get-NeedIds $n)
+                if ($trWsNeedIds.Count -gt 0) { $trWsNeeds = "  needs: $($trWsNeedIds -join ', ')" }
+            }
+            Write-Output ("{0}{1} [{2}] {3}{4}{5}{6}{7}" -f $pad, $n.id, $n.role, $n.title, $gs, $stMark, $trPosMark, $trWsNeeds)
             if ($n.role -eq 'workstream' -and (Get-Prop $n 'status' '') -eq 'ABANDONED') {
                 Write-Output ("{0}     abandoned: {1}" -f $pad, (Get-Prop $n 'abandonedReason' ''))
             }
             if ($n.role -eq 'epic') {
-                Write-Output ("{0}     groups: {1}" -f $pad, (Get-Prop $n 'groups' ''))
+                # An epic holds no order; it is shown at its first unfinished workstream's position.
+                $trFrom = ''
+                $trKids = @(@(Get-WsDescendants $State ([string]$n.id)) | Where-Object { $trPos.ContainsKey([string]$_.id) } | ForEach-Object { [int]$trPos[[string]$_.id] } | Sort-Object)
+                if ($trKids.Count -gt 0) { $trFrom = "   order: from #$($trKids[0])" }
+                Write-Output ("{0}     groups: {1}{2}" -f $pad, (Get-Prop $n 'groups' ''), $trFrom)
                 Show-Node -State $State -NodeId $n.id -Depth ($Depth + 1)
             }
             else {
@@ -5162,7 +5839,8 @@ switch ($Command) {
                     $trEx = Get-PhaseLineExtras $p $proj.Slug
                     $trNeedIds = @(Get-NeedIds $p)
                     $trNeeds = if ($trNeedIds.Count -gt 0) { "  needs: $($trNeedIds -join ', ')" } else { '' }
-                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}{7}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trNeeds, $trEx.Owner)
+                    $trPhPos = if ($trPos.ContainsKey([string]$p.id)) { "  #$($trPos[[string]$p.id])" } else { '' }
+                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}{7}{8}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trNeeds, $trEx.Owner, $trPhPos)
                     foreach ($cItem in @(Get-Prop $p 'corrections' @())) {
                         Write-Output ("{0}      correction {1}: {2}" -f $pad, ((Get-Prop $cItem 'at' '') -split 'T')[0], (Get-Prop $cItem 'text' ''))
                     }
@@ -5193,6 +5871,155 @@ switch ($Command) {
             Write-Output ("{0}  UNCLAIMED - no workstream points at this and it is not marked UNADDRESSED (charter P22)" -f $g.id)
         }
     }
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# The order between workstreams (see the order section). With no arguments it prints the sequence
+# and writes nothing. -Id <item> with one of -Before, -After, -First or -Last moves one unfinished
+# workstream or phase, or an epic's unfinished workstreams as one block, between its neighbours, and
+# rewrites no other record. -Set <ids> places workstreams and phases in the order given, and must
+# list every unfinished item already placed. Order belongs to no one: no owner is asked.
+'order' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    $orHow = @()
+    if ($PSBoundParameters.ContainsKey('Before')) { $orHow += 'Before' }
+    if ($PSBoundParameters.ContainsKey('After')) { $orHow += 'After' }
+    if ($First) { $orHow += 'First' }
+    if ($Last) { $orHow += 'Last' }
+
+    # ---- -Set: many at once
+    if ($PSBoundParameters.ContainsKey('Set')) {
+        if ($Id -or $orHow.Count -gt 0) { Fail 90 "-Set places many items at once and stands alone: name no -Id, -Before, -After, -First or -Last with it. Nothing was written." }
+        $state = Read-State $proj.Slug -ForWrite
+        $orIds = New-Object System.Collections.Generic.List[string]
+        foreach ($orI in @(Split-Csv $Set)) {
+            if ($orIds.Contains($orI)) { Fail 90 "-Set names '$orI' twice. Each item takes one place. Nothing was written." }
+            $orIds.Add($orI)
+        }
+        if ($orIds.Count -eq 0) { Fail 90 "-Set names no id. Give workstream and phase ids in the order they run, comma-separated. Nothing was written." }
+        $orObjs = New-Object System.Collections.Generic.List[object]
+        foreach ($orI in $orIds) {
+            if ($orI -cmatch '^W\d+$') {
+                $orN = Find-Node $state $orI
+                if ($null -eq $orN) { Fail 94 "-Set '$orI' names no workstream. Nothing was written." }
+                if ([string](Get-Prop $orN 'role' '') -ne 'workstream') { Fail 90 "-Set '$orI' is a $($orN.role), not a workstream. Nothing was written." }
+                if (Test-WsFinished $orN) { Fail 90 "-Set '$orI' is $(Get-Prop $orN 'status' ''), so it has no place left to take. Nothing was written." }
+                $orObjs.Add($orN)
+            }
+            elseif ($orI -cmatch '^W\d+\.\d+[a-z]?$') {
+                $orP = Find-Phase $state $orI
+                if ($null -eq $orP) { Fail 94 "-Set '$orI' names no phase. Nothing was written." }
+                if (Test-NeedFinished $orP) { Fail 90 "-Set '$orI' is $(Get-Prop $orP 'stage' ''), so it has no place left to take. Nothing was written." }
+                $orObjs.Add($orP)
+            }
+            elseif ($orI -cmatch '^E\d+$') {
+                if ($null -eq (Find-Node $state $orI)) { Fail 94 "-Set '$orI' names no epic. Nothing was written." }
+                Fail 90 "-Set '$orI' is an epic, which holds no place of its own: list its workstreams, or move them as a block with order -Id $orI -Before <id>. Nothing was written."
+            }
+            else { Fail 90 "-Set '$orI' is not a workstream or phase id. Expected W<n> or W<n>.<p>. Nothing was written." }
+        }
+        $orMissing = @(@((Get-OrderSequence $state).Items) | Where-Object { -not $orIds.Contains($_.Id) } | ForEach-Object { $_.Id })
+        if ($orMissing.Count -gt 0) {
+            Fail 90 "-Set must list every unfinished item already placed, so none loses its place without being named. Missing: $($orMissing -join ', '). Add them where they belong, or move items one at a time with order -Id. Nothing was written."
+        }
+        for ($orK = 0; $orK -lt $orObjs.Count; $orK++) { Set-Prop $orObjs[$orK] 'order' ([decimal]($orK + 1)) }
+        Write-State $proj.Slug $state
+        $orPos = (Get-OrderSequence $state).Pos
+        Say "Set the order: $((@($orIds | ForEach-Object { "#$($orPos[$_]) $_" })) -join ', ')."
+        exit 0
+    }
+
+    # ---- -Id: one item, or an epic's workstreams, between its neighbours
+    if ($Id -or $orHow.Count -gt 0) {
+        Require-Param $Id 'Id'
+        if ($orHow.Count -ne 1) { Fail 90 "order -Id takes exactly one of -Before <id>, -After <id>, -First or -Last$(if ($orHow.Count -gt 1) { "; it was given $($orHow -join ' and ')" }). Nothing was written." }
+        $state = Read-State $proj.Slug -ForWrite
+        $orBlock = New-Object System.Collections.Generic.List[object]
+        $orWhat = ''
+        if ($Id -cmatch '^W\d+$') {
+            $orN = Find-Node $state $Id
+            if ($null -eq $orN) { Fail 94 "Workstream '$Id' does not exist." }
+            if ([string](Get-Prop $orN 'role' '') -ne 'workstream') { Fail 90 "'$Id' is a $($orN.role), not a workstream." }
+            if (Test-WsFinished $orN) { Fail 90 "Workstream '$Id' is $(Get-Prop $orN 'status' ''), so it has no place left to take. Nothing was written." }
+            $orBlock.Add($orN)
+        }
+        elseif ($Id -cmatch '^W\d+\.\d+[a-z]?$') {
+            $orP = Find-Phase $state $Id
+            if ($null -eq $orP) { Fail 94 "Phase '$Id' does not exist." }
+            if (Test-NeedFinished $orP) { Fail 90 "Phase '$Id' is $(Get-Prop $orP 'stage' ''), so it has no place left to take. Nothing was written." }
+            $orBlock.Add($orP)
+        }
+        elseif ($Id -cmatch '^E\d+$') {
+            $orE = Find-Node $state $Id
+            if ($null -eq $orE) { Fail 94 "Epic '$Id' does not exist." }
+            if ([string](Get-Prop $orE 'role' '') -ne 'epic') { Fail 90 "'$Id' is a $($orE.role), not an epic." }
+            $orMembers = @(Get-WsDescendants $state $Id)
+            if ($orMembers.Count -eq 0) { Fail 90 "Epic '$Id' holds no unfinished workstream, so there is nothing to move. Nothing was written." }
+            $orUnplaced = @($orMembers | Where-Object { $null -eq (Get-OrderValue $_) } | ForEach-Object { [string]$_.id })
+            if ($orUnplaced.Count -gt 0) {
+                Fail 90 "Epic '$Id' holds workstream(s) with no place in the order yet: $($orUnplaced -join ', '). A block keeps its workstreams' order among themselves, which these do not have; place them first, or use order -Set. Nothing was written."
+            }
+            foreach ($orM in @($orMembers | Sort-Object -Property @{ Expression = { Get-OrderValue $_ } }, id)) { $orBlock.Add($orM) }
+            $orWhat = "$Id's workstream(s) "
+        }
+        else { Fail 90 "-Id '$Id' is not a workstream, phase or epic id. Expected W<n>, W<n>.<p> or E<n>." }
+
+        $orBlockIds = @{}
+        foreach ($orB in $orBlock) { $orBlockIds[[string]$orB.id] = $true }
+        $orRest = @(@((Get-OrderSequence $state).Items) | Where-Object { -not $orBlockIds.ContainsKey($_.Id) })
+        $orLo = $null; $orHi = $null; $orTarget = ''
+        if ($orHow[0] -eq 'First') { if ($orRest.Count -gt 0) { $orHi = $orRest[0].Order } }
+        elseif ($orHow[0] -eq 'Last') { if ($orRest.Count -gt 0) { $orLo = $orRest[$orRest.Count - 1].Order } }
+        else {
+            $orTarget = if ($orHow[0] -eq 'Before') { $Before } else { $After }
+            if ($orBlockIds.ContainsKey($orTarget)) { Fail 90 "-$($orHow[0]) '$orTarget' is one of the items being moved. Nothing was written." }
+            $orT = @($orRest | Where-Object { $_.Id -ceq $orTarget })
+            if ($orT.Count -eq 0) {
+                if ($null -eq (Find-Node $state $orTarget) -and $null -eq (Find-Phase $state $orTarget)) { Fail 94 "-$($orHow[0]) '$orTarget' names no workstream or phase." }
+                Fail 90 "-$($orHow[0]) '$orTarget' has no place in the order (it is finished, not placed, or an epic), so nothing can go beside it. Nothing was written."
+            }
+            $orTo = $orT[0].Order
+            if ($orHow[0] -eq 'Before') {
+                $orHi = $orTo
+                foreach ($orIt in $orRest) { if ($orIt.Order -lt $orTo) { $orLo = $orIt.Order } }
+            }
+            else {
+                $orLo = $orTo
+                foreach ($orIt in $orRest) { if ($orIt.Order -gt $orTo) { $orHi = $orIt.Order; break } }
+            }
+        }
+        $orVals = @(Get-OrderBetween $orLo $orHi $orBlock.Count)
+        for ($orK = 0; $orK -lt $orBlock.Count; $orK++) { Set-Prop $orBlock[$orK] 'order' $orVals[$orK] }
+        Write-State $proj.Slug $state
+        $orPos = (Get-OrderSequence $state).Pos
+        $orAt = (@($orBlock | ForEach-Object { "$($_.id) at #$($orPos[[string]$_.id])" })) -join ', '
+        $orWhere = switch ($orHow[0]) { 'First' { 'first' } 'Last' { 'last' } 'Before' { "before $orTarget" } default { "after $orTarget" } }
+        Say "Placed $orWhat$orAt, $orWhere."
+        exit 0
+    }
+
+    # ---- no arguments: the sequence, read only
+    $state = Read-State $proj.Slug
+    if (-not (Test-ProjectOrdered $state)) {
+        Say "order of $($state.project) - nothing is placed, so status names next as it always has. Adopt an order with: order -Set <ids in order>"
+        exit 0
+    }
+    $orSeq = Get-OrderSequence $state
+    $orItems = @($orSeq.Items)
+    $orPhHeld = Get-HeldPhases $state $proj.Slug @(@(Get-Phases $state) | Where-Object { -not (Test-NeedFinished $_) })
+    $orWsHeld = Get-WsNeedHeld $state $proj.Slug
+    $orWsCount = @($orItems | Where-Object { $_.Kind -eq 'ws' }).Count
+    Say "order of $($state.project) - $orWsCount unfinished workstream(s), $($orItems.Count - $orWsCount) placed phase(s)"
+    foreach ($orIt in $orItems) {
+        $orLabel = if ($orIt.Kind -eq 'ws') { [string](Get-Prop $orIt.Obj 'title' '') } else { [string](Get-Prop $orIt.Obj 'scope' '') }
+        if ($orLabel.Length -gt 40) { $orLabel = $orLabel.Substring(0, 37) + '...' }
+        $orUnder = if ($orIt.Kind -eq 'ws') { [string](Get-Prop $orIt.Obj 'parent' '') } else { [string](Get-Prop $orIt.Obj 'ws' '') }
+        if (-not $orUnder) { $orUnder = 'root' }
+        Write-Output ("  {0,-4} {1,-6} {2,-41} {3,-7} next item: {4}" -f "#$($orIt.Pos)", $orIt.Id, $orLabel, "($orUnder)", (Get-OrderItemText $state $orIt $orPhHeld $orWsHeld))
+    }
+    $script:OrderUnreached = $false
+    Write-OrderWarnings $orSeq $state
     exit 0
 }
 
@@ -5433,9 +6260,33 @@ switch ($Command) {
         parent = $(if ([string]::IsNullOrWhiteSpace($Parent) -or $Parent -eq 'root') { '' } else { $Parent })
         goals = $goalIds; status = 'PLANNED'; created = (Now)
     }
+    # Needs, stored only when given and not 'none', so a workstream added without them is what one
+    # always was.
+    $awNeeds = @()
+    if ($PSBoundParameters.ContainsKey('Needs')) { $awNeeds = @(Read-WsNeedsParam $state $Id $Needs $proj.Slug) }
+    if ($awNeeds.Count -gt 0) { Set-Prop $n 'needs' $awNeeds }
+    # In an ordered project the new workstream takes a place: right after the last unfinished
+    # workstream under its parent epic, nested epics included, or last when the parent is the root
+    # or has none placed. A project that places nothing places nothing here either.
+    if (Test-ProjectOrdered $state) {
+        $awSeq = @((Get-OrderSequence $state).Items)
+        $awLo = $null
+        if ($n.parent) {
+            $awMine = @{}
+            foreach ($awW in @(Get-WsDescendants $state $n.parent)) { $awMine[[string]$awW.id] = $true }
+            foreach ($awIt in $awSeq) { if ($awIt.Kind -eq 'ws' -and $awMine.ContainsKey($awIt.Id)) { $awLo = $awIt.Order } }
+        }
+        if ($null -eq $awLo -and $awSeq.Count -gt 0) { $awLo = $awSeq[$awSeq.Count - 1].Order }
+        $awHi = $null
+        if ($null -ne $awLo) { foreach ($awIt in $awSeq) { if ($awIt.Order -gt $awLo) { $awHi = $awIt.Order; break } } }
+        Set-Prop $n 'order' (@(Get-OrderBetween $awLo $awHi 1))[0]
+    }
     $arr = @(Get-Nodes $state); $arr += $n; Set-Prop $state 'nodes' $arr
     Write-State $proj.Slug $state
-    Say "Added workstream $Id -> $($goalIds -join ',')."
+    $awNote = ''
+    if ($null -ne (Get-OrderValue $n)) { $awNote += ", order #$((Get-OrderSequence $state).Pos[$Id])" }
+    if ($awNeeds.Count -gt 0) { $awNote += ", needs: $((@($awNeeds | ForEach-Object { $_.id })) -join ', ')" }
+    Say "Added workstream $Id -> $($goalIds -join ',')$awNote."
     # P16 - conditional on purpose. A line that always fires trains the reader to skip it,
     # and the test of this fails if it announces itself when nothing was cleared.
     if ($cleared.Count -gt 0) {
@@ -5455,11 +6306,20 @@ switch ($Command) {
     if ($rwNode.role -ne 'workstream') { Fail 93 "'$Id' is a $($rwNode.role), not a workstream (charter P17)." }
     Assert-WsNotAbandoned $rwNode
 
-    if (-not $Title -and -not $Goals) {
-        Fail 90 "Supply at least one of -Title or -Goals for 'revise-workstream'. A revise that changes nothing has asked for nothing."
+    $rwHasNeeds = $PSBoundParameters.ContainsKey('Needs')
+    if (-not $Title -and -not $Goals -and -not $rwHasNeeds) {
+        Fail 90 "Supply at least one of -Title, -Goals or -Needs for 'revise-workstream'. A revise that changes nothing has asked for nothing."
     }
 
-    Assert-NoDeliveredBeneath $state $Id 'workstream'
+    # The title and goals describe what was delivered, so they lock once a phase is. Needs sequence
+    # what is left, so -Needs alone stays open, as revise-epic's -Groups does; a closed workstream
+    # has nothing left to wait.
+    if ($Title -or $Goals) { Assert-NoDeliveredBeneath $state $Id 'workstream' }
+    $rwNeeds = $null
+    if ($rwHasNeeds) {
+        if ([string](Get-Prop $rwNode 'status' '') -eq 'DELIVERED') { Fail 90 "Workstream '$Id' is closed, so nothing of it is left to wait on other work. Nothing was written." }
+        $rwNeeds = @(Read-WsNeedsParam $state $Id $Needs $proj.Slug)
+    }
 
     $rwSigBefore = Get-RevisionSig $rwNode 'node'
     $rwCleared = @()
@@ -5487,11 +6347,17 @@ switch ($Command) {
         Set-Prop $rwNode 'goals' $rwGoalIds
     }
     if ($Title) { Set-Prop $rwNode 'title' $Title }
+    # The list is replaced whole, each need dated now; 'none' keeps the key as an empty list.
+    if ($null -ne $rwNeeds) { Set-Prop $rwNode 'needs' $rwNeeds }
     # Revised, for the warning a phase needing this workstream gets, only on a real change.
     if ((Get-RevisionSig $rwNode 'node') -cne $rwSigBefore) { Set-Prop $rwNode 'revisedAt' (Now) }
 
     Write-State $proj.Slug $state
     Say "Revised workstream $Id."
+    if ($null -ne $rwNeeds) {
+        $rwNeedsText = if ($rwNeeds.Count -gt 0) { (@($rwNeeds | ForEach-Object { $_.id })) -join ', ' } else { 'none' }
+        Say "  needs: $rwNeedsText"
+    }
     # P16 - conditional on purpose. A line that always fires trains the reader to skip it.
     if ($rwCleared.Count -gt 0) {
         Say "  Cleared UNADDRESSED on $($rwCleared -join ', ') - now claimed by $Id (charter P22)."
@@ -5929,8 +6795,8 @@ switch ($Command) {
         $lPos = 0
         foreach ($lift in $capLifts) {
             $lPos++
-            $after = [int](Get-Prop $lift 'afterIteration' 0)
-            $capHist += [pscustomobject]@{ Key = 2 * $after + 1; Pos = $lPos; At = (Get-Prop $lift 'at' '?'); Text = "cap lifted by $(Get-Prop $lift 'rounds' '?') round(s) after round $after on the operator's words: $(Get-Prop $lift 'words' '')" }
+            $lcAfter = [int](Get-Prop $lift 'afterIteration' 0)
+            $capHist += [pscustomobject]@{ Key = 2 * $lcAfter + 1; Pos = $lPos; At = (Get-Prop $lift 'at' '?'); Text = "cap lifted by $(Get-Prop $lift 'rounds' '?') round(s) after round $lcAfter on the operator's words: $(Get-Prop $lift 'words' '')" }
         }
         $capErr.WriteLine("KEEL-STATE:   rounds recorded on $Phase, oldest first:")
         if ($capHist.Count -eq 0) { $capErr.WriteLine('KEEL-STATE:     (none recorded)') }
@@ -6123,6 +6989,8 @@ switch ($Command) {
         needs = @(Get-Prop $p 'needs' @())
         continues = $Phase
     }
+    # A placed phase keeps its place: the successor takes its order, as it takes its run order.
+    if ($null -ne (Get-OrderValue $p)) { Set-Prop $hoNew 'order' (Get-OrderValue $p) }
     Set-Prop $p 'stage' 'handed-over'
     Set-Prop $p 'handedOverTo' $hoSucc
     Set-Prop $p 'handOverReason' $Detail
