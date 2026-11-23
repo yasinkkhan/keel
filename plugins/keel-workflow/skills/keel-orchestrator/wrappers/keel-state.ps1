@@ -131,6 +131,9 @@ param(
     [switch]$Apply,
     [switch]$CloseIssue,
     [switch]$Clear,
+    # A workstream with no planning phase W<n>.0, for 'add-workstream': its one phase's own plan gate
+    # carries the plan.
+    [switch]$Express,
     [switch]$Brief,
     [switch]$Json
 )
@@ -255,6 +258,10 @@ $TrackerKinds   = @('none', 'trello', 'jira', 'github')
 $AddressesVals  = @('defect', 'instance')
 $ReversibleVals = @('none', 'partial', 'full')
 $ObservableVals = @('yes', 'no')
+# A phase's kind and a workstream's kind (charter P2, P17). The first of each is the default and is
+# never stored, so a record made without one is what it always was.
+$PhaseKinds     = @('deliver', 'plan', 'replan')
+$WsKinds        = @('delivery', 'planning')
 
 # ------------------------------------------------------------------ helpers --
 
@@ -825,8 +832,11 @@ function New-SpForm {
         # which is what tells a cleared list from one an older keel dropped (Get-OrderDropLines).
         if ($null -ne (Get-OrderValue $SpObj)) { $spF['order'] = Get-OrderValue $SpObj }
         if ($null -ne $SpObj.PSObject.Properties['needs']) { $spF['needs'] = @(@($SpObj.needs) | Where-Object { $null -ne $_ }) }
+        # A workstream's kind, only when it is not the default, for the same reason.
+        if ([string](Get-Prop $SpObj 'kind' '')) { $spF['kind'] = [string](Get-Prop $SpObj 'kind' '') }
     }
     if ($SpKind -eq 'decl' -and $null -ne (Get-OrderValue $SpObj)) { $spF['order'] = Get-OrderValue $SpObj }
+    if ($SpKind -eq 'decl' -and [string](Get-Prop $SpObj 'kind' '')) { $spF['kind'] = [string](Get-Prop $SpObj 'kind' '') }
     if ($SpKind -eq 'run' -and [string](Get-Prop $SpObj 'stage' '') -eq 'handed-over') {
         $spF['handedOverTo'] = Get-Prop $SpObj 'handedOverTo' $null
         $spF['handOverReason'] = Get-Prop $SpObj 'handOverReason' $null
@@ -990,6 +1000,8 @@ function New-SpMemPhase {
     foreach ($spN in @('revisedAt', 'owner', 'needs', 'continues')) { $spP[$spN] = Get-Prop $SpDecl $spN $null }
     # A placed phase's order, only when its declaration carries one.
     if ($null -ne (Get-OrderValue $SpDecl)) { $spP['order'] = Get-OrderValue $SpDecl }
+    # A planning phase's kind, only when its declaration carries one.
+    if ([string](Get-Prop $SpDecl 'kind' '')) { $spP['kind'] = [string](Get-Prop $SpDecl 'kind' '') }
     if ($null -eq $spP['needs']) { $spP['needs'] = @() } else { $spP['needs'] = @($spP['needs']) }
     foreach ($spN in @('handedOverTo', 'handOverReason')) {
         if ($null -ne $SpRun.PSObject.Properties[$spN]) { $spP[$spN] = $SpRun.PSObject.Properties[$spN].Value }
@@ -1390,6 +1402,20 @@ function Get-SpMergeProblems {
         }
         else {
             $mpOut.Lines.Add("$(($mpSame[0..($mpSame.Count - 2)]) -join ', ') and $($mpSame[-1]) share order $mpOk, so none of them is named as next. Move all but $($mpSame[0]) with order -Id <id> -After <id>.")
+        }
+    }
+
+    # Two open re-plans of one workstream: no single writer can make them (add-phase refuses the
+    # second), so only a merge does. The earliest by created holds the rest; the later is never named.
+    $mpRpOpen = Get-OpenReplans $MpState
+    foreach ($mpRpWs in @($mpRpOpen.Keys | Sort-Object)) {
+        $mpRpIds = @(@($mpRpOpen[$mpRpWs]) | ForEach-Object { [string]$_.id })
+        if ($mpRpIds.Count -lt 2) { continue }
+        if ($mpRpIds.Count -eq 2) {
+            $mpOut.Lines.Add("$($mpRpIds[0]) and $($mpRpIds[1]) are both open re-plans of $mpRpWs, so $($mpRpIds[1]), the later, is not named as next. Abandon one, or deliver $($mpRpIds[0]) first.")
+        }
+        else {
+            $mpOut.Lines.Add("$(($mpRpIds[0..($mpRpIds.Count - 2)]) -join ', ') and $($mpRpIds[-1]) are all open re-plans of $mpRpWs, so only $($mpRpIds[0]), the earliest, is named as next. Abandon the others, or deliver $($mpRpIds[0]) first.")
         }
     }
 
@@ -2954,6 +2980,8 @@ function Get-RevisionSig {
         # A workstream's needs count too, but only when it has the key, so one with none signs as
         # it always did.
         if ($null -ne $RsObj.PSObject.Properties['needs']) { $rsNode += "`n" + ((@(Get-NeedIds $RsObj)) -join ',') }
+        # A kind counts only when stored, for the same reason.
+        if ([string](Get-Prop $RsObj 'kind' '')) { $rsNode += "`nkind:$(Get-Prop $RsObj 'kind' '')" }
         return $rsNode
     }
     $rsParts = @(
@@ -2962,6 +2990,7 @@ function Get-RevisionSig {
         [string](Get-Prop $RsObj 'runOrder' -1), [string](Get-Prop $RsObj 'owner' ''),
         ((@(Get-NeedIds $RsObj)) -join ',')
     )
+    if ([string](Get-Prop $RsObj 'kind' '')) { $rsParts += "kind:$(Get-Prop $RsObj 'kind' '')" }
     return ($rsParts -join "`n")
 }
 
@@ -2996,6 +3025,105 @@ function Format-Order {
 function Test-WsFinished {
     param($TwNode)
     return ($SpClosedStatuses -contains [string](Get-Prop $TwNode 'status' ''))
+}
+
+function Get-PhaseKind {
+    # A phase's kind: 'plan' or 'replan' when stored, else 'deliver', the default, stored only where a
+    # stored kind was set back to it (revise-phase).
+    param($PkObj)
+    $pkV = [string](Get-Prop $PkObj 'kind' '')
+    if ($pkV -eq 'plan' -or $pkV -eq 'replan') { return $pkV }
+    return 'deliver'
+}
+
+function Get-WsKind {
+    # A workstream's kind: 'planning' when stored, else 'delivery', the default, stored only where a
+    # stored kind was set back to it (revise-workstream).
+    param($GwObj)
+    if ([string](Get-Prop $GwObj 'kind' '') -eq 'planning') { return 'planning' }
+    return 'delivery'
+}
+
+function Get-OpenReplans {
+    # The open re-plans of each workstream, by workstream id, earliest first (by created, then id).
+    param($OrState)
+    $orOut = @{}
+    foreach ($orP in @(Get-Phases $OrState)) {
+        if ((Test-NeedFinished $orP) -or (Get-PhaseKind $orP) -ne 'replan') { continue }
+        $orWs = [string](Get-Prop $orP 'ws' '')
+        if (-not $orOut.ContainsKey($orWs)) { $orOut[$orWs] = New-Object System.Collections.Generic.List[object] }
+        $orOut[$orWs].Add($orP)
+    }
+    foreach ($orWs in @($orOut.Keys)) {
+        $orOut[$orWs] = @($orOut[$orWs] | Sort-Object -Property @{ Expression = { Get-SpTicks (Get-Prop $_ 'created' $null) } }, id)
+    }
+    return $orOut
+}
+
+function Get-ReplanHolds {
+    # THE HOLD: while a workstream has an open re-plan, every other unfinished phase of it is held
+    # where it is, by id the re-plan holding it. Nothing is written to a held phase: it keeps its
+    # gates, iterations and verify binding, and is simply not named until the re-plan is delivered.
+    # In any project, ordered or not, because registering a re-plan is a step the project took.
+    # Where a merge left two open in one workstream, the earliest holds and the later is never named
+    # (Get-ReplanLater).
+    param($RhState)
+    $rhOut = @{}
+    $rhOpen = Get-OpenReplans $RhState
+    if ($rhOpen.Count -eq 0) { return $rhOut }
+    foreach ($rhP in @(Get-Phases $RhState)) {
+        $rhWs = [string](Get-Prop $rhP 'ws' '')
+        if (-not $rhOpen.ContainsKey($rhWs) -or (Test-NeedFinished $rhP) -or (Get-PhaseKind $rhP) -eq 'replan') { continue }
+        $rhOut[[string]$rhP.id] = [string](@($rhOpen[$rhWs])[0].id)
+    }
+    return $rhOut
+}
+
+function Get-ReplanLater {
+    # Each open re-plan that is not the earliest in its workstream, by id the earliest. Only a merge
+    # makes one: add-phase refuses a second open re-plan.
+    param($RlState)
+    $rlOut = @{}
+    $rlOpen = Get-OpenReplans $RlState
+    foreach ($rlWs in @($rlOpen.Keys)) {
+        $rlList = @($rlOpen[$rlWs])
+        for ($rlI = 1; $rlI -lt $rlList.Count; $rlI++) { $rlOut[[string]$rlList[$rlI].id] = [string]$rlList[0].id }
+    }
+    return $rlOut
+}
+
+function Get-KindTag {
+    # What 'next:' adds after a planning phase's id.
+    param($KtObj)
+    switch (Get-PhaseKind $KtObj) {
+        'plan'   { return '  [plan]' }
+        'replan' { return '  [re-plan]' }
+        default  { return '' }
+    }
+}
+
+function Assert-PhaseKindFits {
+    # The rules a phase's kind obeys, for add-phase and revise-phase: a planning workstream holds only
+    # planning phases; kind plan in a delivery workstream is the phase that plans it, W<n>.0; a
+    # re-plan is never W<n>.0, and a workstream has one open re-plan at a time.
+    param($AkState, $AkWsNode, [string]$AkPhase, [string]$AkKind)
+    $akWsId = [string]$AkWsNode.id
+    $akPlanning = (Get-WsKind $AkWsNode) -eq 'planning'
+    # W<n>.0, or a successor of it after a hand-over (W<n>.0b).
+    $akIsZero = $AkPhase -cmatch ('^' + [regex]::Escape($akWsId) + '\.0[a-z]?$')
+    if ($akPlanning -and $AkKind -eq 'deliver') {
+        Fail 93 "$akWsId is a planning workstream, which holds only planning phases (charter P17). Give $AkPhase -Kind plan or -Kind replan. Nothing was written."
+    }
+    if ($AkKind -eq 'plan' -and -not $akPlanning -and -not $akIsZero) {
+        Fail 90 "The planning phase of a delivery workstream is $akWsId.0, the phase that plans it, and $AkPhase is not it. Use -Phase $akWsId.0, or leave -Kind out. Nothing was written."
+    }
+    if ($AkKind -eq 'replan') {
+        if ($akIsZero) { Fail 90 "$akWsId.0 is the phase that plans $akWsId, so it cannot be a re-plan. Give the re-plan the next free number in $akWsId. Nothing was written." }
+        $akOpen = @(Get-Phases $AkState | Where-Object { [string](Get-Prop $_ 'ws' '') -eq $akWsId -and [string]$_.id -cne $AkPhase -and (Get-PhaseKind $_) -eq 'replan' -and -not (Test-NeedFinished $_) })
+        if ($akOpen.Count -gt 0) {
+            Fail 90 "$akWsId already has an open re-plan, $($akOpen[0].id). Deliver or abandon it first: two open re-plans of one workstream would each hold the other. Nothing was written."
+        }
+    }
 }
 
 function Test-ProjectOrdered {
@@ -3257,8 +3385,13 @@ function Get-OrderWalk {
     # merge is skipped. With -WkByOwner the choice of a phase is one person's: a placed phase counts
     # only if they own it, and a workstream's phase only if they own it, while the derived items are
     # read from the whole workstream and belong to nobody: they are collected in Derived and never
-    # named. Returns { Next; Derived; Held; Waiting; Skipped }, Next $null when nothing is named.
-    param($WkState, $WkItems, $WkPhHeld, $WkWsHeld, $WkClash, [bool]$WkByOwner, [string]$WkOwner)
+    # named. A workstream's open re-plan comes first, then its planning phase W<n>.0, then the rest by
+    # run order; a phase a re-plan holds (-WkRpHeld) is never named, nor the later of two open re-plans
+    # (-WkRpLater). A derived 'close W<n>' of a workstream with a W<n>.0 belongs to that phase's owner:
+    # in a by-owner walk it is their Next and nobody else's, and only a derived item with no W<n>.0 is
+    # collected in Derived.
+    # Returns { Next; Derived; Held; Waiting; Skipped }, Next $null when nothing is named.
+    param($WkState, $WkItems, $WkPhHeld, $WkWsHeld, $WkClash, [bool]$WkByOwner, [string]$WkOwner, $WkRpHeld = @{}, $WkRpLater = @{})
     $wkOut = [pscustomobject]@{ Next = $null; Derived = (New-Object System.Collections.Generic.List[object]); Held = $false; Waiting = $false; Skipped = $false }
     $wkIndex = Get-NeedIndex $WkState
     foreach ($wkIt in @($WkItems)) {
@@ -3268,6 +3401,7 @@ function Get-OrderWalk {
             if ($WkByOwner -and [string](Get-Prop $wkP 'owner' '') -cne $WkOwner) { continue }
             if ([string](Get-Prop $wkP 'stage' '') -eq 'waiting') { $wkOut.Waiting = $true; continue }
             if ($WkPhHeld.ContainsKey([string]$wkP.id) -or $WkWsHeld.ContainsKey([string](Get-Prop $wkP 'ws' ''))) { $wkOut.Held = $true; continue }
+            if ($WkRpHeld.ContainsKey([string]$wkP.id) -or $WkRpLater.ContainsKey([string]$wkP.id)) { $wkOut.Held = $true; continue }
             if ($null -eq $wkOut.Next) { $wkOut.Next = [pscustomobject]@{ Kind = 'phase'; Id = [string]$wkP.id; Obj = $wkP } }
             continue
         }
@@ -3280,17 +3414,35 @@ function Get-OrderWalk {
         elseif (@($wkAll | Where-Object { -not (Test-NeedFinished $_) }).Count -eq 0) { $wkDerived = 'close' }
         if ($null -ne $wkDerived) {
             $wkItem = [pscustomobject]@{ Kind = $wkDerived; Id = $wkIt.Id; Obj = $wkN }
-            if ($WkByOwner) { $wkOut.Derived.Add($wkItem) }
+            $wkZero = @($wkAll | Where-Object { [string]$_.id -ceq "$($wkIt.Id).0" -and (Get-PhaseKind $_) -eq 'plan' })
+            if ($WkByOwner -and $wkDerived -eq 'close' -and $wkZero.Count -gt 0) {
+                # The owner of W<n>.0, or, where it was handed over, of the phase that finished it.
+                $wkEnd = $wkZero[0]
+                $wkHops = 0
+                while ([string](Get-Prop $wkEnd 'stage' '') -eq 'handed-over' -and $wkHops -lt 26) {
+                    $wkNextP = $null
+                    if ($wkIndex.Phase.ContainsKey([string](Get-Prop $wkEnd 'handedOverTo' ''))) { $wkNextP = $wkIndex.Phase[[string](Get-Prop $wkEnd 'handedOverTo' '')] }
+                    if ($null -eq $wkNextP) { break }
+                    $wkEnd = $wkNextP
+                    $wkHops++
+                }
+                if ([string](Get-Prop $wkEnd 'owner' '') -ceq $WkOwner -and $null -eq $wkOut.Next) { $wkOut.Next = $wkItem }
+            }
+            elseif ($WkByOwner) { $wkOut.Derived.Add($wkItem) }
             elseif ($null -eq $wkOut.Next) { $wkOut.Next = $wkItem }
             continue
         }
+        $wkZeroId = "$($wkIt.Id).0"
         $wkCands = @($wkAll | Where-Object {
             -not (Test-NeedFinished $_) -and $null -eq (Get-OrderValue $_) -and (Get-Prop $_ 'runOrder' -1) -ge 0 -and
+            -not $WkRpLater.ContainsKey([string]$_.id) -and
             (-not $WkByOwner -or [string](Get-Prop $_ 'owner' '') -ceq $WkOwner)
-        } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } }, id)
+        } | Sort-Object -Property @{ Expression = {
+                if ((Get-PhaseKind $_) -eq 'replan') { 0 } elseif ([string]$_.id -ceq $wkZeroId -and (Get-PhaseKind $_) -eq 'plan') { 1 } else { 2 } } },
+            @{ Expression = { Get-Prop $_ 'runOrder' -1 } }, id)
         foreach ($wkC in $wkCands) {
             if ([string](Get-Prop $wkC 'stage' '') -eq 'waiting') { $wkOut.Waiting = $true; continue }
-            if ($WkPhHeld.ContainsKey([string]$wkC.id)) { $wkOut.Held = $true; continue }
+            if ($WkPhHeld.ContainsKey([string]$wkC.id) -or $WkRpHeld.ContainsKey([string]$wkC.id)) { $wkOut.Held = $true; continue }
             if ($null -eq $wkOut.Next) { $wkOut.Next = [pscustomobject]@{ Kind = 'phase'; Id = [string]$wkC.id; Obj = $wkC } }
             break
         }
@@ -3310,7 +3462,10 @@ function Format-DerivedItem {
 function Get-OrderNextText {
     # One person's next by the walk, in a few words, for the 'others:' line.
     param($OtWalk)
-    if ($null -ne $OtWalk.Next) { return [string]$OtWalk.Next.Id }
+    if ($null -ne $OtWalk.Next) {
+        if ($OtWalk.Next.Kind -eq 'phase') { return [string]$OtWalk.Next.Id }
+        return "$($OtWalk.Next.Kind) $($OtWalk.Next.Id)"
+    }
     if ($OtWalk.Held) { return 'waiting or waits on other work' }
     if ($OtWalk.Waiting) { return 'waiting' }
     return 'nothing placed in the order'
@@ -3348,7 +3503,8 @@ function Write-OrderWarnings {
 function Get-OrderItemText {
     # What the walk would name for one item alone, for the 'order' listing.
     param($OiState, $OiItem, $OiPhHeld, $OiWsHeld)
-    $oiWalk = Get-OrderWalk $OiState @($OiItem) $OiPhHeld $OiWsHeld @{} $false ''
+    $oiRpHeld = Get-ReplanHolds $OiState
+    $oiWalk = Get-OrderWalk $OiState @($OiItem) $OiPhHeld $OiWsHeld @{} $false '' $oiRpHeld (Get-ReplanLater $OiState)
     if ($null -ne $oiWalk.Next) {
         if ($oiWalk.Next.Kind -eq 'phase') { return [string]$oiWalk.Next.Id }
         return "$($oiWalk.Next.Kind) $($oiWalk.Next.Id)"
@@ -3372,12 +3528,13 @@ function Get-OrderItemText {
             return "$oiPid waits on " + ((@($OiWsHeld[$oiWsId] | ForEach-Object { [string](Get-Prop $_.Need 'id' '') })) -join ', ')
         }
         if ([string](Get-Prop $oiP 'stage' '') -eq 'waiting') { return "$oiPid waiting" }
+        if ($oiRpHeld.ContainsKey($oiPid)) { return "$oiPid held by re-plan $($oiRpHeld[$oiPid])" }
     }
     return 'nothing runnable'
 }
 
 function Get-OrderDropLines {
-    # A shared project only: each unfinished item whose file held 'order' or 'needs' at an earlier
+    # A shared project only: each unfinished item whose file held 'order', 'needs' or 'kind' at an earlier
     # commit and no longer does. A keel older than this one rewrites a node or a phase declaration it
     # changes with only the fields it knows, and never one it does not change (both measured), so a
     # key that vanishes is that keel's write. Read from two local git calls over progress/nodes and
@@ -3401,10 +3558,11 @@ function Get-OrderDropLines {
         if ($odRes.NotFound -or $odRes.Code -ne 0) { continue }
         $odFile = $null; $odDel = $false; $odRm = @{}; $odAdd = @{}
         foreach ($odLine in @(@($odRes.Output) + @($odMark + 'END'))) {
+            # A removed key's value is kept (for kind, which the remedy names); a key's first line is enough.
             $odStart = ($odLine -like 'diff --git *') -or ($odLine.StartsWith($odMark))
             if ($odStart -and $null -ne $odFile) {
                 if (-not $odDel) {
-                    foreach ($odK in @($odRm.Keys)) { if (-not $odAdd.ContainsKey($odK)) { $odDrops["$odFile|$odK"] = @($odFile, $odK) } }
+                    foreach ($odK in @($odRm.Keys)) { if (-not $odAdd.ContainsKey($odK)) { $odDrops["$odFile|$odK"] = @($odFile, $odK, $odRm[$odK]) } }
                 }
                 $odFile = $null
             }
@@ -3417,19 +3575,19 @@ function Get-OrderDropLines {
             if ($null -eq $odFile) { continue }
             if ($odLine -like 'deleted file mode*') { $odDel = $true; continue }
             if ($odLine.StartsWith('---') -or $odLine.StartsWith('+++')) { continue }
-            $odKm = [regex]::Match($odLine, '^([-+])\s*"(order|needs)"\s*:')
+            $odKm = [regex]::Match($odLine, '^([-+])\s*"(order|needs|kind)"\s*:\s*"?([A-Za-z]*)')
             if ($odKm.Success) {
-                if ($odKm.Groups[1].Value -eq '-') { $odRm[$odKm.Groups[2].Value] = $true } else { $odAdd[$odKm.Groups[2].Value] = $true }
+                if ($odKm.Groups[1].Value -eq '-') { $odRm[$odKm.Groups[2].Value] = $odKm.Groups[3].Value } else { $odAdd[$odKm.Groups[2].Value] = $true }
             }
         }
     }
     foreach ($odD in @($odDrops.Values)) {
-        $odPath = [string]$odD[0]; $odKey = [string]$odD[1]
+        $odPath = [string]$odD[0]; $odKey = [string]$odD[1]; $odWas = [string]$odD[2]
         $odItem = $null; $odKind = ''
         $odNm = [regex]::Match($odPath, '^progress/nodes/(W\d+)\.json$')
         $odPm = [regex]::Match($odPath, '^progress/phases/(W\d+\.\d+[a-z]?)/phase\.json$')
         if ($odNm.Success) { $odItem = Find-Node $OdState $odNm.Groups[1].Value; $odKind = 'ws' }
-        elseif ($odPm.Success -and $odKey -eq 'order') { $odItem = Find-Phase $OdState $odPm.Groups[1].Value; $odKind = 'phase' }
+        elseif ($odPm.Success -and ($odKey -eq 'order' -or $odKey -eq 'kind')) { $odItem = Find-Phase $OdState $odPm.Groups[1].Value; $odKind = 'phase' }
         if ($null -eq $odItem) { continue }
         if ($odKind -eq 'ws' -and (Test-WsFinished $odItem)) { continue }
         if ($odKind -eq 'phase' -and (Test-NeedFinished $odItem)) { continue }
@@ -3439,7 +3597,11 @@ function Get-OrderDropLines {
         try { $odNow = [System.IO.File]::ReadAllText($odFull, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $odNow = $null }
         if ($null -eq $odNow -or $null -ne $odNow.PSObject.Properties[$odKey]) { continue }
         $odId = [string]$odItem.id
-        if ($odKey -eq 'order') {
+        if ($odKey -eq 'kind') {
+            $odVerb = if ($odKind -eq 'ws') { "revise-workstream -Id $odId" } else { "revise-phase -Phase $odId" }
+            $odOut.Add("$odPath held kind '$odWas' at an earlier commit and no longer does - a keel older than this one rewrote it. Restore it with: $odVerb -Kind $odWas")
+        }
+        elseif ($odKey -eq 'order') {
             $odOut.Add("$odPath held order at an earlier commit and no longer does - a keel older than this one rewrote it. Place it again with: order -Id $odId -After <id>")
         }
         else {
@@ -3499,8 +3661,16 @@ function Get-PhaseLineExtras {
 }
 
 function Format-PhaseLine {
-    param($P, [string]$FlSlug = '')
+    # -FlHeld maps a phase held by a re-plan to that re-plan; a held phase's line says so, and a
+    # planning phase's line names its kind, right after the stage.
+    param($P, [string]$FlSlug = '', $FlHeld = @{})
     $flEx = Get-PhaseLineExtras $P $FlSlug
+    $flMark = ''
+    if ($FlHeld.ContainsKey([string]$P.id)) { $flMark = "held by re-plan $($FlHeld[[string]$P.id])" }
+    elseif ((Get-PhaseKind $P) -eq 'plan') { $flMark = 'plan' }
+    elseif ((Get-PhaseKind $P) -eq 'replan') { $flMark = 're-plan' }
+    # A stage longer than its column (a hand-over's '-> W5.2b') would run into the mark.
+    if ($flMark -and ([string](Get-Prop $P 'stage' '?') + $flEx.Stage).Length -ge 15) { $flMark = '  ' + $flMark }
     $wait = ''
     if ((Get-Prop $P 'stage' '') -eq 'waiting') {
         $wait = "  waiting-on: $(Get-Prop $P 'waitingOn' '?') review: $(Get-Prop $P 'reviewOn' '?')"
@@ -3509,7 +3679,7 @@ function Format-PhaseLine {
     if ($dueText) { $dueText = "  due: $dueText" }
     $ro = Get-Prop $P 'runOrder' -1
     $roText = if ($ro -lt 0) { 'NO-ORDER' } else { "#$ro" }
-    return ("  {0,-9} {1,-9} {2,-9} {3,-15}{4}{5}{6}" -f $P.id, $roText, (Get-Prop $P 'actor' '?'), ([string](Get-Prop $P 'stage' '?') + $flEx.Stage), $dueText, $wait, $flEx.Owner)
+    return ("  {0,-9} {1,-9} {2,-9} {3,-15}{7}{4}{5}{6}" -f $P.id, $roText, (Get-Prop $P 'actor' '?'), ([string](Get-Prop $P 'stage' '?') + $flEx.Stage), $dueText, $wait, $flEx.Owner, $flMark)
 }
 
 function Get-Signals {
@@ -4723,6 +4893,15 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  'add-workstream -Needs <ids>' and 'revise-workstream -Needs <ids|none>' declare the work a whole"
     Write-Output "  workstream needs first; until it is delivered none of its phases is named next, in any project."
     Write-Output "  'abandon -Ws' records a workstream that never ran, with a reason. It is one-way."
+    Write-Output "  'add-phase -Kind plan|replan' registers a planning phase (default deliver). Kind plan in a"
+    Write-Output "  delivery workstream is W<n>.0, the phase that plans it. While a re-plan is open, every other"
+    Write-Output "  unfinished phase of its workstream is held where it is, in any project, and status names the"
+    Write-Output "  re-plan; once it is delivered they are named again at the stages they were at."
+    Write-Output "  'add-workstream -Kind planning' makes a workstream whose phases plan other work: it declares"
+    Write-Output "  no goal (exit 98 with -Goals) and holds only planning phases. In an ordered project, and for"
+    Write-Output "  the first workstream of a project holding none, add-workstream places the new one and creates"
+    Write-Output "  its planning phase W<n>.0; -Express creates none. 'revise-phase -Kind' and 'revise-workstream"
+    Write-Output "  -Kind' set an unfinished item's kind under the same rules."
     Write-Output ""
     Write-Output "  'order' prints the order between workstreams. 'order -Set <ids in order>' places workstreams"
     Write-Output "  and phases; it must list every unfinished item already placed (exit 90 otherwise). 'order -Id"
@@ -5381,12 +5560,17 @@ switch ($Command) {
     # An ordered project goes on to its walk, which names 'plan W<n>' for a workstream with no phases.
     if ($phases.Count -eq 0 -and -not $stOrdered) { Say '  No phases declared yet.'; Write-HandoffLine $proj $state; Write-UnpushedCommitsLine $proj $cfg; exit 0 }
 
+    # The re-plan hold, in any project: the phases an open re-plan holds, and the later of two open
+    # re-plans of one workstream, which only a merge makes. Neither is named as next.
+    $stRpHeld = Get-ReplanHolds $state
+    $stRpLater = Get-ReplanLater $state
+
     # ---- phase table
     if ($phases.Count -gt 0) {
         Write-Output ''
         Write-Output ("  {0,-9} {1,-9} {2,-9} {3,-15}" -f 'PHASE', 'ORDER', 'ACTOR', 'STAGE')
         foreach ($p in @($phases | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
-            Write-Output (Format-PhaseLine $p $proj.Slug)
+            Write-Output (Format-PhaseLine $p $proj.Slug $stRpHeld)
         }
         Write-Output ''
     }
@@ -5418,6 +5602,7 @@ switch ($Command) {
     $stHeldAll = @{}
     foreach ($stHk in @($stHeld.Keys)) { $stHeldAll[$stHk] = $stHeld[$stHk] }
     foreach ($stHp0 in $pending) { if ($stWsHeld.ContainsKey([string](Get-Prop $stHp0 'ws' ''))) { $stHeldAll[[string]$stHp0.id] = @() } }
+    foreach ($stRk in @($stRpHeld.Keys) + @($stRpLater.Keys)) { $stHeldAll[[string]$stRk] = @() }
     $ordered = @($stPool | Where-Object { (Get-Prop $_ 'runOrder' -1) -ge 0 } | Sort-Object -Property @{ Expression = { Get-Prop $_ 'runOrder' -1 } })
     $runnable = @($ordered | Where-Object { (Get-Prop $_ 'stage' '') -ne 'waiting' -and -not $stHeldAll.ContainsKey([string]$_.id) })
     $stHeldOrdered = @($ordered | Where-Object { $stHeldAll.ContainsKey([string]$_.id) }).Count -gt 0
@@ -5437,7 +5622,7 @@ switch ($Command) {
         Write-OrderWarnings $stSeq $state
         if ($null -ne $stMerge) { $stOClash = $stMerge.OrderClash }
         $stMeIdW = if ($stMine) { [string](Get-Prop $stMe 'id' '') } else { '' }
-        $stWalk = Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $stMine $stMeIdW
+        $stWalk = Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $stMine $stMeIdW $stRpHeld $stRpLater
         $stClashNext = $false
         $runnable = @()
         if ($null -ne $stWalk.Next -and $stWalk.Next.Kind -eq 'phase') { $runnable = @($stWalk.Next.Obj) }
@@ -5472,7 +5657,7 @@ switch ($Command) {
             foreach ($cand in $tiedLow) { Say "             $($cand.id)  ($(Get-Prop $cand 'scope' ''))" }
         }
         else {
-            Say "  next: $($runnable[0].id)  ($($runnable[0].scope))"
+            Say "  next: $($runnable[0].id)$(Get-KindTag $runnable[0])  ($($runnable[0].scope))"
             # The fresh-session brief this phase already points at, written by add-phase and
             # revise-phase. Printed so a session opening cold does not re-derive what was
             # already written down.
@@ -5578,8 +5763,12 @@ switch ($Command) {
             $stPeId = [string](Get-Prop $stPe 'id' '')
             if ($stPeId -ceq $stMeId) { continue }
             $stTheirs = @($pending | Where-Object { [string](Get-Prop $_ 'owner' '') -ceq $stPeId })
-            if ($stTheirs.Count -eq 0) { continue }
-            $stTheirText = if ($stOrdered) { Get-OrderNextText (Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $true $stPeId) } else { Get-SpNextText $stTheirs $stMerge.Clash $stHeldAll }
+            # In an ordered project a person owning no pending phase may still own a close-out (the
+            # derived 'close W<n>' belongs to the owner of W<n>.0), so the walk is asked too.
+            $stTheirWalk = $null
+            if ($stOrdered) { $stTheirWalk = Get-OrderWalk $state $stSeq.Items $stHeld $stWsHeld $stOClash $true $stPeId $stRpHeld $stRpLater }
+            if ($stTheirs.Count -eq 0 -and ($null -eq $stTheirWalk -or $null -eq $stTheirWalk.Next)) { continue }
+            $stTheirText = if ($stOrdered) { Get-OrderNextText $stTheirWalk } else { Get-SpNextText $stTheirs $stMerge.Clash $stHeldAll }
             $stOthers.Add("$(Get-Prop $stPe 'name' '?') ($stPeId): $stTheirText")
         }
         if ($stOthers.Count -gt 0) { Say "  others: $($stOthers -join '; ')" }
@@ -5587,6 +5776,13 @@ switch ($Command) {
         if ($stOrdered -and $stWalk.Derived.Count -gt 0) {
             Say "  unowned: $((@($stWalk.Derived | ForEach-Object { Format-DerivedItem $_ -FdShort })) -join '; ')"
         }
+    }
+
+    # ---- each STARTED phase a re-plan holds, in table order: where it stands and when it resumes. A
+    # held phase still at 'planned' has nothing to resume, and its table row already says it is held.
+    foreach ($stRh in @($phases | Where-Object { $stRpHeld.ContainsKey([string]$_.id) -and [string](Get-Prop $_ 'stage' '') -ne 'planned' } | Sort-Object -Property @{ Expression = { $x = Get-Prop $_ 'runOrder' -1; if ($x -lt 0) { 9999 } else { $x } } }, id)) {
+        $stRhBy = $stRpHeld[[string]$stRh.id]
+        Say "  $($stRh.id) is held at $(Get-Prop $stRh 'stage' '?') by re-plan $stRhBy; it resumes there once $stRhBy is delivered."
     }
 
     # ---- what each held phase waits on, in table order, everyone's: one line per need not met.
@@ -5822,7 +6018,9 @@ switch ($Command) {
                 $trWsNeedIds = @(Get-NeedIds $n)
                 if ($trWsNeedIds.Count -gt 0) { $trWsNeeds = "  needs: $($trWsNeedIds -join ', ')" }
             }
-            Write-Output ("{0}{1} [{2}] {3}{4}{5}{6}{7}" -f $pad, $n.id, $n.role, $n.title, $gs, $stMark, $trPosMark, $trWsNeeds)
+            $trRole = [string]$n.role
+            if ($trRole -eq 'workstream' -and (Get-WsKind $n) -eq 'planning') { $trRole = 'workstream, planning' }
+            Write-Output ("{0}{1} [{2}] {3}{4}{5}{6}{7}" -f $pad, $n.id, $trRole, $n.title, $gs, $stMark, $trPosMark, $trWsNeeds)
             if ($n.role -eq 'workstream' -and (Get-Prop $n 'status' '') -eq 'ABANDONED') {
                 Write-Output ("{0}     abandoned: {1}" -f $pad, (Get-Prop $n 'abandonedReason' ''))
             }
@@ -5840,7 +6038,8 @@ switch ($Command) {
                     $trNeedIds = @(Get-NeedIds $p)
                     $trNeeds = if ($trNeedIds.Count -gt 0) { "  needs: $($trNeedIds -join ', ')" } else { '' }
                     $trPhPos = if ($trPos.ContainsKey([string]$p.id)) { "  #$($trPos[[string]$p.id])" } else { '' }
-                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{6}{7}{8}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trNeeds, $trEx.Owner, $trPhPos)
+                    $trKind = if ((Get-PhaseKind $p) -ne 'deliver') { "  kind:$(Get-PhaseKind $p)" } else { '' }
+                    Write-Output ("{0}   {1} [phase] {2}  actor:{3}  {4}{5}{9}{6}{7}{8}" -f $pad, $p.id, $p.scope, (Get-Prop $p 'actor' '?'), (Get-Prop $p 'stage' '?'), $trEx.Stage, $trNeeds, $trEx.Owner, $trPhPos, $trKind)
                     foreach ($cItem in @(Get-Prop $p 'corrections' @())) {
                         Write-Output ("{0}      correction {1}: {2}" -f $pad, ((Get-Prop $cItem 'at' '') -split 'T')[0], (Get-Prop $cItem 'text' ''))
                     }
@@ -6219,16 +6418,33 @@ switch ($Command) {
     $proj = Resolve-ProjectOrFail -StartPath $Path
     Require-Param $Id 'Id'; Assert-WsId $Id
     Require-Param $Title 'Title'
+    # The kind (charter P17): delivery, the default, or planning, a workstream whose phases plan work
+    # above one workstream. A planning workstream declares no goal (P22) and gets no W<n>.0: its
+    # phases are planning phases themselves.
+    $awKindVal = 'delivery'
+    if ($Kind) { Assert-Enum $Kind $WsKinds 'Kind'; $awKindVal = $Kind }
+    if ($awKindVal -eq 'planning' -and $Express) { Fail 90 "-Express is for a delivery workstream: a planning workstream has no planning phase W<n>.0 to leave out. Nothing was written." }
 
     $state = Read-State $proj.Slug -ForWrite
     if ($null -ne (Find-Node $state $Id)) { Fail 90 "Node '$Id' already exists." }
     [void](Assert-Parent $state $Parent 'workstream')
 
     $goalIds = @(Split-Csv $Goals)
-    if ($goalIds.Count -eq 0) {
-        Fail 98 "-Goals is required for a workstream: at least one goal id, e.g. -Goals G1,G2. Coverage is a query, not a feeling (charter P22)."
+    if ($awKindVal -eq 'planning') {
+        if ($goalIds.Count -gt 0) {
+            Fail 98 "A planning workstream declares no goal (charter P22): it plans work, and the work it plans claims the goals. Drop -Goals. Nothing was written."
+        }
     }
-    Assert-GoalsExist $state $goalIds
+    else {
+        if ($goalIds.Count -eq 0) {
+            Fail 98 "-Goals is required for a workstream: at least one goal id, e.g. -Goals G1,G2. Coverage is a query, not a feeling (charter P22)."
+        }
+        Assert-GoalsExist $state $goalIds
+    }
+    # A project holding no workstream at all is ordered from its first one, whether or not it holds
+    # an epic: that workstream is placed at 1. One that already holds workstreams adopts an order
+    # only by 'order -Set'.
+    $awFirst = @(Get-Nodes $state | Where-Object { [string](Get-Prop $_ 'role' '') -eq 'workstream' }).Count -eq 0
 
     # P22's invariant is guarded in BOTH directions. 'set-goal-status' refuses to mark a
     # CLAIMED goal UNADDRESSED (Fail 98), and this clears the label the other way. Without
@@ -6265,10 +6481,11 @@ switch ($Command) {
     $awNeeds = @()
     if ($PSBoundParameters.ContainsKey('Needs')) { $awNeeds = @(Read-WsNeedsParam $state $Id $Needs $proj.Slug) }
     if ($awNeeds.Count -gt 0) { Set-Prop $n 'needs' $awNeeds }
+    if ($awKindVal -eq 'planning') { Set-Prop $n 'kind' 'planning' }
     # In an ordered project the new workstream takes a place: right after the last unfinished
     # workstream under its parent epic, nested epics included, or last when the parent is the root
-    # or has none placed. A project that places nothing places nothing here either.
-    if (Test-ProjectOrdered $state) {
+    # or has none placed. A project that places nothing places nothing here either, except its first.
+    if ((Test-ProjectOrdered $state) -or $awFirst) {
         $awSeq = @((Get-OrderSequence $state).Items)
         $awLo = $null
         if ($n.parent) {
@@ -6282,11 +6499,37 @@ switch ($Command) {
         Set-Prop $n 'order' (@(Get-OrderBetween $awLo $awHi 1))[0]
     }
     $arr = @(Get-Nodes $state); $arr += $n; Set-Prop $state 'nodes' $arr
+    # A placed delivery workstream is created with its planning phase W<n>.0 (charter P2's kind plan),
+    # which status names until it is delivered: planning the workstream is work the state can name.
+    # Not for -Express, whose one phase's plan gate carries the plan, nor for a planning workstream.
+    $awPlanId = ''
+    if ($null -ne (Get-OrderValue $n) -and $awKindVal -ne 'planning' -and -not $Express) {
+        $awPlanId = "$Id.0"
+        $awPlan = [pscustomobject]@{
+            id = $awPlanId; ws = $Id; scope = "Plan $Id - $Title"; actor = 'agent'
+            runOrder = 0
+            repos = @()
+            due = $null
+            promptPath = $null
+            stage = 'planned'
+            waitingOn = $null; reviewOn = $null
+            iterations = 0
+            gates = [pscustomobject]@{}
+            friction = @(); questions = @()
+            created = (Now)
+        }
+        if (Test-SharedProgress $proj.Slug) { Set-Prop $awPlan 'owner' (Get-SpWriter $proj.Slug) }
+        Set-Prop $awPlan 'kind' 'plan'
+        $awPhases = @(Get-Phases $state); $awPhases += $awPlan; Set-Prop $state 'phases' $awPhases
+    }
     Write-State $proj.Slug $state
+    if ($awPlanId) { Ensure-Dir (Get-PhaseDir $proj.Slug $awPlanId) | Out-Null }
     $awNote = ''
     if ($null -ne (Get-OrderValue $n)) { $awNote += ", order #$((Get-OrderSequence $state).Pos[$Id])" }
     if ($awNeeds.Count -gt 0) { $awNote += ", needs: $((@($awNeeds | ForEach-Object { $_.id })) -join ', ')" }
-    Say "Added workstream $Id -> $($goalIds -join ',')$awNote."
+    if ($awKindVal -eq 'planning') { Say "Added planning workstream $Id$awNote." }
+    else { Say "Added workstream $Id -> $($goalIds -join ',')$awNote." }
+    if ($awPlanId) { Say "  Added its planning phase $awPlanId (kind plan, run order 0); status names it until it is delivered." }
     # P16 - conditional on purpose. A line that always fires trains the reader to skip it,
     # and the test of this fails if it announces itself when nothing was cleared.
     if ($cleared.Count -gt 0) {
@@ -6307,8 +6550,31 @@ switch ($Command) {
     Assert-WsNotAbandoned $rwNode
 
     $rwHasNeeds = $PSBoundParameters.ContainsKey('Needs')
-    if (-not $Title -and -not $Goals -and -not $rwHasNeeds) {
-        Fail 90 "Supply at least one of -Title, -Goals or -Needs for 'revise-workstream'. A revise that changes nothing has asked for nothing."
+    if (-not $Title -and -not $Goals -and -not $rwHasNeeds -and -not $Kind) {
+        Fail 90 "Supply at least one of -Title, -Goals, -Needs or -Kind for 'revise-workstream'. A revise that changes nothing has asked for nothing."
+    }
+    # A kind set on an open workstream, under add-workstream's rules: how a kind an older keel
+    # dropped is restored (Get-OrderDropLines names this command). A planning workstream declares no
+    # goal and holds only planning phases; a delivery workstream declares at least one goal.
+    if ($Kind) {
+        Assert-Enum $Kind $WsKinds 'Kind'
+        if ([string](Get-Prop $rwNode 'status' '') -eq 'DELIVERED') { Fail 90 "Workstream '$Id' is closed, so its kind no longer matters. Nothing was written." }
+        # Assigned inside each branch, not from an if-expression, which would unroll a list of zero or
+        # one goal into $null or a scalar, and .Count on either throws under strict mode.
+        $rwGoalsAfter = @()
+        if ($Goals) { $rwGoalsAfter = @(Split-Csv $Goals) } else { $rwGoalsAfter = @(Get-Prop $rwNode 'goals' @()) }
+        if ($Kind -eq 'planning') {
+            if (@($rwGoalsAfter).Count -gt 0) { Fail 98 "A planning workstream declares no goal (charter P22), and '$Id' declares $($rwGoalsAfter -join ','). Nothing was written." }
+            $rwDeliver = @(Get-Phases $state | Where-Object { [string](Get-Prop $_ 'ws' '') -eq $Id -and (Get-PhaseKind $_) -eq 'deliver' -and @('abandoned', 'handed-over') -notcontains [string](Get-Prop $_ 'stage' '') })
+            if ($rwDeliver.Count -gt 0) { Fail 93 "A planning workstream holds only planning phases (charter P17), and '$Id' holds $(($rwDeliver | ForEach-Object { $_.id }) -join ', '). Nothing was written." }
+        }
+        else {
+            # A delivery workstream's planning phase is W<n>.0 (or its hand-over successor), as add-phase
+            # requires: a planning phase of another number would be left where add-phase refuses one.
+            $rwPlanPh = @(Get-Phases $state | Where-Object { [string](Get-Prop $_ 'ws' '') -eq $Id -and (Get-PhaseKind $_) -eq 'plan' -and -not (Test-NeedFinished $_) -and [string]$_.id -cnotmatch ('^' + [regex]::Escape($Id) + '\.0[a-z]?$') })
+            if (@($rwGoalsAfter).Count -eq 0) { Fail 98 "A delivery workstream declares at least one goal (charter P22): give -Goals with -Kind delivery. Nothing was written." }
+            if ($rwPlanPh.Count -gt 0) { Fail 93 "A delivery workstream's planning phase is $Id.0, and '$Id' holds planning phase(s) $(($rwPlanPh | ForEach-Object { $_.id }) -join ', '). Finish or abandon them, or give each another kind with revise-phase -Kind, first. Nothing was written." }
+        }
     }
 
     # The title and goals describe what was delivered, so they lock once a phase is. Needs sequence
@@ -6323,6 +6589,10 @@ switch ($Command) {
 
     $rwSigBefore = Get-RevisionSig $rwNode 'node'
     $rwCleared = @()
+    # As revise-phase: set back to the default, a stored kind keeps its key, holding 'delivery'.
+    if ($Kind) {
+        if ($Kind -ne 'delivery' -or $null -ne $rwNode.PSObject.Properties['kind']) { Set-Prop $rwNode 'kind' $Kind }
+    }
     if ($Goals) {
         $rwGoalIds = @(Split-Csv $Goals)
         if ($rwGoalIds.Count -eq 0) {
@@ -6371,6 +6641,10 @@ switch ($Command) {
     Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
     Require-Param $Scope 'Scope'
     Require-Param $Actor 'Actor'; Assert-Enum $Actor $Actors 'Actor'
+    # The kind (charter P2): deliver, the default, or plan or replan. It selects what the phase's
+    # artifacts hold and which fixed checks apply, never which gates run.
+    $apKindVal = 'deliver'
+    if ($Kind) { Assert-Enum $Kind $PhaseKinds 'Kind'; $apKindVal = $Kind }
 
     $state = Read-State $proj.Slug -ForWrite
     $wsId   = Ws-Of-Phase $Phase
@@ -6382,6 +6656,7 @@ switch ($Command) {
     if ($wsNode.role -ne 'workstream') { Fail 93 "'$wsId' is a $($wsNode.role). Only a workstream may contain phases (charter P17)." }
     Assert-WsNotAbandoned $wsNode
     if ($null -ne (Find-Phase $state $Phase)) { Fail 90 "Phase '$Phase' already exists." }
+    Assert-PhaseKindFits $state $wsNode $Phase $apKindVal
     # The owner: a person id, the writer when none is given. Stored explicitly, so the file says it.
     $apShared = Test-SharedProgress $proj.Slug
     $apOwnerId = $null
@@ -6421,13 +6696,16 @@ switch ($Command) {
     if ($apShared) { Set-Prop $p 'owner' $apOwnerId }
     # Stored only when there is one, so a per-machine phase with no needs is what it always was.
     if ($apNeeds.Count -gt 0) { Set-Prop $p 'needs' $apNeeds }
+    if ($apKindVal -ne 'deliver') { Set-Prop $p 'kind' $apKindVal }
     $arr = @(Get-Phases $state); $arr += $p; Set-Prop $state 'phases' $arr
     Write-State $proj.Slug $state
     Ensure-Dir (Get-PhaseDir $proj.Slug $Phase) | Out-Null
 
     $apOwnerNote = if ($apShared) { ", owner: $(Get-SpPersonText $proj.Slug $apOwnerId)" } else { '' }
     $apNeedsNote = if ($apNeeds.Count -gt 0) { ", needs: $((@($apNeeds | ForEach-Object { $_.id })) -join ', ')" } else { '' }
-    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' })$apOwnerNote$apNeedsNote)."
+    $apKindNote = if ($apKindVal -ne 'deliver') { ", kind: $apKindVal" } else { '' }
+    Say "Added phase $Phase (actor: $Actor, order: $(if ($RunOrder -ge 0) { $RunOrder } else { 'NOT DECLARED' })$apOwnerNote$apNeedsNote$apKindNote)."
+    if ($apKindVal -eq 'replan') { Say "  While it is open, every other unfinished phase of $wsId is held where it is, and status names $Phase." }
     if ($RunOrder -lt 0) { Say '  NOTE: no run order declared. status will refuse to guess what runs next.' }
     exit 0
 }
@@ -6452,7 +6730,7 @@ switch ($Command) {
             if ($rpStage -ne 'planned') { Assert-PhaseOwner $proj.Slug $p 'revise' }
             Fail 90 "Phase '$Phase' is not delivered, so its scope is still yours to change: use -Scope. -Correction is for a delivered or handed-over phase."
         }
-        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $Owner -or $Needs -or $RunOrder -ge 0) {
+        if ($Scope -or $Actor -or $Repos -or $Due -or $PromptPath -or $Owner -or $Needs -or $Kind -or $RunOrder -ge 0) {
             Fail 90 "-Correction stands alone. Phase '$Phase' is $rpStage and every other revise-phase parameter still refuses; nothing was stored."
         }
         $corrLog = @(Get-Prop $p 'corrections' @())
@@ -6477,6 +6755,13 @@ switch ($Command) {
     }
     $rpNeeds = $null
     if ($PSBoundParameters.ContainsKey('Needs')) { $rpNeeds = @(Read-NeedsParam $state $Phase ([string]$p.ws) $Needs $false $proj.Slug) }
+    # A kind set on an unfinished phase, under add-phase's rules: how a kind an older keel dropped is
+    # restored (Get-OrderDropLines names this command).
+    if ($Kind) {
+        if ($rpStage -eq 'handed-over' -or $rpStage -eq 'abandoned') { Fail 90 "Phase '$Phase' is $rpStage, so its kind no longer matters. Nothing was written." }
+        Assert-Enum $Kind $PhaseKinds 'Kind'
+        Assert-PhaseKindFits $state (Find-Node $state ([string]$p.ws)) $Phase $Kind
+    }
     $rpSigBefore = Get-RevisionSig $p 'phase'
 
     if ($Owner) { Set-Prop $p 'owner' $Owner }
@@ -6489,6 +6774,12 @@ switch ($Command) {
     }
     if ($Due)   { Assert-Date $Due 'Due'; Set-Prop $p 'due' $Due }
     if ($PromptPath) { Set-Prop $p 'promptPath' $PromptPath }
+    # Set back to the default, a kind that was stored keeps its key, holding 'deliver': a key that
+    # vanishes is what Get-OrderDropLines reads as an older keel's drop, as an emptied list of needs
+    # keeps its key for the same reason. A phase that never had one still stores none.
+    if ($Kind) {
+        if ($Kind -ne 'deliver' -or $null -ne $p.PSObject.Properties['kind']) { Set-Prop $p 'kind' $Kind }
+    }
     if ($RunOrder -ge 0) {
         $clash = @(Get-Phases $state | Where-Object { $_.ws -eq $p.ws -and $_.id -ne $p.id -and (Get-Prop $_ 'runOrder' -1) -eq $RunOrder -and (Get-Prop $_ 'stage' '') -ne 'handed-over' })
         if ($clash.Count -gt 0) { Fail 92 "Run order $RunOrder is already taken in $($p.ws) by '$($clash[0].id)'." }
@@ -6991,6 +7282,7 @@ switch ($Command) {
     }
     # A placed phase keeps its place: the successor takes its order, as it takes its run order.
     if ($null -ne (Get-OrderValue $p)) { Set-Prop $hoNew 'order' (Get-OrderValue $p) }
+    if ((Get-PhaseKind $p) -ne 'deliver') { Set-Prop $hoNew 'kind' (Get-PhaseKind $p) }
     Set-Prop $p 'stage' 'handed-over'
     Set-Prop $p 'handedOverTo' $hoSucc
     Set-Prop $p 'handOverReason' $Detail

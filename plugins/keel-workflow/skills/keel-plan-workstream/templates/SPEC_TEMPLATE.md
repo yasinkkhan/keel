@@ -19,9 +19,10 @@ Delete these comments as you fill each section. Keep the keel:phases line - it i
 
 <!-- keel:phases {{W4.1,W4.2,W4.3}} run={{W4.2,W4.1,W4.3}} -->
 <!--
-   Machine-readable, invisible when rendered, greppable. `phases` lists every declared phase;
-   `run` is the ORDER THEY ACTUALLY RUN IN, which is often not numeric order. This must agree
-   with the -RunOrder values registered in state; `status` reports disagreement as a warning.
+   Machine-readable, invisible when rendered, greppable. `phases` lists every declared phase except
+   the workstream's planning phase `W<n>.0`, which is registered before the spec exists; `run` is
+   the ORDER THEY ACTUALLY RUN IN, which is often not numeric order. This must agree with
+   the -RunOrder values registered in state; `status` reports disagreement as a warning.
 -->
 
 ---

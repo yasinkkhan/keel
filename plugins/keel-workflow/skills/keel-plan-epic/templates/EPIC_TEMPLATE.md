@@ -62,7 +62,9 @@ THE RESUME POINT. One row per area. Exactly one status token per row:
   E<n>             grew into a sub-epic
   EXCLUDED         deliberately out; reason and who decided it in Notes, asked first if they could want it
 
-A later session continues from the first NOT-DECOMPOSED row.
+A later session continues from the first NOT-DECOMPOSED row. In a project that has placed its
+workstreams, status names the next session instead; this table keeps the reasoning and each area's
+token.
 -->
 
 | Area | Status | Goals | Blocked by | Notes |
@@ -76,9 +78,10 @@ A later session continues from the first NOT-DECOMPOSED row.
 ## 5. Workstream manifest
 
 <!--
-Only rows that have a number. Declared order is the sequence you intend; "blocked by" is a REAL
-dependency. Do not conflate them: a preference recorded as a dependency freezes a sequence that
-could have flexed, and a dependency recorded as a preference produces a workstream that cannot
+Only rows that have a number. Declared order is the sequence you intend, and in a project that has
+placed its workstreams this column is a dated copy of `keel-state.ps1 order`'s output; "blocked by"
+is a REAL dependency. Do not conflate them: a preference recorded as a dependency freezes a sequence
+that could have flexed, and a dependency recorded as a preference produces a workstream that cannot
 start when its turn comes.
 
 Do NOT list phases here. Phases are planned per workstream, when that workstream is picked up,

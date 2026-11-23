@@ -35,7 +35,7 @@ keel-state.ps1 status
 | `WARNING: planned under keel X, running keel Y` | Contracts may have moved under an in-flight project (charter P24). Read the CHANGELOG between the two versions, then answer it: `ack-keel-version -Detail "<what you checked>"`. Do not advance a phase with this unanswered. |
 | `WARNING: N goal(s) with no workstream` | Coverage gap. Surface it; do not silently plan around it. |
 | `WARNING: N pending phase(s) have no declared run order` | The wrapper refuses to guess what runs next, and so do you. |
-| `WARNING: next is ambiguous` | Two or more runnable phases share the lowest run order, in different workstreams. Run order is unique *per workstream*, so the state file cannot say which workstream goes first — and it declines to guess rather than naming one. **Read the project's declared cross-workstream order** and run that. Do not pick from the printed candidates by eye. |
+| `WARNING: next is ambiguous` | Two or more runnable phases share the lowest run order, in different workstreams. Run order is unique *per workstream*, so the state file cannot say which workstream goes first — and it declines to guess rather than naming one. **Read the project's declared cross-workstream order** and run that. Do not pick from the printed candidates by eye. In a project that has placed its workstreams (`keel-state.ps1 order` prints them), this warning does not appear: the order is in the state. If it appears, the project has not adopted an order; place its workstreams with `order -Set` in a session of its own. |
 | `STOP: N phase(s) escalated` | A prior session hit the iteration cap. **Surface this to the human before anything else.** Do not quietly retry. |
 | `OVERDUE:` / `CHASE:` | A deadline passed, or a wait is due for review. Often the most useful thing in the session. |
 | `N/A census: N gate(s) waived` | How much has been skipped. A rising number is the workflow decaying. |
@@ -45,13 +45,29 @@ keel-state.ps1 status
 | `WARNING: the remote 'origin' holds work this copy has not pulled` / `WARNING: this copy is N commit(s) behind 'origin'` | A project that shares its progress, only. Someone else's work is on the remote and not in this copy, so every other line may be out of date. **Pull, then run `status` again, before acting on anything.** A sister line says when this reading could not be taken. See "Resuming a project that shares its progress" below. |
 | `WARNING: N progress file(s) written here are not committed` | A shared project's progress written on this machine that nobody else can see yet. Commit and push it once the work is consistent. |
 | `WARNING: after a merge, ...` | A shared project: two writes, each valid alone, merged into a whole that breaks a rule the wrapper refuses for a single writer. One line per broken rule, naming the ids. See below. |
-| `others:` | A shared project: each other person's next phase, by name. There `next:` is **yours**, the lowest-order runnable phase you own. |
+| `others:` | A shared project: each other person's next phase, by name. There `next:` is **yours**: the first item in the project's order that you own, or, in a project with no order, the lowest-order runnable phase you own. |
+| `unowned:` | A shared project: derived items (a close-out or a legacy workstream's planning) that belong to nobody; whoever takes one says so. |
 | `your last handoff:` | A shared project: your own newest handoff, when someone else's is newer. `handoff:` names the newest by time, with its author. |
 | `owner: <name> (<id>)` at the end of a phase line | A shared project: the person who owns that unfinished phase. Only they may work on it; see below. |
 | `handed-over -> W5.2b` in the phase table | A shared project: the phase ended unfinished and W5.2b continues it. It is finished, like a delivered phase. |
 | `W5.3 waits on W4.1 (<stage>[, owned by <name> (<id>)])` | W5.3 declared that it needs W4.1 (a phase, or a whole workstream `W4`) delivered first, so it is **never named as next** until that is delivered, by you or on `others:`. The line names where the needed work stands and, in a shared project, whose it is. Nothing to do but run other work, or ask its owner. A need on a handed-over phase follows its successor. |
 | `WARNING: W5.3 needs W4.1, which was revised after the need was declared` | The needed work's scope, actor, repos, due date, run order, owner or needs changed (or, for a workstream, its title or goals, or a phase was added to it) after the need was declared. Read what changed, check W5.3 still needs it, then re-declare: `revise-phase -Phase W5.3 -Needs <ids>`, which clears the warning. A prompt path being registered is not a revision. |
 | `WARNING: W5.3 needs W4.1, which was abandoned, so the need can never be met` | The needed phase, workstream or hand-over chain ended abandoned. W5.3 waits forever unless its needs are re-declared without it, as the line says; decide with the operator whether W5.3 still makes sense at all. |
+| `next: W5.0  [plan]  (Plan W5 - <title>)` | The next item is a planning phase: `W<n>.0` plans its workstream, and a planning workstream's phases plan work above one workstream. Dispatch `keel-run-phase` for it, with `keel-plan-workstream` as the procedure its gates follow (`keel-plan-epic` for a planning workstream that decomposes an epic) and its kind's fixed checks as its checks. |
+| `next: W1.5  [re-plan]  (<scope>)` | The next item is a re-plan of its workstream, and every other unfinished phase of that workstream is held until it is delivered. Dispatch `keel-run-phase` for it, with `keel-plan-workstream`'s amend mode as the procedure (Step 3.5). |
+| `plan` or `re-plan` at the end of a phase's row in the phase table | A planning phase: kind `plan` (`W<n>.0`, or a planning workstream's phase) or kind `replan`. It runs the same eight gates as any phase, with its kind's fixed checks. A row with neither mark is a delivery phase. |
+| `W1.2 is held at verifying by re-plan W1.5; it resumes there once W1.5 is delivered.` and `held by re-plan W1.5` in the phase table | A phase held by an open re-plan of its workstream. Nothing was written to it: it keeps its gates, its iteration count and its verify fingerprint. Do not run it; run the re-plan. Once the re-plan is delivered it is named again at that stage, and its next gate reads the amended spec. A held phase still at `planned` gets the table mark only. |
+| `next: plan W5  (<title> - no phases yet)` | A project that has placed its workstreams: W5 was registered with no planning phase and has no phases, so planning it is the next item. Plan it as a full workstream, or register its planning phase (`add-phase -Phase W5.0 -Kind plan`) and run that. |
+| `next: close W5  (<title> - every phase finished)` | A project that has placed its workstreams: every phase of W5 is finished, so its close-out is next. Dispatch `keel-close-workstream`; no handoff is owed for it. In a shared project it belongs to the owner of `W5.0`, or, with no `W5.0`, to nobody (`unowned:`). |
+| `WARNING: N open workstream(s) have no place in the order: ...` | A project that has placed its workstreams holds an open one with no position, so the walk never names it. Place each with `order -Id <id> -After <id>`. |
+| `WARNING: N pending phase(s) sit under a closed workstream, so the order never reaches them: ...` | A phase is open under a workstream that is closed or has no node on this copy, so the walk cannot reach it. Place it with `order -Id`, or abandon it. |
+| `next: none named - the open work left has no place in the order (see the warnings above).` | Nothing the order reaches is runnable, and the open work left is unplaced, or in a clash after a merge. Act on the warnings above it. |
+| `WARNING: after a merge, W4 and W5 share order 6, so neither is named as next. ...` | A shared project: two people each placed an item at the same order, so neither is named. Move one, as the line says, agreed with whoever placed the other. |
+| `WARNING: after a merge, W1.5 and W1.6 are both open re-plans of W1, ...` | A shared project: two people each registered a re-plan of one workstream. The earlier holds the rest and the later is not named. Agree which one stands, and abandon the other. |
+| `WARNING: after a merge, W3 and W4 need each other in a cycle, ...` | A shared project: two people each declared a workstream need, each valid alone, and together neither can be named. Agree which need is wrong and re-declare it with `revise-workstream -Needs`. |
+| `WARNING: <file> held order at an earlier commit and no longer does ...` (also `needs`, and `kind '<value>'`) and `WARNING: W5.2b continues W5.2, which held a place in the order, but holds none itself ...` | A shared project: a keel older than this one rewrote a progress file and dropped a field it does not know. Run the command the line names, and have whoever runs the older keel update it. |
+| `W3 waits on W2 (...)` and the `WARNING: W3 needs ...` lines that end with `revise-workstream -Needs` | The phase rows above, for a whole workstream: it declared a need (`add-workstream -Needs`, `revise-workstream -Needs`), in any project, and none of its phases is named as next until the need is met. Answer each warning as for a phase, with `revise-workstream`. |
+| In `tree`: `#<n>` at the end of a workstream's or a placed phase's line, `order: from #<n>` on an epic's `groups:` line, `needs: <ids>` on a workstream's line, `kind:plan` or `kind:replan` on a phase's line, and `[workstream, planning]` | The order and the kinds as `tree` shows them: an item's position in the order (an epic's is its first unfinished workstream's), the work a workstream needs first, a planning phase's kind, and a planning workstream. None appears in a project that places nothing, declares no workstream need and registers no planning phase. |
 
 **The `handoff:` line names a document, and the stamp beside it dates that document rather than
 checking it** — a handoff whose every claim has gone false is marked fresh until an unrelated verdict
@@ -68,18 +84,19 @@ own repo, written by several people (charter P15). Five things differ when a ses
   line was computed from what this copy holds. If it says the reading was not taken, say so before
   relying on the rest. Work someone has not pushed cannot be seen from any copy, which is why the
   planning skills push an approved plan at once.
-- **`next:` is this person's.** It names the lowest-order runnable phase owned by the person this
-  machine is registered as, and `others:` names everyone else's. A phase `others:` names is someone
-  else's: do not run it. A machine no person file lists, or two list, is shown the whole project's
-  next and a line saying so; `join` registers it. A phase held by a need not yet met is named by
-  neither; its `waits on` line says what it waits for.
+- **`next:` is this person's.** It names the first item in the project's order owned by the person
+  this machine is registered as (in a project with no order, the lowest-order runnable phase they
+  own), and `others:` names everyone else's. A phase `others:` names is someone else's: do not run
+  it. A machine no person file lists, or two list, is shown the whole project's next and a line
+  saying so; `join` registers it. A phase held by a need not yet met is named by neither; its `waits
+  on` line says what it waits for.
 - **What a read-time warning means.** Each `WARNING: after a merge,` line is one broken rule:
-  - *two phases of one workstream share a run order*: neither is named as next until one moves,
-    with `revise-phase -RunOrder`, agreed with whoever owns the other;
+  - *two phases of one workstream share a run order*: neither is named as next until one moves, with
+    `revise-phase -RunOrder`, agreed with whoever owns the other;
   - *a phase is open under a closed or abandoned workstream*: one person closed it while another
     added the phase; abandon that phase, or plan its work in an open workstream;
-  - *an id names no file*, a phase's need among them: the file it refers to was not committed or
-    not pulled; pull again, or have the person who wrote it commit and push it;
+  - *an id names no file*, a phase's need among them: the file it refers to was not committed or not
+    pulled; pull again, or have the person who wrote it commit and push it;
   - *phases need each other in a cycle*: two people each declared one need, each valid alone, and
     together no phase in the cycle can be named as next; agree which need is wrong and re-declare
     that phase's needs with `revise-phase -Needs`;
@@ -203,6 +220,14 @@ what the ask actually contains.**
 | Independently deliverable areas that could ship on different days, in a different order | **epic** | `keel-plan-epic` |
 | One coherent thing, however many sittings | **workstream** | `keel-plan-workstream` |
 | One sitting's work inside an existing workstream | **phase** | `keel-run-phase` |
+In a project that has placed its workstreams (`keel-state.ps1 order` prints them), a
+workstream-level ask is registered first with `add-workstream`, which creates its planning phase
+`W<n>.0`, and placed with `order`; then `keel-run-phase` is dispatched for `W<n>.0`, with
+`keel-plan-workstream` as the procedure its gates follow. An epic-level ask is registered as a
+planning workstream (`add-workstream -Kind planning`) under the epic, with its first phase, and
+dispatched the same way with `keel-plan-epic` as the procedure. In a project with no order, the
+routes in the table stand as written.
+
 
 Two traps:
 
@@ -212,9 +237,10 @@ Two traps:
 - **"It's small" is not a level.** A one-line change is a phase in a workstream, with all eight
   gates. See Step 0.5 for how the artifacts shrink.
 
-Planning an epic **spans sessions by design** — it writes a decomposition ledger, and a later
-session resumes from the first `NOT-DECOMPOSED` row rather than starting over. An epic never runs a
-phase; it decomposes and stops.
+Planning an epic **spans sessions by design**. In a project that has placed its workstreams, each
+session is a phase of the epic's planning workstream and `status` names the next one; in a project
+with no order, a later session resumes from the ledger's first `NOT-DECOMPOSED` row rather than
+starting over. Either way an epic decomposes and stops: it never runs a delivery phase.
 
 ## Asking the human — the question must be answerable without keel's vocabulary
 
@@ -503,6 +529,10 @@ a resume** — that was decided already.
 | Plan artifact | a paragraph in `plan.md` | a document |
 | Gates | **the same eight** | the same eight |
 | W number | still allocated | still allocated |
+A planning workstream has no spec either. Everywhere a skill or template provides for an express
+workstream's missing spec, a planning workstream takes the same route, with its epic document, where
+it has one, read in the spec's place.
+
 
 **Recommend, do not interrogate.** Say which you think it is in one line and let the human correct
 you: *"This reads like one sitting in the wallet repo — express? (or a full workstream if you want
@@ -512,9 +542,12 @@ form is above, under "Asking the human".
 **Express setup** — a W number is still allocated, so one grep still indexes everything:
 
 ```
-keel-state.ps1 add-workstream -Id W<n> -Title "<one line>" -Parent <E<n>|root> -Goals G<n>[,G<n>]
+keel-state.ps1 add-workstream -Id W<n> -Title "<one line>" -Parent <E<n>|root> -Goals G<n>[,G<n>] -Express
 keel-state.ps1 add-phase -Phase W<n>.1 -Scope "<the whole change>" -Actor <agent|self|external> -RunOrder 1 [-Repos <csv>] [-Due <yyyy-MM-dd>]
 ```
+`-Express` keeps `add-workstream` from creating a planning phase `W<n>.0`: the express phase's own
+plan gate carries the plan.
+
 
 Then dispatch `keel-run-phase`. Skip Step 1's spec reading — there is no spec, and the card plus
 your plan are the record.
@@ -691,9 +724,11 @@ copies drift apart and then contradict each other.
 
 ## Step 1 — the plan is the intent; the state is the record
 
-A full workstream has a spec at `plan/workstreams/W<n>_name.md`. Read it. From it you take the
-Decisions table (`D1..Dn`), the phase table, and — critically — the **declared run order**, which
-is stated in prose and is often *not* numeric order.
+A full workstream has a spec at `plan/workstreams/W<n>_name.md`. Read it. In a project that has
+placed its workstreams, a workstream whose planning phase `W<n>.0` is not yet delivered has no spec
+yet: dispatch `keel-run-phase` for `W<n>.0` instead. From it you take the Decisions table
+(`D1..Dn`), the phase table, and — critically — the **declared run order**, which is stated in prose
+and is often *not* numeric order.
 
 Register what the spec declares:
 
@@ -701,10 +736,12 @@ Register what the spec declares:
 keel-state.ps1 add-phase -Phase W<n>.<p> -Scope "<scope>" -Actor <actor> -RunOrder <int> [-Repos <csv>] [-Due <date>] [-PromptPath plan/prompts/W<n>.<p>-prompt.md]
 ```
 
-**Never auto-apply `add-phase`.** Propose the rows you read from the spec's phase table, show them,
-and have the human confirm once. A spec is markdown written for people; a mis-parse that lands in
-the state file is worse than one that does not, because the state file is designed to outrank the
-conversation.
+**Never auto-apply `add-phase`.** The rows are registered at the planning phase's enact step, after
+the operator has approved them at its human gate together with the spec; that approval is the one
+confirmation, so do not ask again. A spec planned with no planning phase (in a project that has not
+adopted an order) still has its rows shown and confirmed once. A spec is markdown written for
+people; a mis-parse that lands in the state file is worse than one that does not, because the state
+file is designed to outrank the conversation.
 
 ## Step 2 — load exactly one actor recipe per phase
 
@@ -734,8 +771,9 @@ Dispatch `keel-run-phase` for **one phase at a time**. It owns everything betwee
 **The two directions through this skill:**
 
 ```
-no spec yet  ->  keel-plan-workstream  ->  spec + the NEXT phase's prompt  ->  add-phase (human-confirmed)
-spec exists  ->  add-phase (once)      ->  keel-run-phase per phase  ->  keel-close-workstream
+no order:  no spec yet  ->  keel-plan-workstream  ->  spec + the NEXT phase's prompt  ->  add-phase (human-confirmed)
+no order:  spec exists  ->  add-phase (once)      ->  keel-run-phase per phase  ->  keel-close-workstream
+ordered:  add-workstream (creates W<n>.0) + order  ->  keel-run-phase for W<n>.0, keel-plan-workstream as its procedure  ->  rows registered at its enact step, the next phase's prompt at its record gate
 ```
 
 **Planning writes one prompt, not one per phase.** Every later phase's prompt is written by
@@ -752,23 +790,22 @@ working.**
 **Recognise it as its own event.** When the user asks to restructure remaining work, that session
 becomes a **re-planning session** and stops being an implementation session. Say so explicitly.
 
-**The rule that makes it safe: a re-planning session ends at the amended spec. It does not then run
-a phase.** The next phase gets a fresh session, because the re-planning context is full of the
-argument for the new shape, and an implementer holding that argument reads its own plan generously.
+**A re-plan is a phase.** Register it in the workstream it re-plans: `keel-state.ps1
+add-phase -Phase W<n>.<next> -Kind replan -Scope "<what is re-planned and why>" -Actor
+agent -RunOrder <next> -PromptPath plan/prompts/W<n>.<next>-prompt.md`. A re-plan of the project's
+order or of an epic, which no one workstream holds, is registered the same way in a planning
+workstream (`add-workstream -Kind planning`). While it is open, every other unfinished phase of that
+workstream is held where it is, and `status` names the re-plan. Dispatch `keel-run-phase` for it,
+with `keel-plan-workstream` in amend mode as the procedure its gates follow; a fresh plan reviewer
+reads the amendment and a fresh verifier runs the re-plan's fixed checks. **The session that
+delivers the re-plan ends at its record gate and does not then run the held phase**, for the reason
+this rule always had: the re-planning context is full of the argument for the new shape, and an
+implementer holding it reads its own plan generously. When the re-plan is delivered, the held phases
+are named again at the stages they were at, against the amended spec.
 
 **One decision amended by the operator inside a running phase is not this event:** the running
 session appends the dated row, with the amended checks it carries, and continues the phase - see "An
 earlier decision is a tradeoff to show, not a rule to enforce".
-
-1. `keel-state.ps1 status` — see what is delivered and what is pending.
-2. Dispatch `keel-plan-workstream` **in amend mode**. It appends a dated Decision row and revises
-   the phase table — it never rewrites a delivered phase's plan text or its delivery record.
-3. Reconcile the state, human-confirmed:
-
-```
-keel-state.ps1 revise-phase -Phase W<n>.<p> [-Scope "<new>"] [-RunOrder <n>] [-Actor <a>] [-Due <d>]
-keel-state.ps1 add-phase    -Phase W<n>.<new> -Scope "<...>" -Actor <a> -RunOrder <n>
-```
 
 **Run orders are unique per workstream and the wrapper enforces it (exit 92).** To insert between
 two phases, move the later one out of the way first. Two phases sharing an order *within* a
@@ -780,7 +817,26 @@ The one exception is a hand-over's successor, which takes the order of the phase
 phase at order 1; the state file has no way to express which workstream runs first, so when the
 lowest runnable tier holds more than one phase `status` prints `WARNING: next is ambiguous` with the
 candidates instead of naming one. That order lives in the project's own files — declare it there and
-read it from there.
+read it from there. In a project that has placed its workstreams, that order is the state's:
+`keel-state.ps1 order` prints it and places work in it, and the warning does not appear.
+
+**The order between workstreams is the state's once a project places them.** `keel-state.ps1
+order` prints it. Its forms:
+
+```
+keel-state.ps1 order                                    # the order: each place, its item, and what it would name next
+keel-state.ps1 order -Set W3,W1,W2.4,W2                 # place many at once, in this order; must list every unfinished item already placed
+keel-state.ps1 order -Id W5 -After W3                   # move one: -Before <id>, -After <id>, -First or -Last
+keel-state.ps1 order -Id W2.4 -Before W1                # a phase placed on its own runs at that place, not inside its workstream
+keel-state.ps1 order -Id E2 -After W3                   # an epic id moves its unfinished workstreams as one block, keeping their order
+```
+
+A project with no order adopts one with a single `order -Set`, in a session of its own (it is how a
+project's declared order moves into the state). Moving one item rewrites no other record. The order
+is preference and needs are dependency: what genuinely cannot start before other work is a need
+(`add-workstream -Needs`, `revise-workstream -Needs`, `add-phase -Needs`), and the order only
+says what runs first among work that could. Order belongs to no one, so in a shared project anyone
+may place work, while a phase keeps its owner.
 
 **A delivered phase cannot be revised (exit 90),** deliberately: its record cites evidence that
 exists and checks that were run. If delivered work needs redoing, that is a **new phase** whose
@@ -949,21 +1005,23 @@ A session that ends while work remains writes a handoff through the wrapper befo
 keel-state.ps1 handoff -Next "<what the next session should do>" -Detail "<the measurement that makes it next>"
 ```
 
-**Write one when `status` would not print a `brief:` line.** That is the whole trigger, and it is an
-observable rather than a judgement. `status` prints a brief at exactly one boundary — the next phase
-is named **and** it carries a `promptPath`. Measured on a scratch project, the other three
-print nothing, and all three are places sessions actually end:
+**Write one when `status` would not print a `brief:` line.** That is the whole trigger, with one
+exception the table names: a next item of `close W<n>` owes no handoff, because its input is the
+workstream's own records. Both are observables rather than judgements. `status` prints a brief when
+the next item is a phase carrying a `promptPath`, and at no other boundary:
 
 | Boundary | `status` prints a brief? | Write a handoff |
 |---|---|---|
-| Next phase named, prompt written | **yes** — the phase prompt *is* the brief | no |
-| A project planned, nothing decomposed yet | no | **yes** |
-| Next phase named, no prompt — every express workstream, by design | no | **yes** |
-| Nothing pending — the close-out boundary | no | **yes** |
+| Next item is a phase with a prompt (any kind) | yes | no |
+| Next item is a phase with no prompt (an express workstream's phase, or a planning phase registered without one) | no | **yes** |
+| Next item is `close W<n>` | no | no: its input is the workstream's own records |
+| Nothing is named (an unordered project with nothing pending, or every item waiting) | no | **yes** |
 
 **Why.** Keel forces a fresh session at every one of these boundaries by design and supplies an
 artifact at exactly one of them. At the rest the operator carries the context in their head, and a
-hand-written note kept to fill the gap goes out of date with nothing to say so.
+hand-written note kept to fill the gap goes out of date with nothing to say so. Once the state names
+planning, re-plans and close-outs, the boundaries the table still lists are the ones where it
+cannot.
 
 **Both arguments are mandatory and each refuses at exit 95.** `-Next` alone hands the next session a
 conclusion it can neither re-derive nor overturn; `-Detail` is what makes it arguable (charter P7).

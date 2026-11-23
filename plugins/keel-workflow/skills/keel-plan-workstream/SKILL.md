@@ -69,14 +69,15 @@ could have reached.*
 If grounding contradicts the ask, **stop and say so**. That is the most valuable output this skill
 produces, and it is worth more than a spec built on the original premise.
 
-**Then look for work this needs.** Run `tree` and list the workstreams still open, those serving
-the same goal first; in a project that shares its progress, name whose they are, by the `owner:` on
+**Then look for work this needs.** Run `tree` and list the workstreams still open, those serving the
+same goal first; in a project that shares its progress, name whose they are, by the `owner:` on
 their unfinished phases, since those are the ones this person cannot see being worked on. Ask the
 operator whether the new work needs any of them delivered first. Keel records a need someone
-declared and never guesses one. Each need goes on the **first phase that needs it** (`add-phase
--Needs`, Step 5), not on the whole workstream. A workstream that needs another's output can still
-be planned now, in outline: its first phase carries the need, and that phase's prompt is written
-after the needed work delivers, against what it actually produced.
+declared and never guesses one. Each need goes on the **first phase that needs it**
+(`add-phase -Needs`, Step 5); a need that holds the whole workstream, its planning included, goes on
+the workstream (`revise-workstream -Needs`). A workstream that needs another's output can still be
+planned now, in outline: its first phase carries the need, and that phase's prompt is written after
+the needed work delivers, against what it actually produced.
 
 ## Step 2 — number it
 
@@ -90,6 +91,9 @@ wrong. Register it before writing the spec, so the number in the filename is the
 ```
 keel-state.ps1 add-workstream -Id W<n> -Title "<title>" -Parent <E<n>|root> -Goals G1[,G2]
 ```
+
+In a project that has placed its workstreams the workstream is already registered, with its planning
+phase `W<n>.0`, before this skill runs as that phase's procedure; do not register it again.
 
 `-Goals` is mandatory (exit 98). If you cannot name a goal this serves, you have found something
 important: either the goal is missing from the charter, or this work should not be happening yet.
@@ -381,7 +385,8 @@ successor takes its order.
 
 ## Step 5 — register the phases
 
-Show the rows and have the human confirm **once**, then:
+The rows are registered at the planning phase's enact step, after the operator has approved them at
+its human gate together with the spec. That approval is the one confirmation; do not ask again.
 
 ```
 keel-state.ps1 add-phase -Phase W<n>.<p> -Scope "<scope>" -Actor <agent|self|external> -RunOrder <int> `
@@ -483,7 +488,10 @@ Commit the amended spec, its index rebuild and any prompt written once the opera
 amendment, and report the commit, under "Whether to ask, or to act and report — reversibility
 decides" in `keel-orchestrator/SKILL.md`.
 
-**Amend mode ends at the amended spec. It does not then run a phase.** Hand back.
+**Amend mode is the procedure of a re-plan phase** (kind `replan`). Its outline is that phase's
+plan, read by a fresh reviewer; the amended spec is its implement step; its fixed checks are run by
+a fresh verifier; the revised state rows are its enact step, made once the operator approves at its
+human gate. The session ends at that phase's record gate. It does not then run the held phase.
 
 One decision amended by the operator inside a running phase is not amend mode: the running session
 appends that row and carries on - see "An earlier decision is a tradeoff to show, not a rule to

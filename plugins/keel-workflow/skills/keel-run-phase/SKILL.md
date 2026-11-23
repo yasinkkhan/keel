@@ -1,6 +1,6 @@
 ---
 name: keel-run-phase
-description: Executes exactly ONE phase of an existing keel workstream - reads the spec and the phase prompt, grounds live before changing anything, does the work or records what the human or a third party did, then hands the result to a FRESH verifier subagent that independently checks every W<n>.<p>-C<n> and returns the results table. Dispatched by keel-orchestrator only; never a session entry point, even on "implement phase W4.2" or "just make this change". The phase's ACTOR selects what evidence a check accepts - command output for agent, an artifact you point at for self, the received deliverable for external - and never which gates run. Resolves FACTUAL unknowns by dispatching fresh advisor subagents with self-contained briefs and proceeds; STOPS and asks the human for anything about scope, cost, risk or irreversibility, and for anything that would contradict a recorded spec Decision. Commits approved writes locally and reports; never pushes, files, signs or enacts on its own initiative.
+description: Executes exactly ONE phase of an existing keel workstream - reads the spec and the phase prompt (for a planning phase, which has no spec yet, its kind's fixed checks and its brief), grounds live before changing anything, does the work or records what the human or a third party did, then hands the result to a FRESH verifier subagent that independently checks every W<n>.<p>-C<n> and returns the results table. Dispatched by keel-orchestrator only; never a session entry point, even on "implement phase W4.2" or "just make this change". The phase's ACTOR selects what evidence a check accepts - command output for agent, an artifact you point at for self, the received deliverable for external - and never which gates run. Resolves FACTUAL unknowns by dispatching fresh advisor subagents with self-contained briefs and proceeds; STOPS and asks the human for anything about scope, cost, risk or irreversibility, and for anything that would contradict a recorded spec Decision. Commits approved writes locally and reports; never pushes, files, signs or enacts on its own initiative.
 ---
 
 # Run one phase
@@ -42,6 +42,18 @@ Read the phase's **actor** from `status`. It determines what you are about to do
 | `agent` | doing the work | `changes-<repo>.patch` per declared repo — or `act-log.md`, if the phase declares no repos |
 | `self` | **recording what the human did** | `act-log.md` with `Done by:` and `Done on:` |
 | `external` | **recording what a third party delivered** | `act-log.md` naming them and the receipt date |
+
+Read its **kind** too. A plan phase (`W<n>.0`) has no spec until its own implement step writes one,
+and a replan phase amends one: where this skill or a template it uses reads the spec for such a
+phase, read instead the fixed checks for its kind and the source its brief names, and give those to
+the plan reviewer and the verifier as the checks.
+
+**Each planning kind copies one fixed-check template into its `plan.md` and its verifier brief**, as
+that phase's checks, which nobody writes: a kind `plan` phase of a delivery workstream (`W<n>.0`)
+copies `keel-plan-workstream/templates/FIXED_CHECKS_PLAN.md`; a kind `replan` phase, in any
+workstream, copies `keel-plan-workstream/templates/FIXED_CHECKS_REPLAN.md`; a kind `plan` phase of a
+planning workstream copies `keel-plan-epic/templates/FIXED_CHECKS_PLANNING_WORKSTREAM.md`, in place
+of the eight. A `deliver` phase copies none: its checks are the spec's.
 
 **On a `self` or `external` phase you are a scribe and a checker, not a doer.** Do not narrate the
 act as though you performed it, and do not record it as done until there is evidence.
@@ -349,7 +361,8 @@ this one — an approval given without understanding is the failure that produce
 ## Gate 7 — enact
 
 **The irreversible outward act.** Filing, signing, sending funds, publishing, broadcasting,
-deploying, pushing.
+deploying, pushing. For a plan or replan phase the act is registering the approved rows in the
+state: answer `-Reversible partial -Observable yes` and record `DONE`, not `N/A`.
 
 Answer both questions **before** acting (charter P21):
 
@@ -425,11 +438,13 @@ half of the manual loop this port deliberately left behind.
 phase of a workstream is the obvious case to exempt, and exempting it is how a line becomes
 optional everywhere. `no phases remain` is an answer, not an exemption.
 
-**Where the answer is not `unchanged`, do not re-plan here.** Name in one line what no longer
-holds, finish the record, and hand back. The re-planning route already exists — `keel-orchestrator`
-section "the plan changed (re-planning mid-workstream)" — and it makes re-planning a *different
-session* from an implementing one, deliberately. Asking the question is what this rule adds;
-answering it with a re-plan in the same breath is what it does not.
+**Where the answer is not `unchanged`, do not re-plan here.** Name in one line what no longer holds,
+finish the record, and hand back. Before handing back, register the re-plan (`add-phase -Kind
+replan`, `keel-orchestrator` Step 3.5) so that `status` names it instead of the next phase, and
+write no prompt for the next phase. The re-plan runs in a session of its own. The re-planning route
+already exists — `keel-orchestrator` section "the plan changed (re-planning mid-workstream)" — and
+it makes re-planning a *different session* from an implementing one, deliberately. Asking the
+question is what this rule adds; answering it with a re-plan in the same breath is what it does not.
 
 **Nothing refuses a missing answer, and that is deliberate.** Unlike `Docs impact`, this line is
 checked by no exit code anywhere; it is owed by this rule alone. Charter P13's ladder starts a new
@@ -455,6 +470,11 @@ keel-state.ps1 record-verdict -Phase W<n>.<p> -Gate record -Verdict DONE
 
 This marks the phase `delivered`, after which it cannot be revised (exit 90).
 
+**A re-plan's delivery record names each phase it held and the stage it resumes at**, one line per
+held phase, such as `W1.2 resumes at verifying`, read from `status` before this gate's verdict is
+recorded: the hold ends the moment the re-plan is delivered, and nothing afterwards says where each
+held phase stood. It is the evidence for the re-plan's fixed check 4.
+
 ### Write the next phase's prompt — this is where later prompts come from
 
 **Planning wrote exactly one prompt, and it was this phase's.** Every later phase's prompt is written
@@ -463,8 +483,9 @@ the just-in-time flow, and skipping it leaves the next session with nothing to r
 
 Take the **next runnable phase in this workstream, by the spec's declared run order** — declared
 data, never inferred from phase numbers — and write its prompt from
-`keel-plan-workstream/templates/PHASE_PROMPT_TEMPLATE.md` to `plan/prompts/W<n>.<p>-prompt.md`.
-Then register it onto that phase:
+`keel-plan-workstream/templates/PHASE_PROMPT_TEMPLATE.md` to `plan/prompts/W<n>.<p>-prompt.md`. If
+that phase already has a prompt, as a held phase does when a re-plan is delivered, write none: the
+amended spec outranks it. Then register it onto that phase:
 
 ```
 keel-state.ps1 revise-phase -Phase W<n>.<p> -PromptPath plan/prompts/W<n>.<p>-prompt.md
@@ -477,15 +498,22 @@ handoff instead.
 
 **Where there is no next phase — the last phase of the workstream — nothing is written**, and that
 is the correct outcome, not an omission. Do not invent a phase to have something to write for: the
-wrapper exits 94 on an undeclared phase. The next event there is close-out.
+wrapper exits 94 on an undeclared phase. The next event there is close-out. In a planning workstream
+that decomposes an epic, a delivered decomposition session is not the last phase while the epic's
+ledger still holds a `NOT-DECOMPOSED` area the operator means to take on: at this gate, register the
+next session (`add-phase -Kind plan`, with a brief pointing at the epic document) so that `status`
+names it. Only when no such area remains is the next event close-out.
 
 **Write it before the rebuild below.** The prompt lands under `plan/`, which `keel-index.ps1` scans,
 so it belongs in the same rebuild-and-stage step as the spec and the delivery record — one order, not
 a second one.
 
-Then **append** the delivery record to the spec's §5, below the plan text. **Do not rewrite the plan
-above it** — the plan as written is the record of what was intended, and the difference is the
-useful part.
+Then **append** the delivery record to the spec's §5, below the plan text. A planning workstream has
+no spec: append a one-line pointer to the delivery record under its epic document's ledger
+amendments instead. A planning workstream at the project root has no epic document either: nothing
+is appended, and the delivery record in the phase folder is the record, as for an express
+workstream. **Do not rewrite the plan above it** — the plan as written is the record of what was
+intended, and the difference is the useful part.
 
 **That append stales the document index — rebuild it in the same commit.** The spec lives under
 `plan/`, which `keel-index.ps1` scans, so `reference/INDEX.md` is wrong until it is rebuilt — and in

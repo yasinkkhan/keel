@@ -203,11 +203,12 @@ difference from what happened is the useful part.
 
 Append process lessons to §8, if there are any with a citable moment.
 
-**An express workstream has no spec, so this step is a no-op** — there is nothing to stamp and
-nothing to say, the same shape as Step 6 below when a project's tracker is `none`. The delivered
-status the stamp would have carried is already in the state file, which `tree` prints and which
-outranks any document (charter P3), and Step 3 has already routed any process lesson to the delivered
-phase's `plan.md`. Do not create a spec file here in order to have somewhere to write.
+**An express workstream or a planning workstream has no spec, so this step is a no-op** — there is
+nothing to stamp and nothing to say, the same shape as Step 6 below when a project's tracker is
+`none`. The delivered status the stamp would have carried is already in the state file, which `tree`
+prints and which outranks any document (charter P3), and Step 3 has already routed any process
+lesson to the delivered phase's `plan.md`. Do not create a spec file here in order to have somewhere
+to write.
 
 ## Step 6 — the tracker projection
 
@@ -270,15 +271,16 @@ pick (charter P8).
    standard, written at intake before anyone knew how the work would go.
 2. **`CHARTER.md` section *What "done" means*, together with the goals this workstream claims** —
    the goal text from the charter's *Goals* section, for the goals `goal-coverage` has just printed
-   against this workstream in Step 8. This rung turns on *What "done" means*; if the charter has no
-   *Goals* section, the rung still holds and you say you judged against *What "done" means* alone.
-   Both were recorded at intake as well, so neither is a criterion invented at close; but they are a
-   **broader** standard than rung 1, and judging against them is a weaker test, which is worth saying
-   out loud when you use them.
-3. **Neither rung above is available** — the charter has no value statement *and* no
-   *What "done" means* section. Record that the project has no pre-work standard to judge against,
-   and answer this question **not judgeable**. Do not construct one now. A close that reaches this
-   rung is telling the operator something worth knowing about the project's intake.
+   against this workstream in Step 8. This rung turns on *What "done" means*; if the charter has
+   no *Goals* section, the rung still holds and you say you judged against *What "done" means*
+   alone. Both were recorded at intake as well, so neither is a criterion invented at close; but
+   they are a **broader** standard than rung 1, and judging against them is a weaker test, which is
+   worth saying out loud when you use them. A planning workstream claims none: judge it against what
+   it planned, by rung 1 or by *What "done" means* alone, and say so.
+3. **Neither rung above is available** — the charter has no value statement *and* no *What "done"
+   means* section. Record that the project has no pre-work standard to judge against, and answer
+   this question **not judgeable**. Do not construct one now. A close that reaches this rung is
+   telling the operator something worth knowing about the project's intake.
 
 **State the rung you used, and why the one above it was unavailable, in the text you write at the end
 of this step.** One sentence. This is not bookkeeping: without it the next close substitutes a
@@ -306,20 +308,22 @@ Step 8 has just run `goal-coverage`. With that output in front of you and this w
 
 **This step decides nothing by itself.** If the order should change, that is a **re-planning
 event**, and it runs through the mechanism that already exists — `keel-orchestrator`'s "Step 3.5 —
-the plan changed", in a fresh session. Do not reorder anything from here.
+the plan changed", in a fresh session. A re-plan of one workstream is a replan phase in it; a
+re-plan of the project's order or of an epic is a replan phase in a planning workstream. Do not
+reorder anything from here.
 
 **Write both answers into the workstream spec's `## 9. Was it worth it`**, appending the section if
 the spec predates it. That append is a local, reversible write inside the project's own folder, so
 **make it and say what you wrote** — the Must not list below is the rule. Two or three sentences per
 question is the size — a dated judgement, not a report.
 
-**If the workstream is express there is no spec, and both answers go to the delivered phase's
-`plan.md`** — the plan artifact `keel-orchestrator`'s "Step 0.5 — express or full workstream?"
-already names — appended at the end under a `## 9. Was it worth it` heading, with nothing above it
-rewritten. Make it and say what you wrote, exactly as above. **This branch matters more than the other two.**
-Express is the cheap path small work is actively steered onto, so a Step 9 that silently had nowhere
-to write was skipping the only judgement in the pipeline precisely where the ratio of ceremony to
-value is worst and an unjustified piece of work is likeliest to hide.
+**If the workstream is express or a planning workstream there is no spec, and both answers go to its
+last delivered phase's `plan.md`** — the plan artifact `keel-orchestrator`'s "Step 0.5 — express or
+full workstream?" already names — appended at the end under a `## 9. Was it worth it` heading, with
+nothing above it rewritten. Make it and say what you wrote, exactly as above. **This branch matters
+more than the other two.** Express is the cheap path small work is actively steered onto, so a Step
+9 that silently had nowhere to write was skipping the only judgement in the pipeline precisely where
+the ratio of ceremony to value is worst and an unjustified piece of work is likeliest to hide.
 
 **No estimate, no score, no number.** The gap this step fills is the absence of a moment where the
 plan is re-judged, not the absence of numbers.
@@ -381,7 +385,9 @@ clean run.
 **Before you hand back, write the handoff** — see "Ending a session — write the handoff before you hand back" in `keel-orchestrator/SKILL.md`.
 
 Then commit this close-out's writes together, once the handoff is written and the index rebuilt
-after it: the stamped spec, its §8 and §9, any `reference/` note, the handoff and
+after it: the stamped spec, its §8 and §9 (an express or planning workstream has no spec to stage;
+its delivered phase's `plan.md` is staged only in a project that shares its progress, where the
+phase's artifacts are in the project folder), any `reference/` note, the handoff and
 `reference/INDEX.md`, staged by path and reported, under "Whether to ask, or to act and report —
 reversibility decides" in `keel-orchestrator/SKILL.md`.
 

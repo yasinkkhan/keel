@@ -178,6 +178,12 @@ artifact-plus-verdict — the *shape* is identical to a typecheck, only the reci
 actor forks the pipeline there are three pipelines to keep correct, two of which are exercised
 rarely enough that their bugs surface at the worst time.
 
+**Amended 2026-11-21, decided by the maintainer.** A phase also has a **kind**: `deliver`, the
+default; `plan`, which plans its workstream; or `replan`, which re-plans it. Like the actor, the
+kind selects what an artifact is expected to hold and which fixed checks apply, never which stages
+run: a planning phase runs the same eight stages as any other. A kind that skipped a stage would be
+the fork this principle forbids. The rest of this principle stands.
+
 **Violation looks like.** A conditional in the orchestrator keyed on actor that changes the stage
 list. A gate that exists only for `agent`. An actor recipe containing the word "skip".
 
@@ -364,6 +370,12 @@ Jira, GitHub Projects — is a **projection** of them and is never read back as 
 three documents, a migration file that disagreed with the applied function body. Each was caught by
 accident.
 
+**Amended 2026-11-22, decided by the maintainer.** The plan's order, its planning work and its
+dependencies are held in the state, written only through `keel-state.ps1`, and the state is their
+authority. The project's files keep the reasoning: specs, ledgers and decisions. A file that lists
+the order says it is a dated copy of `keel-state.ps1 order`'s output. A tracker is still a
+projection of both and is never read back as truth. The rest of this principle stands.
+
 **Violation looks like.** Copying a table "for convenience". Reading a card's description to decide
 what a phase's scope is. Two files that must be edited together with nothing enforcing it.
 
@@ -491,6 +503,12 @@ states in one line what it groups.
 constraint has to live somewhere; putting it on roles rather than on depth is what lets a two-level
 tax project and a six-level platform project use the same tooling.
 
+**Amended 2026-11-21, decided by the maintainer.** A workstream has a **kind**: `delivery`, the
+default, or `planning`, which holds the phases that plan work above one workstream (decomposing an
+epic, re-planning an epic or the project's order). A kind is not a role: a planning workstream is a
+workstream, contains only phases, and nests where any workstream nests. The roles stay four. The
+rest of this principle stands.
+
 **Violation looks like.** A fifth role. A phase with children. A workstream nested in a workstream. An
 epic whose "groups" line restates its title.
 
@@ -569,8 +587,12 @@ declared `partial` or `full` because that is the answer which avoids asking.
 whole reason goals are cross-cutting links rather than a containment level: linkage makes coverage a
 query.
 
-**Violation looks like.** A workstream with no goal. A goal that has silently had no work for the
-life of a project. A coverage report that infers linkage from titles.
+**Amended 2026-11-21, decided by the maintainer.** A planning workstream (P17) declares no goal and
+is never counted as covering one: it plans work, and the work it plans claims the goals. Every other
+workstream still declares at least one. The rest of this principle stands.
+
+**Violation looks like.** A delivery workstream with no goal. A goal that has silently had no work
+for the life of a project. A coverage report that infers linkage from titles.
 
 ---
 

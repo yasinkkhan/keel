@@ -1,6 +1,6 @@
 ---
 name: keel-plan-project
-description: Creates a NEW keel project - its folder, its keel.json, its CHARTER.md and its goals. The ONLY keel skill permitted to run outside a project folder, because it is the one that creates the folder. Dispatched by keel-orchestrator only; never a session entry point. Use when an ask has no project to belong to yet - "I want to sort out my tax returns", "let's plan the crypto apps", "I need to handle the house sale". Settles the three per-project choices that every later session reads before anything else - git, tracker, quarantine - and writes the goals that all future work must claim. It does NOT decompose into epics or workstreams and never plans a phase; a project that ends its first session with goals and a scope boundary is complete work.
+description: Creates a NEW keel project - its folder, its keel.json, its CHARTER.md and its goals. The ONLY keel skill permitted to run outside a project folder, because it is the one that creates the folder. Dispatched by keel-orchestrator only; never a session entry point. Use when an ask has no project to belong to yet - "I want to sort out my tax returns", "let's plan the crypto apps", "I need to handle the house sale". Settles the three per-project choices that every later session reads before anything else - git, tracker, quarantine - and writes the goals that all future work must claim. It does NOT decompose into epics or workstreams and never plans a phase; it registers only the first planning work, so that status names the next session; a project that ends its first session with goals and a scope boundary is complete work.
 ---
 
 # Plan a new project
@@ -9,8 +9,9 @@ A project is a folder with a `keel.json` at its root, and everything in it. This
 and stops.
 
 **What "done" looks like for this skill:** a folder, a `keel.json`, a `CHARTER.md` with goals and a
-scope boundary, and registered goals in state. **No epics, no workstreams, no phases.** Decomposing
-is `keel-plan-epic`'s job, in a later step or a later session.
+scope boundary, and registered goals in state. **No decomposition.** Decomposing is
+`keel-plan-epic`'s job, in a later session; this skill registers only the first planning work, so
+that `status` names that session (Step 6).
 
 ## Step 1 — is this actually a new project?
 
@@ -274,29 +275,31 @@ it, and the wrapper refuses `UNADDRESSED` on a goal a workstream already points 
 Say plainly what exists and what does not:
 
 > *Created `tax-returns` with four goals, a value statement and a scope boundary. Nothing is
-> decomposed yet — no epics, no workstreams, no phases. Next session: `keel-plan-epic` to break G1
-> and G2 into areas.*
+> decomposed yet. Registered: W1, a planning workstream to break G1 and G2 into areas, with its
+> first phase W1.1; `status` names it.*
 
 **A first session that ends here is complete work** (charter P16). The temptation is to keep going
 into decomposition while the context is warm. Resist it: decomposition done in the same breath as
 goal-setting tends to reproduce the goals as epics, one for one, which is a tree that carries no
 information.
 
-**Before you hand back, write the handoff, then, if `git` is on, make the project's first commit.**
-This is the boundary "A project planned, nothing decomposed yet" in the "Ending a session" section
-of `keel-orchestrator/SKILL.md`: write, repair, rebuild and commit, in its order. Show the operator
-the charter and the goals as written and ask them to approve both. Once they have, stage by path the
-files this session wrote (`keel.json`, `.gitignore`, `CHARTER.md`, the handoff,
-`reference/INDEX.md`, and anything else this session put under `plan/` or `reference/`), with
-`private/` kept out by the `.gitignore`, and report the commit, under "Whether to ask, or to act and
-report — reversibility decides" in `keel-orchestrator/SKILL.md`. Until they approve, nothing is
-committed, and the hand-back says so.
+**Before you hand back, register the first planning work, then, if `git` is on, make the project's
+first commit.** With the operator's agreement on what comes first, register it and place it: a
+planning workstream to decompose the project (`add-workstream -Kind planning` with its first phase),
+or the first workstream (`add-workstream`, which creates its `W<n>.0`), each given a brief that
+points at `CHARTER.md`, so that `status` names the next session. A handoff is owed only if nothing
+is registered. Show the operator the charter and the goals as written and ask them to approve both.
+Once they have, stage by path the files this session wrote (`keel.json`, `.gitignore`, `CHARTER.md`,
+the handoff if one was owed, `reference/INDEX.md`, and anything else this session put under `plan/`
+or `reference/`), with `private/` kept out by the `.gitignore`, and report the commit, under
+"Whether to ask, or to act and report — reversibility decides" in `keel-orchestrator/SKILL.md`.
+Until they approve, nothing is committed, and the hand-back says so.
 
 ## Must not
 
 - **Create a project to be helpful.** A `keel.json` is written once and the slug is permanent.
   Ambiguity defaults to asking.
-- **Decompose.** No epics, no workstreams, no phases here.
+- **Decompose.** Register only the first planning work Step 6 names, and plan none of it here.
 - **Write goals that are tasks.** A goal is a state of the world.
 - **Guess the three choices.** Especially `quarantine` — the cost of a wrong `no` is unrecoverable,
   and the cost of a wrong `yes` is an unused directory.

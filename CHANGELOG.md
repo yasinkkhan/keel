@@ -4,6 +4,81 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.87.0 - 2026-11-22
+
+- **`keel-workflow` 0.79.0: planning a workstream, re-planning one and closing one are work `status`
+  can name.** Before this, `status` could only name a phase of delivery work. Planning a workstream
+  happened in a session no gate read, a re-plan was a session that `status` did not know about,
+  so it named the next phase of a workstream whose plan was being changed, and a handoff file had to
+  carry what came next. This release also carries the order between workstreams from 0.78.0, which
+  no release named.
+  - **A phase has a kind.** `add-phase -Kind plan` or `-Kind replan` registers a planning phase;
+    `deliver` is the default, and a phase registered without `-Kind` stores no kind, so every existing phase is what it was. The kind
+    selects what a phase's artifacts hold and which fixed checks apply, never which gates run: a
+    planning phase runs the same eight. In a delivery workstream, kind `plan` is `W<n>.0`, the
+    phase that plans it. `status` prints `next: <id>  [plan]  (<scope>)` or `[re-plan]`, and the
+    phase table marks such a phase `plan` or `re-plan`; `tree` prints `kind:plan` or
+    `kind:replan`.
+  - **The re-plan hold, in any project.** While a workstream has an open re-plan, every other
+    unfinished phase of it is held where it is: nothing is written to it, so it keeps its gates, its
+    iteration count and its verify fingerprint, and it is not named as next. The phase table marks
+    it `held by re-plan <id>`, and a started one gets the line `<id> is held at <stage> by re-plan
+    <id>; it resumes there once <id> is delivered.` Once the re-plan is delivered, the held phases
+    are named again at the stages they were at. A workstream has one open re-plan at a time
+    (`add-phase` refuses a second at exit 90).
+  - **`add-workstream` creates the planning phase.** In a project that has placed its workstreams,
+    a new workstream is placed and created with `W<n>.0` (kind plan, run order 0), which `status`
+    names until it is delivered. A project holding no workstream at all is ordered from its first
+    one, whether or not it holds an epic: that workstream is placed at 1 and gets its `W<n>.0`. A
+    project that already holds workstreams and no order sees none of this until it adopts an order
+    with `order -Set`. `-Express` creates no `W<n>.0`, because the express phase's own plan gate
+    carries the plan.
+  - **Planning workstreams.** `add-workstream -Kind planning` makes a workstream whose phases plan
+    work above one workstream: decomposing an epic, or re-planning an epic or the project's order. It
+    declares no goal (`-Goals` with it exits 98), is never counted as covering one, holds only
+    planning phases (a phase of kind deliver in it exits 93), gets no `W<n>.0`, and is placed like
+    any workstream. `tree` prints it `[workstream, planning]`. A delivery workstream with no
+    `-Goals` is still refused at exit 98.
+  - **The walk.** For each workstream in the order, `status` names the first of its open re-plan,
+    its planning phase `W<n>.0`, its first runnable phase by run order and `close W<n>`. In a
+    project that shares its progress, a `close W<n>` belongs to the owner of `W<n>.0`, so it is on
+    their `next:` and on everyone else's `others:`; with no `W<n>.0` it belongs to nobody and is
+    on `unowned:`.
+  - **Shared progress.** A node file carries `kind` for a planning workstream, and a planning
+    phase's `phase.json` carries `kind`, only when set. A planning phase is owned like any phase.
+    After a merge, two open re-plans of one workstream print a warning naming both, and the later is
+    not named as next. When an older keel rewrites a file and drops its kind, `status` warns and
+    names the command that restores it: `revise-phase -Kind` or `revise-workstream -Kind`, which
+    set an unfinished item's kind under the rules `add-phase` and `add-workstream` apply; set back to the default, a kind keeps its key, so this keel's own change is never read as an older keel's drop.
+  - **Fixed-check templates.** The checks of a planning phase ship as templates nobody writes:
+    `keel-plan-workstream/templates/FIXED_CHECKS_PLAN.md` (eight, for `W<n>.0`),
+    `FIXED_CHECKS_REPLAN.md` (seven, for a re-plan) and
+    `keel-plan-epic/templates/FIXED_CHECKS_PLANNING_WORKSTREAM.md` (four, for a planning
+    workstream's phase). `keel-run-phase` names which one each kind copies into its plan and its
+    verifier brief.
+  - **The skills.** `keel-orchestrator`: "Step 3.5" registers a re-plan as a phase, dispatched to
+    `keel-run-phase` with `keel-plan-workstream`'s amend mode as its procedure, and documents the
+    `order` verb; "Step 0.4" routes a workstream-level or epic-level ask in an ordered project
+    through `W<n>.0` or a planning workstream; "Step 1" registers a spec's rows at the planning
+    phase's enact step; the handoff table owes no handoff for `close W<n>`; the `status` table
+    has a row for every new line. `keel-plan-workstream`: amend mode is the procedure of a re-plan
+    phase, and Step 5's registration is the planning phase's enact step. `keel-plan-epic`: order
+    and blocked-by go into the state when an area is registered, and in an ordered project `status`,
+    not the ledger, names the next decomposition session. `keel-plan-project`: Step 6 registers
+    the first planning work so that `status` names the next session, and owes a handoff only when
+    nothing is registered. `keel-run-phase`: a phase's kind, the templates, the enact act of a
+    planning phase, and a re-plan's delivery record naming where each held phase resumes.
+    `keel-close-workstream`: a planning workstream closes the way an express one does.
+  - **The charter.** P2 gains the kind beside the actor; P17 gives a workstream a kind, which is
+    not a role; P22 exempts a planning workstream from claiming a goal; P10 makes the state the
+    authority for the plan's order, its planning work and its dependencies.
+  - **What does not change.** A project that holds workstreams, places nothing, declares no
+    workstream need and registers no re-plan prints exactly what it printed. No verb gains a
+    required parameter.
+  - **`scripts/test-ordered-plan.ps1`** gains a group for the kinds, each case beside a control; it
+    and `scripts/test-shared-progress.ps1` make a fixture's first workstream with a keel that
+    predates the order, so that a project with no order still exists to test.
+
 ## marketplace 0.86.0 - 2026-11-22
 
 - **`keel-workflow` 0.78.0: the state can hold the order between workstreams, and `status` walks

@@ -1,6 +1,6 @@
 ---
 name: keel-plan-epic
-description: Decomposes work too large for one workstream into several - the EPIC level. Dispatched by keel-orchestrator only; never a session entry point. Use when an ask spans independently deliverable areas that could ship on different days, in a different order, each a reasonable workstream alone - "reconstruct five years of books", "ship a self-custody wallet", "migrate off X". Planning an epic SPANS SESSIONS by design - it writes plan/epics/E<n>_name.md carrying a decomposition ledger, so a later session sees which areas became workstreams and which are still NOT-DECOMPOSED and resumes there instead of starting over. Epics nest inside epics at any depth, and each one must state in one line what it groups. Produces the ledger, the workstream manifest and their declared order; it does NOT plan any child workstream's phases, which is keel-plan-workstream's job, and it never implements.
+description: Decomposes work too large for one workstream into several - the EPIC level. Dispatched by keel-orchestrator only; never a session entry point. Use when an ask spans independently deliverable areas that could ship on different days, in a different order, each a reasonable workstream alone - "reconstruct five years of books", "ship a self-custody wallet", "migrate off X". Planning an epic SPANS SESSIONS by design - it writes plan/epics/E<n>_name.md carrying a decomposition ledger, so a later session sees which areas became workstreams and which are still NOT-DECOMPOSED and resumes there instead of starting over (in a project that has placed its workstreams, status names that session). Epics nest inside epics at any depth, and each one must state in one line what it groups. Produces the ledger, the workstream manifest and their declared order; it does NOT plan any child workstream's phases, which is keel-plan-workstream's job, and it never implements.
 ---
 
 # Plan an epic
@@ -65,8 +65,11 @@ Each area carries exactly one status token, greppable on purpose:
 | `E<n>` | grew into a sub-epic of its own |
 | `EXCLUDED` | deliberately out of scope, with the reason and who decided it beside it; an exclusion the operator could want back is put to them first (see "An earlier decision is a tradeoff to show, not a rule to enforce" in `keel-orchestrator/SKILL.md`) |
 
-**A later session reads the ledger and continues from the first `NOT-DECOMPOSED` row.** That is the
-whole mechanism. Keep it accurate — it is the only record of what is left.
+**In a project that has placed its workstreams, the resume mechanism is `status`:** each
+decomposition session is a phase of the epic's planning workstream, and each registered area is a
+workstream in the order, so the next session is named there. The ledger stays the record of the
+reasoning and of every area's status token; keep it accurate. In a project with no order, a later
+session reads the ledger and continues from the first `NOT-DECOMPOSED` row, as before.
 
 ## Decomposing an area
 
@@ -76,18 +79,22 @@ For each area you take on this session:
 2. **Name which goals it serves.** At least one, and be honest when it serves two — that linkage is
    what makes coverage a query rather than a feeling (charter P22).
 3. **Say whether it can finish independently**, and what it is **blocked by**: an area or open
-   workstream it cannot start without. That becomes a declared need when its phases are planned.
+   workstream it cannot start without. That becomes a declared need on the workstream when the area
+   is registered (`add-workstream -Needs`), or on a phase when only one of its phases needs it.
 4. **Allocate the number**: highest on disk + 1 — **measure it**. Numbers get skipped historically,
    so "count + 1" is wrong.
-5. **Register it**, human-confirmed:
+5. **Register it and place it** at the planning phase's enact step, once the operator has approved
+   the rows at its human gate, which is the one confirmation:
 
 ```
 keel-state.ps1 add-epic        -Id E<n> -Title "<title>" -Parent <E<n>|root> -Groups "<what it groups>" [-Goals G1,G2]
-keel-state.ps1 add-workstream  -Id W<n> -Title "<title>" -Parent E<n> -Goals G1[,G2]
+keel-state.ps1 add-workstream  -Id W<n> -Title "<title>" -Parent E<n> -Goals G1[,G2] [-Needs <ids>]
+keel-state.ps1 order -Id W<n> -After <id>
 ```
 
-`-Goals` is **mandatory on a workstream** (exit 98). An epic may carry goals too, but the coverage
-query reads workstreams — an epic's goals are documentation, a workstream's are the claim.
+`-Goals` is **mandatory on a delivery workstream** (exit 98); a planning workstream declares none
+(charter P22). An epic may carry goals too, but the coverage query reads workstreams — an epic's
+goals are documentation, a workstream's are the claim.
 
 **In a project that shares its progress through its repo** (`"progress": "repo"` in `keel.json`), two
 things change. A "Decided by the operator" label in the ledger or a Decision row names which person
@@ -115,11 +122,11 @@ Record both, because they are different:
 Marking a preference as a dependency freezes a sequence that could have flexed. Marking a dependency
 as a preference produces a workstream that cannot start when its turn comes.
 
-**A blocked-by is recorded in keel's state when the blocked workstream's phases are planned, not
-here.** This skill plans no phases, so the ledger keeps it as text; `keel-plan-workstream` then puts
-it on the first phase of the blocked workstream that needs the work, as `add-phase -Needs W<n>` for
-a whole workstream or `-Needs W<n>.<p>` for one phase. From then on `status` holds that phase back
-until the work is delivered and says what it waits on.
+**Order and blocked-by go into the state when an area is registered.** Register each area as a
+workstream (`add-workstream`), place it (`order -Id W<n> -After <id>`), and give it `-Needs` for
+what it is blocked by. The ledger keeps the reasoning for the order and the dependencies; the
+sequence itself is the state's, and `keel-state.ps1 order` prints it. A ledger that also lists the
+order says it is a copy of `order` 's output on a date.
 
 ## Checking your work before you stop
 
@@ -169,5 +176,6 @@ that shares its progress also pushes it, as "Decomposing an area" says.
   that cannot say what it groups is a rung that should not exist.
 - **Nest deeper than the work is.** Depth is free, but each rung must earn its "groups" line. Three
   deep with three real groupings is fine; three deep to look organised is not.
-- **Leave the ledger stale.** It is the only record of what is left.
+- **Leave the ledger stale.** It is the record of the reasoning and of every area's status token,
+  and in a project with no order it is the only record of what is left.
 - **Rewrite a delivered workstream's ledger row.** Append the amendment, same as a spec Decision.

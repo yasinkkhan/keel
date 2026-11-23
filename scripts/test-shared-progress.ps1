@@ -96,6 +96,11 @@
                  (control: no revision, no warning). Control for tree: a per-machine project with no
                  need prints what HEAD's wrapper prints. The clones' files pass LAYOUT's rules.
 
+    Fixtures: a fixture's first add-workstream is made by the keel of -SeedRef (default v0.85.0),
+    which predates the order: this wrapper orders a project at its first workstream and gives it a
+    planning phase, so a project with no order is one an older keel began, as every real project here
+    is. test-ordered-plan.ps1 tests that rule itself.
+
     Modes, human-invoked and not on the push path, as the other suites' comparison modes are:
       -OldRef <rev>  the wrapper at <rev>, an older copy: a state.json it wrote keeps the same
                      property paths after one write by this wrapper (control: one key added is
@@ -114,6 +119,7 @@
 
 param(
     [string]$OldRef = '',
+    [string]$SeedRef = 'v0.85.0',
     [switch]$RealState,
     [switch]$Keep
 )
@@ -169,10 +175,49 @@ function Get-Sha {
     finally { $shaAlg.Dispose() }
 }
 
+# A project's FIRST add-workstream through this wrapper orders the project and gives the workstream a
+# planning phase W<n>.0, which every row here would then meet. So a fixture's first add-workstream
+# is made by the keel of -SeedRef (default v0.85.0), which predates the order, as every real project
+# here got its workstreams; every later call runs on the wrapper under test. Extracted once, from
+# git archive, with the Windows tar (Git's own tar reads 'C:' in a path as a remote host).
+$script:SeedWrapper = $null
+function Get-SeedWrapper {
+    if ($null -ne $script:SeedWrapper) { return $script:SeedWrapper }
+    $swDir = Join-Path $scratch 'seed'
+    New-Item -ItemType Directory -Path $swDir -Force | Out-Null
+    $swTar = Join-Path $scratch 'seed.tar'
+    $swRes = Invoke-G $repoRoot @('archive', '--format=tar', '-o', $swTar, $SeedRef, 'plugins/keel-workflow', 'scripts')
+    if ($swRes.Code -ne 0) { throw "-SeedRef '$SeedRef' could not be archived: $($swRes.Out)" }
+    $swPrior = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $swTar -C $swDir 2>&1 | Out-Null
+    $ErrorActionPreference = $swPrior
+    $swW = Join-Path $swDir ($wrapperRel -replace '/', '\')
+    if (-not (Test-Path -LiteralPath $swW)) { throw "-SeedRef '$SeedRef' holds no wrapper." }
+    $script:SeedWrapper = $swW
+    return $swW
+}
+function Test-HoldsWorkstream {
+    # Whether the project at a folder already holds a workstream: its progress files when it shares
+    # its progress, else the state file under the home.
+    param([string]$HwHome, [string]$HwDir)
+    $hwNodes = Join-Path $HwDir 'progress\nodes'
+    if (Test-Path -LiteralPath $hwNodes) { return @(Get-ChildItem -LiteralPath $hwNodes -Filter 'W*.json').Count -gt 0 }
+    $hwState = Join-Path $HwHome ".keel\projects\$(Split-Path -Leaf $HwDir)\state.json"
+    if (-not (Test-Path -LiteralPath $hwState)) { return $false }
+    return @(([System.IO.File]::ReadAllText($hwState) | ConvertFrom-Json).nodes | Where-Object { $_.role -eq 'workstream' }).Count -gt 0
+}
+
 function Invoke-K {
     # One wrapper call in its own powershell.exe, as one machine: its scratch home and its name.
     # -KOutward 'allow' for one call only, restored to 'block' after it.
     param([string]$KHome, [string]$KMachine, [string[]]$KArgs, [string]$KWrapper = '', [string]$KOutward = '')
+    # Whichever wrapper builds the fixture, the working tree's or HEAD's for a comparison, so both sides
+    # build the same project: once this change is committed, HEAD's wrapper orders a first workstream too.
+    if (($null -eq $script:SeedWrapper -or $KWrapper -ne $script:SeedWrapper) -and @($KArgs).Count -gt 0 -and $KArgs[0] -eq 'add-workstream') {
+        $kPathAt = [array]::IndexOf(@($KArgs), '-Path')
+        if ($kPathAt -ge 0 -and ($kPathAt + 1) -lt @($KArgs).Count -and -not (Test-HoldsWorkstream $KHome $KArgs[$kPathAt + 1])) { $KWrapper = Get-SeedWrapper }
+    }
     if (-not $KWrapper) { $KWrapper = $wtWrapper }
     $env:USERPROFILE = $KHome
     $env:COMPUTERNAME = $KMachine
