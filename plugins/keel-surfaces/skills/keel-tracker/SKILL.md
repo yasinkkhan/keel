@@ -66,8 +66,14 @@ explicit confirmation (charter P6). A preview that summarises is not a preview.
 CREATE card on board "Tax Returns" -> list "In flight"
   Title: W1 - 2023 bank ledger
   Desc:  Goals: G1, G2. Spec: plan/workstreams/W1_ledger.md
-         Phases: W1.1 (self), W1.2 (external, waiting on Priya, review 2026-08-24)
+         Phases: W1.1 (self), W1.2 (external, waiting on the accountant, review 2026-08-24)
 ```
+
+**Card text names no one.** A card projects a stored wait's "who" as a role, such as
+`the accountant`, or leaves it out, never as a person's name, unless the card has a field that
+exists to hold a person, such as an assignee: then the name goes in that field, never in the card's
+text. The rest of a card's text follows "Text that leaves the project names no one, and marks what the session proposed" in
+`keel-orchestrator/SKILL.md`.
 
 **Uncertainty defaults to SKIP, never CREATE.** "I'll make these and you can delete the wrong ones"
 is the failure this rule exists for.

@@ -140,6 +140,13 @@ prose a phase ships alongside it, can be wrong in a way nobody anticipated, and 
 over a defect you have cited tells the next reader the thing was looked for and not found. Put it
 under `Anything else I noticed`, cite it, and let it decide the verdict.
 
+**Where the deliverable includes text to be published outside the project** - a ticket, a card, a
+message, a signal's text, a pull request - read it for two things whether or not a check row asks:
+a line that names a person, or credits a decision, wish, proposal, agreement or statement to anyone,
+by name or by a role; and a line written with no source behind it that is missing from the draft's
+proposed lines, the `Proposed lines:` list kept beside it. Report each under
+`Anything else I noticed`, quoting the line; either may decide the verdict, as the paragraph above says.
+
 ## Return to the caller
 
 The report file path, the overall verdict, and the failing rows. Not your whole investigation.

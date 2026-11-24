@@ -185,6 +185,9 @@ record, and `signals` lists it under the signal. `signals-push` previews each si
 `-Apply` posts it, creating the issue first in the same run when the signal has none. Comments are
 never read back: a sighting posted from another machine is read on its issue.
 
+**A signal's text, a sighting's and a resolution's are published as written**, so each names no one
+and credits no one: see "Text that leaves the project names no one, and marks what the session proposed" below.
+
 **Never run `-Apply` unprompted.** Show the preview and wait — it is the last point at which
 something that should not leave the machine can be stopped. A project with `quarantine` on may only
 file evidence by reference, and the wrapper refuses content with exit 97.
@@ -434,6 +437,8 @@ or epic as a whole. A blanket "looks right, proceed" over a whole document earns
 the first. Rows written before this convention carry neither and stay valid; where a row does not say
 who decided it, say so in the question rather than guessing. The label matters because a session's
 caution read as the operator's wish is how it comes to be enforced against them.
+That label is for the project's own records; text that leaves the project names no one, as
+"Text that leaves the project names no one, and marks what the session proposed" below says.
 
 **Changing one is a short dated amendment, and it carries its checks.** When the operator amends a
 recorded decision during a phase, the session appends a dated row to the document that holds it -
@@ -514,6 +519,75 @@ this way, with its cited failures, lives only here. A pointing site may carry on
 applies there, beside the pointer, and no more; the templates carry the label's wording and the
 plan-review brief its own routing, because a form being filled and a subagent cannot follow a
 pointer. A later change to this rule finds those lines by searching for this heading.
+
+## Text that leaves the project names no one, and marks what the session proposed
+
+**Text that a phase or keel itself publishes outside the project names no one, and does not say who
+decided, wanted, proposed, agreed or said anything. A draft of such text carries, beside it, a list
+of every line the session wrote with no source behind it.**
+
+**What counts as published.** Four kinds of text, each of which leaves the project as it was written:
+
+- **Signal text:** a signal's title, detail and evidence, a sighting's detail and evidence, and a
+  resolution's text. The wrapper puts each of them verbatim into an issue or a comment and adds no
+  person text of its own, so what the session writes is what is published.
+- **Tracker cards:** a card's title, description and checklist, as `keel-tracker` composes them.
+- **A phase's outbound drafts:** any text a phase drafts to send or post outside the project - a
+  ticket or a description on another team's tracker, an email or a message, a document handed to
+  someone outside the project.
+- **Pull request text:** a pull request's title and body.
+
+**Not published, and not governed here:** the project's own records - its state, specs, Decision
+rows, delivery records, handoffs, the charter, and the friction and question ledgers - and commit
+messages, which are the project's history. Those go on saying who decided what, as "Who decided is
+part of the record" above requires.
+
+**The rule, for published text:**
+
+- **No person's name.**
+- **No attribution of a decision, wish, proposal, agreement or statement to anyone**, by name or by
+  a role that stands for a person - "the operator", "the manager", "a reviewer" - and the
+  operator's own words are no exception.
+- **A decision is stated as the decision:** "the default is X", never "the operator decided X" or
+  "the manager wanted X". **A quotation, where one is needed, carries no speaker.**
+- **Fields that exist to hold a person are untouched.** An assignee or a reporter on the destination
+  holds whoever the project puts there; the rule governs the text, not those fields.
+
+**The one exception is the operator's direction for one particular text.** Where the operator
+directs that a person be named, or a view credited, in one specific text, it may be, in that text
+alone; the direction does not carry over to the next one. Record it where a later reader will find
+it: in the phase's `enact-record.md`, beside the act, quoting the operator's words. A signal or a
+resolution sent from a close-out or a triage has no enact record of its own, so there the
+direction is quoted in the hand-back that reports the push or the close. Nothing records it
+mechanically.
+
+**Published text already written is not rewritten.** Issues and comments already published stay as
+they are, and local signal records already written are not edited to match. The rule governs text
+written from now on.
+
+**Marking what the session proposed.** A draft of published text that a phase writes carries,
+beside it and never inside it, a list headed `Proposed lines:` that quotes, word for word, each
+line the session wrote with no source behind it: no document, record, transcript, code or
+measurement it can point at. The lines a drafter is likeliest to write without noticing are a
+requirement, an acceptance criterion, a recommended method, and a date or a figure not taken from a
+source. A draft with no such line carries `Proposed lines: none`, so that an empty list and a
+missing one differ. Because the list sits beside the draft, in the phase folder or in the message
+that shows it, nothing has to be stripped from the text before it is sent.
+
+- **The fresh plan reviewer** is asked which lines of the draft name or credit a person, and which
+  unsourced lines are missing from the list.
+- **The human-gate preview** quotes the list word for word, as its fifth item (`keel-run-phase`,
+  Gate 6).
+- **No preview says the text is sourced as a whole** - that every statement traces to a source,
+  that it was checked, that it is traceable, or anything with the same effect - unless the list
+  reads `Proposed lines: none` and a fresh reader has checked the draft against its sources. The
+  condition is read by what a claim tells the operator, not by the words it uses.
+
+**The rung.** This is skill prose, charter P13's second rung, and no exit code enforces it. Nothing
+mechanical reads a draft, a proposals list or a preview, and the signal push's findings check
+matches the entries of one machine's private-names list, its name and user folder paths, not
+names or attributions in general.
+What would move it up is a cited failure of this prose.
 
 ## Step 0.5 — express or full workstream? (fresh starts only)
 

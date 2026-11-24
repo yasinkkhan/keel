@@ -133,6 +133,9 @@ keel-state.ps1 signal -Phase W<n>.<p> -Kind <unsafe|refusal|wrong-doc|gap|fricti
 `-Title` is the title the report's issue will carry, so write one a triager can read at a glance; the
 whole detail goes in the issue's body. Without it the title is cut from the detail's first sentence.
 
+**A signal's title, detail and evidence are published as written**, so they name no one and credit
+no one: see "Text that leaves the project names no one, and marks what the session proposed" in `keel-orchestrator/SKILL.md`.
+
 **If the finding is an open signal seen again, record it on that signal rather than filing a second
 one.** Find it with `keel-state.ps1 signals`, then:
 

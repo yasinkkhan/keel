@@ -36,7 +36,7 @@ which kind of finding it is when the disagreement is with a recorded decision.
 
 ## What to look for
 
-Seven questions. Answer each by looking, not by reasoning about what a plan like this usually does.
+Eight questions. Answer each by looking, not by reasoning about what a plan like this usually does.
 
 1. **Does every change the plan lists actually serve this phase's scope?** A change that serves a
    different phase, or no phase, is scope expansion and is a finding.
@@ -64,6 +64,13 @@ Seven questions. Answer each by looking, not by reasoning about what a plan like
    from a write in the source. A command the wrapper would refuse or a field nothing writes is
    `defect`; the first surfaces after the act has begun, the second after it has finished. Where the
    enact step runs no wrapper verb and no check names a stored field, there is nothing to report.
+8. **Where the phase drafts text to be published outside the project** - a ticket, a card, a
+   message, a signal, a pull request - **does any line of the draft name a person, or credit a
+   decision, wish, proposal, agreement or statement to anyone, by name or by a role?** And **is any
+   line the drafter wrote with no source behind it missing from the draft's `Proposed lines:`
+   list** - a requirement, an acceptance criterion, a method, a date or a figure that no document,
+   record or measurement supplies? Each is `defect`; quote the line. Where the phase drafts no
+   such text, there is nothing to report.
 
 ## What is NOT yours to decide
 

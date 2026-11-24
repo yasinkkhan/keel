@@ -4,6 +4,41 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.89.0 - 2026-11-24
+
+- **`keel-workflow` 0.81.0 and `keel-surfaces` 0.4.0: text that leaves a project names no one, and a
+  draft marks the lines its session proposed.** Before this, keel had no general rule against
+  naming people, or saying who decided or wanted what, in text it publishes; its narrower rules
+  covered a project with quarantine on and what a signal push checks for. A drafted outbound text
+  could mix the session's own proposals with sourced facts
+  while its preview called all of it sourced.
+  - **`keel-orchestrator`** has a new section, "Text that leaves the project names no one, and marks what the session proposed". It names what is published (a
+    signal's title, detail and evidence, a sighting's detail and evidence, and a resolution's text;
+    tracker cards; a phase's outbound drafts; pull request text) and what is not (the project's own
+    records, and commit messages). Published text names no one and attributes no decision, wish,
+    proposal, agreement or statement to anyone, by name or by a role, the operator included; a
+    decision is stated as the decision and a quotation carries no speaker; fields that exist to
+    hold a person are untouched; the operator may direct otherwise for one text, which is recorded
+    in the phase's `enact-record.md` or, where there is no enact record, in the hand-back; and
+    published text already written is not rewritten. A draft carries a `Proposed lines:` list
+    beside it, quoting each line the session wrote with no source behind it, or
+    `Proposed lines: none`, and no preview calls a text sourced, checked or traceable as a whole
+    unless that list is empty and a fresh reader has checked the draft. The rule is skill prose; no
+    exit code enforces it. The "Who decided is part of the record" paragraph now says its label is
+    for the project's own records, and the signals section points at the new section.
+  - **`keel-run-phase`** points at it at Gate 4, for a draft; at Gate 6, whose preview gains a fifth
+    item quoting the proposed lines word for word; and at Gate 7, which names `enact-record.md` as
+    where a direction for one text is recorded. Its plan-review brief has an eighth question, on a
+    line naming or crediting a person and an unsourced line missing from the proposed list, each a
+    defect, and its verifier brief tells the verifier to report both under "Anything else I
+    noticed".
+  - **`keel-close-workstream`** Step 4 points at it: a signal's title, detail and evidence are
+    published as written.
+  - **`keel-tracker`** points at it, its preview example's wait reads `waiting on the accountant`,
+    and a card projects a stored wait's "who" as a role or leaves it out, never as a person's name,
+    unless the card has a field that exists to hold a person, where the name goes in that field and
+    never in the card's text.
+
 ## marketplace 0.88.0 - 2026-11-23
 
 - **`keel-workflow` 0.80.0: a goal's wording can be changed, and the wording it replaces is kept.**

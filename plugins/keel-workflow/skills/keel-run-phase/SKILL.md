@@ -241,6 +241,10 @@ phase in a repo-less project could not satisfy the gate at all — it is not a w
 If the phase *did* touch code, the repo belongs in the registry: `add-repo`, then
 `revise-phase -Repos`, and the patch is required again.
 
+**A draft of text that leaves the project** - a ticket, a message, a document for someone outside
+it - names no one and carries its `Proposed lines:` list beside it: see "Text that leaves the project names no one, and marks what the session proposed" in
+`keel-orchestrator/SKILL.md`.
+
 ### Actor `self` or `external`
 
 **The human or the third party acts. You do not.** Tell the human exactly what to do, in a form
@@ -347,6 +351,8 @@ Present, in one place:
 2. **The verify report**, including every `INCONCLUSIVE`.
 3. **The advisor question ledger** — every question you resolved without asking, and on what basis.
 4. **Any `SUPERSEDED` line this phase wrote** - which check or control, and what was measured.
+5. **The proposed lines**, where the phase drafted text that leaves the project - its
+   `Proposed lines:` list quoted word for word, `Proposed lines: none` included; see "Text that leaves the project names no one, and marks what the session proposed" in `keel-orchestrator/SKILL.md`.
 
 Run `keel-state.ps1 status` before presenting, and put any warning about this phase's verify binding
 in front of the human with the change set: the `human` gate's own
@@ -375,6 +381,10 @@ keel-state.ps1 record-verdict -Phase W<n>.<p> -Gate enact -Verdict DONE -Reversi
 - **No enactment in this phase** → `-Verdict N/A`. No artifact needed.
 - **Irreversible AND currently unobservable** → the wrapper refuses `DONE` (exit 95). Record
   `DEFERRED` and hold until the outcome can be read. That is the gate working.
+
+**The text sent is the text approved at the human gate, and an operator's direction that lets one
+text name a person or credit a view is quoted in `enact-record.md`, beside the act** - see
+"Text that leaves the project names no one, and marks what the session proposed" in `keel-orchestrator/SKILL.md`.
 
 **Whether a preview is owed at all is decided by the two answers above** — see "Whether to ask, or
 to act and report — reversibility decides" in `keel-orchestrator/SKILL.md`, which is where that rule
