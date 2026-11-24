@@ -145,7 +145,10 @@ one thing that could make the claim wrong" in `keel-orchestrator/SKILL.md`.}}
 - **Do NOT return a verdict.** Not `PASS`, not `APPROVED`, not "this is ready". The findings list is
   the whole of your output, and adding a verdict is the one failure this brief exists to prevent.
 - Do not edit, create or delete anything, the plan included. This is read-only.
-- Do not write to `%USERPROFILE%\.keel\` or run `keel-state.ps1`.
+- Do not write to `%USERPROFILE%\.keel\` or run a `keel-state.ps1` verb that writes. These forms
+  of it write nothing and may be run to re-take a figure: `status` with no arguments, `tree`,
+  `order` with no arguments, `signals` and `goal-coverage`. Not `status -Phase` or `status -Json`,
+  which print the working session's own notes.
 - Do not fix what you find. You report; the implementer repairs.
 - Do not return your whole reading. Return the format above.
 - Do not pad the list to look thorough. A padded finding costs an iteration out of a budget of

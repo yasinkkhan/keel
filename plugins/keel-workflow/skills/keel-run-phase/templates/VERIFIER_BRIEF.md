@@ -156,7 +156,10 @@ The report file path, the overall verdict, and the failing rows. Not your whole 
 - **Do NOT load or invoke any `keel-*` skill.**
 - Do not fix anything. You verify; someone else repairs.
 - Do not write anywhere except your report file.
-- Do not run `keel-state.ps1`. The dispatching session records the verdict.
+- Do not run a `keel-state.ps1` verb that writes; the dispatching session records the verdict.
+  These forms of it write nothing and may be run to re-take a figure: `status` with no arguments,
+  `tree`, `order` with no arguments, `signals` and `goal-coverage`. Not `status -Phase` or
+  `status -Json`, which print the working session's own notes.
 - Do not mark a check `PASS` on reasoning. A check passes on an observation.
 - Do not pad the report to look thorough. A short report where everything passed is the expected
   outcome (charter P16).

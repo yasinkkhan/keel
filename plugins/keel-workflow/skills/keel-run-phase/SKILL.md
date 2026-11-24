@@ -474,6 +474,12 @@ declared, a coupling it does not have. This rule is prose at one site, on the ru
 every new rule at. Write it anyway — the phase that finally has one is the wrong place to be asked
 for the first time.
 
+**It must also answer every item a check sent to the verify report as deciding nothing.** Where a
+check says an item a reader finds is noted under the verify report's `Anything else I noticed`
+and answered in the delivery record, rather than failed, the record answers each such item in one
+line: what was done about it, or why nothing was. An answer that edits something the verifier
+read is a repair, and another verify round follows it (gate 5).
+
 ```
 keel-state.ps1 record-verdict -Phase W<n>.<p> -Gate record -Verdict DONE
 ```

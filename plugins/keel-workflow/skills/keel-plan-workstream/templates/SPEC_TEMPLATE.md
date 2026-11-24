@@ -36,6 +36,10 @@ evaluate it. MEASURED, not recalled - include the measurement and the date.
 If a premise came from a tracker card, a document, or the user's own description, say that you
 re-measured it and what you got. Every absence claim needs its positive control here.
 
+List each premise under **Measured**, one item each, with the command it ran or the file it
+read and what that printed: that list is what check C1 of a planning phase (FIXED_CHECKS_PLAN.md)
+reads.
+
   "Measured 2026-08-17: the 2023 statements folder holds 9 of 12 months; March, April and August
    are absent. Positive control: the same listing shows all 12 months for 2022, so the query does
    find files when they exist."

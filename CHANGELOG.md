@@ -4,6 +4,32 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.90.0 - 2026-11-24
+
+- **`keel-workflow` 0.82.0: a planning phase's checks have a point where a fresh reader stops,
+  and a reviewing subagent may read the state.** Two of the eight fixed checks a planning phase
+  copies asked a fresh verifier to confirm that every factual premise in a spec's first section
+  carried its command, and that every check stated how it could fail. Neither named a list to check
+  against, so a verifier could always find one more sentence to fail, and planning phases ran
+  verify round after round on wording while every measured figure agreed.
+  - **`FIXED_CHECKS_PLAN.md`**: check C1 now grades the items listed under the spec's `Measured`
+    heading, and fails one that names no command or result, re-takes differently or states an
+    absence a reader finds present. Check C3 grades the checks in section 5, each numbered, saying what
+    decides it and carrying a positive control, a broken-instrument output or the word unmeasured
+    with a reason. Anything a reader finds beyond
+    those lists, such as an unbacked phrase inside a listed item or a form judged weak, is noted in the verify
+    report and answered in the delivery record, and does not decide the verdict.
+  - **`keel-run-phase`** Gate 8 says the delivery record answers each such noted item in one line,
+    and that an answer editing what the verifier read is a repair, followed by another verify round.
+  - **`SPEC_TEMPLATE.md`** says each premise is listed under `Measured`, one item each, because that
+    list is what C1 reads.
+  - **The verifier and plan-review briefs** forbade running `keel-state.ps1` at all, while a
+    planning phase's checks ask for figures that come from the wrapper's reads. Both now forbid only
+    the verbs that write, and name the forms that write nothing: `status` with no arguments, `tree`,
+    `order` with no arguments, `signals` and `goal-coverage`. `status -Phase` and `status -Json`
+    stay out, because they print the working session's own notes, which a fresh reader is kept
+    from.
+
 ## marketplace 0.89.0 - 2026-11-24
 
 - **`keel-workflow` 0.81.0 and `keel-surfaces` 0.4.0: text that leaves a project names no one, and a
