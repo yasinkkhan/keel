@@ -479,6 +479,9 @@ rest is wrong is the review working.
 - **A delivered phase cannot be revised** (exit 90). If delivered work needs redoing, that is a
   **new phase** whose scope says what it supersedes. A description that is simply wrong takes
   `revise-phase -Correction`, a dated note beside the frozen scope.
+- **A goal the amendment rewords changes in both places in the same act:** its row in the project's
+  `CHARTER.md` and `keel-state.ps1 revise-goal -Id G<n> -Text "<new wording>" -Detail "<why>"`,
+  which keeps the wording it replaces on the goal. Never change one without the other.
 
 **What you are amending against is the spec's own section 1, which is a dated planning snapshot** —
 governed by **"Material keel produced is re-measured before you act on it"** in

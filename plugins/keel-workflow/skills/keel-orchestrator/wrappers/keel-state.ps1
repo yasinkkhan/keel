@@ -835,6 +835,8 @@ function New-SpForm {
         # A workstream's kind, only when it is not the default, for the same reason.
         if ([string](Get-Prop $SpObj 'kind' '')) { $spF['kind'] = [string](Get-Prop $SpObj 'kind' '') }
     }
+    # A goal's earlier wordings, only when it holds them, so a goal never reworded writes HEAD's bytes.
+    if ($SpKind -eq 'goal' -and $null -ne $SpObj.PSObject.Properties['revisions']) { $spF['revisions'] = @(@($SpObj.revisions) | Where-Object { $null -ne $_ }) }
     if ($SpKind -eq 'decl' -and $null -ne (Get-OrderValue $SpObj)) { $spF['order'] = Get-OrderValue $SpObj }
     if ($SpKind -eq 'decl' -and [string](Get-Prop $SpObj 'kind' '')) { $spF['kind'] = [string](Get-Prop $SpObj 'kind' '') }
     if ($SpKind -eq 'run' -and [string](Get-Prop $SpObj 'stage' '') -eq 'handed-over') {
@@ -3535,11 +3537,11 @@ function Get-OrderItemText {
 
 function Get-OrderDropLines {
     # A shared project only: each unfinished item whose file held 'order', 'needs' or 'kind' at an earlier
-    # commit and no longer does. A keel older than this one rewrites a node or a phase declaration it
-    # changes with only the fields it knows, and never one it does not change (both measured), so a
-    # key that vanishes is that keel's write. Read from two local git calls over progress/nodes and
-    # progress/phases: the uncommitted diff, and the last 100 commits (a drop older than that is not
-    # reported). A key line removed with none added for that key, in a file the diff does not
+    # commit and no longer does, and each goal whose file held 'revisions'. A keel older than this one
+    # rewrites a node, a phase declaration or a goal it changes with only the fields it knows, and
+    # never one it does not change (both measured), so a key that vanishes is that keel's write. Read
+    # from two local git calls over progress/nodes, progress/phases and progress/goals: the
+    # uncommitted diff, and the last 100 commits (a drop older than that is not reported). A key line removed with none added for that key, in a file the diff does not
     # delete (a fold deletes phase files on purpose), whose working copy now lacks the key. A finished
     # item is left out: the remedy refuses it, and an older close or abandon rewrites the node it
     # finishes. Plus, needing no git, a hand-over an older keel made: an unfinished phase continuing
@@ -3550,8 +3552,8 @@ function Get-OrderDropLines {
     $odDrops = [ordered]@{}
     $odMark = [string][char]1
     $odCalls = @(
-        , @('-C', $odRoot, 'diff', 'HEAD', '-U0', '--no-renames', '--no-color', '--', 'progress/nodes', 'progress/phases')
-        , @('-C', $odRoot, 'log', '-n', '100', '-p', '-U0', '--no-renames', '--no-color', '--format=%x01%H', '--', 'progress/nodes', 'progress/phases')
+        , @('-C', $odRoot, 'diff', 'HEAD', '-U0', '--no-renames', '--no-color', '--', 'progress/nodes', 'progress/phases', 'progress/goals')
+        , @('-C', $odRoot, 'log', '-n', '100', '-p', '-U0', '--no-renames', '--no-color', '--format=%x01%H', '--', 'progress/nodes', 'progress/phases', 'progress/goals')
     )
     foreach ($odArgs in $odCalls) {
         $odRes = Invoke-Native -Exe 'git' -Arguments $odArgs -NativeSplitStderr
@@ -3575,7 +3577,7 @@ function Get-OrderDropLines {
             if ($null -eq $odFile) { continue }
             if ($odLine -like 'deleted file mode*') { $odDel = $true; continue }
             if ($odLine.StartsWith('---') -or $odLine.StartsWith('+++')) { continue }
-            $odKm = [regex]::Match($odLine, '^([-+])\s*"(order|needs|kind)"\s*:\s*"?([A-Za-z]*)')
+            $odKm = [regex]::Match($odLine, '^([-+])\s*"(order|needs|kind|revisions)"\s*:\s*"?([A-Za-z]*)')
             if ($odKm.Success) {
                 if ($odKm.Groups[1].Value -eq '-') { $odRm[$odKm.Groups[2].Value] = $odKm.Groups[3].Value } else { $odAdd[$odKm.Groups[2].Value] = $true }
             }
@@ -3586,8 +3588,12 @@ function Get-OrderDropLines {
         $odItem = $null; $odKind = ''
         $odNm = [regex]::Match($odPath, '^progress/nodes/(W\d+)\.json$')
         $odPm = [regex]::Match($odPath, '^progress/phases/(W\d+\.\d+[a-z]?)/phase\.json$')
-        if ($odNm.Success) { $odItem = Find-Node $OdState $odNm.Groups[1].Value; $odKind = 'ws' }
+        $odGm = [regex]::Match($odPath, '^progress/goals/(G\d+)\.json$')
+        if ($odNm.Success -and $odKey -ne 'revisions') { $odItem = Find-Node $OdState $odNm.Groups[1].Value; $odKind = 'ws' }
         elseif ($odPm.Success -and ($odKey -eq 'order' -or $odKey -eq 'kind')) { $odItem = Find-Phase $OdState $odPm.Groups[1].Value; $odKind = 'phase' }
+        elseif ($odGm.Success -and $odKey -eq 'revisions') {
+            foreach ($odG in @(Get-GoalList $OdState)) { if ([string]$odG.id -eq $odGm.Groups[1].Value) { $odItem = $odG; $odKind = 'goal' } }
+        }
         if ($null -eq $odItem) { continue }
         if ($odKind -eq 'ws' -and (Test-WsFinished $odItem)) { continue }
         if ($odKind -eq 'phase' -and (Test-NeedFinished $odItem)) { continue }
@@ -3597,7 +3603,11 @@ function Get-OrderDropLines {
         try { $odNow = [System.IO.File]::ReadAllText($odFull, [System.Text.Encoding]::UTF8) | ConvertFrom-Json } catch { $odNow = $null }
         if ($null -eq $odNow -or $null -ne $odNow.PSObject.Properties[$odKey]) { continue }
         $odId = [string]$odItem.id
-        if ($odKey -eq 'kind') {
+        if ($odKind -eq 'goal') {
+            # No command restores the list: the earlier wordings are in the file's history.
+            $odOut.Add("$odPath held revisions at an earlier commit and no longer does - a keel older than this one rewrote it. The earlier wordings are in: git log -p -- $odPath")
+        }
+        elseif ($odKey -eq 'kind') {
             $odVerb = if ($odKind -eq 'ws') { "revise-workstream -Id $odId" } else { "revise-phase -Phase $odId" }
             $odOut.Add("$odPath held kind '$odWas' at an earlier commit and no longer does - a keel older than this one rewrote it. Restore it with: $odVerb -Kind $odWas")
         }
@@ -4879,7 +4889,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  Project:    init-project  resolve  status  tree  list  goal-coverage"
     Write-Output "              ack-keel-version  handoff  share-progress  join"
     Write-Output "  Repos:      add-repo  repos"
-    Write-Output "  Structure:  add-goal  set-goal-status  add-epic  add-workstream  add-phase"
+    Write-Output "  Structure:  add-goal  set-goal-status  revise-goal  add-epic  add-workstream  add-phase"
     Write-Output "              revise-epic  revise-workstream  revise-phase  order"
     Write-Output "  Execution:  set-stage  set-waiting  clear-waiting  record-verdict"
     Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  hand-over"
@@ -4888,6 +4898,8 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              resolve-signal  signals-relink"
     Write-Output ""
     Write-Output "  'revise-phase -Correction' appends a dated note to a DELIVERED phase; its scope stays."
+    Write-Output "  'revise-goal -Id G<n> -Text <new wording> -Detail <why>' rewords a goal and keeps the wording"
+    Write-Output "  it replaces on the goal, with the reason and the date; tree marks the goal '(reworded <date>)'."
     Write-Output "  'add-phase -Needs <ids>' and 'revise-phase -Needs <ids|none>' declare the phases (W4.2) or"
     Write-Output "  workstreams (W4) a phase needs delivered first; status names it next only once they are."
     Write-Output "  'add-workstream -Needs <ids>' and 'revise-workstream -Needs <ids|none>' declare the work a whole"
@@ -5988,7 +6000,12 @@ switch ($Command) {
     }
     foreach ($g in @(Get-GoalList $state)) {
         $mark = if ((Get-Prop $g 'status' 'OPEN') -eq 'UNADDRESSED') { '  [UNADDRESSED]' } else { '' }
-        Write-Output ("  {0}  {1}{2}" -f $g.id, $g.text, $mark)
+        # A reworded goal says so, with the date of its last revision; one never reworded prints
+        # what it always did.
+        $trRevs = @(@(Get-Prop $g 'revisions' @()) | Where-Object { $null -ne $_ })
+        $trRew = ''
+        if ($trRevs.Count -gt 0) { $trRew = '  (reworded ' + (([string](Get-Prop $trRevs[$trRevs.Count - 1] 'at' '')) -split 'T')[0] + ')' }
+        Write-Output ("  {0}  {1}{2}{3}" -f $g.id, $g.text, $mark, $trRew)
     }
     Write-Output ''
     # Positions in the order, empty in a project that places nothing, so its tree is what it was.
@@ -6279,6 +6296,42 @@ switch ($Command) {
 
     if ($wanted -eq 'UNADDRESSED') { Say "Goal $Id marked UNADDRESSED: $Detail" }
     else                           { Say "Goal $Id set back to OPEN. It now needs a workstream to claim it (charter P22)." }
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# A goal's wording changes when a project decision rewords it. The charter says what a goal MEANS
+# and state holds the same wording, which 'tree' prints; without this verb state kept the first
+# wording for good and 'tree' went on printing a goal the project had replaced. The wording a
+# revision replaces is kept on the goal, with the reason and the date, at the end of its
+# 'revisions' list, so nothing is lost and 'status -Json' shows the history. The reason is
+# mandatory (95), as set-goal-status's is for UNADDRESSED. Nothing else on the goal moves: its
+# status and every workstream's link to it stay as they were.
+'revise-goal' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $Id 'Id'; Assert-GoalId $Id
+    Require-Param $Text 'Text'
+    if ([string]::IsNullOrWhiteSpace($Detail)) {
+        Fail 95 "-Detail is required for 'revise-goal'. Say WHY the wording changed - the decision that reworded the goal - so the wording it replaces keeps its reason."
+    }
+
+    $state = Read-State $proj.Slug -ForWrite
+    $arr = @(Get-GoalList $state)
+    $target = @($arr | Where-Object { $_.id -eq $Id })
+    if ($target.Count -eq 0) { Fail 98 "Goal '$Id' does not exist in this project. Add it with add-goal first." }
+    $g = $target[0]
+    $rgOld = [string](Get-Prop $g 'text' '')
+    if ($rgOld -ceq $Text) { Fail 90 "-Text is already goal $Id's wording, so there is nothing to revise. Nothing was written." }
+
+    $rgList = @(@(Get-Prop $g 'revisions' @()) | Where-Object { $null -ne $_ })
+    $rgList += [pscustomobject]@{ text = $rgOld; reason = $Detail; at = (Now) }
+    Set-Prop $g 'text' $Text
+    Set-Prop $g 'revisions' $rgList
+    Set-Prop $state 'goals' $arr
+    Write-State $proj.Slug $state
+
+    Say "Goal $Id reworded. The wording it replaces is kept on the goal with the reason ($($rgList.Count) earlier wording(s); status -Json shows them)."
+    Say "Change goal $Id's row in the project's CHARTER.md to the same wording, if it does not already say it."
     exit 0
 }
 

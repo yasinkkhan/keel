@@ -16,8 +16,9 @@
                  is UTF-8 with no byte-order mark and LF only, carries by (naming a person file),
                  machine and at with a UTC offset, holds exactly its kind's fields, and an entry's
                  name is <yyyyMMddTHHmmssZ>-<person id>-<4 hex>.json; all 13 kinds are produced.
-                 A need is exactly { id, at }, revisedAt is null or a stamp with an offset, and a
-                 continues names a phase that has a file. Control: five planted files, each with
+                 A need is exactly { id, at }, revisedAt is null or a stamp with an offset, a
+                 continues names a phase that has a file, and a goal's revisions, which only a
+                 reworded goal holds, is a list of exactly { text, reason, at }, at with an offset. Control: five planted files, each with
                  one defect, are each reported.
       TWO        a bare remote and two clones, two machines, two people: different work on each
                  side merges with plain git pull and no conflict, and both clones show all of it.
@@ -480,6 +481,18 @@ function Test-ProgressFiles {
             'run' {
                 if ([string]$tpObj.stage -eq 'handed-over') { $tpWant += @('handedOverTo', 'handOverReason') }
             }
+            'goal' {
+                # A reworded goal's earlier wordings, only when it holds them: each exactly
+                # { text, reason, at }, its at a stamp with an offset.
+                $tpMay += 'revisions'
+                if ($null -ne $tpObj.PSObject.Properties['revisions']) {
+                    foreach ($tpRv in @($tpObj.revisions)) {
+                        $tpRvNames = @($tpRv.PSObject.Properties | ForEach-Object { $_.Name })
+                        if ((@($tpRvNames | Sort-Object) -join ',') -ne 'at,reason,text') { $tpProblems.Add("${tpRel}: a revision has fields other than text, reason and at: $($tpRvNames -join ', ')") }
+                        elseif ([string]$tpRv.at -notmatch $OffsetStamp) { $tpProblems.Add("${tpRel}: a revision's 'at' has no UTC offset") }
+                    }
+                }
+            }
             'gate' {
                 $tpGate = [string]$tpObj.gate
                 if ($tpGate -eq 'enact') { $tpWant += @('reversible', 'observable'); $tpMay += 'bindingCheck' }
@@ -578,6 +591,8 @@ try {
     Save-Commit $dirA 'project'
     Assert-K $homeA 'KSP-A' @('share-progress', '-Path', $dirA) | Out-Null
     Assert-K $homeA 'KSP-A' @('ack-keel-version', '-Path', $dirA, '-Detail', 'suite acknowledgement') | Out-Null
+    # One goal reworded, so LAYOUT reads a goal file that carries revisions.
+    Assert-K $homeA 'KSP-A' @('revise-goal', '-Path', $dirA, '-Id', 'G1', '-Text', 'first goal, reworded', '-Detail', 'suite rewording') | Out-Null
     Save-Commit $dirA 'shared'
     Assert-G $dirA @('push', '-q', '-u', 'origin', 'main') | Out-Null
     $LayoutDirs.Add($dirA)

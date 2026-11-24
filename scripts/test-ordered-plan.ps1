@@ -1,7 +1,8 @@
 <#
     test-ordered-plan.ps1 - the suite for the order between workstreams: 'order' on workstreams and
     on placed phases, the 'order' verb, needs on whole workstreams, the walk 'status' names next by,
-    'tree's positions, and the same in a project that shares its progress through its repo.
+    'tree's positions, and the same in a project that shares its progress through its repo; and for
+    goals reworded with 'revise-goal'.
 
     Runs in a scratch home ONLY. USERPROFILE and COMPUTERNAME are set for every wrapper call; HOME
     and GIT_CONFIG_GLOBAL point at an empty scratch file and GIT_CONFIG_NOSYSTEM is set, so no real
@@ -31,6 +32,12 @@
                workstream, an epic first), tree's kinds, and in a shared project the kind fields, a
                planning phase's owner, a close-out owned by W<n>.0's owner, two open re-plans after a
                merge, and an older keel dropping a kind. Each beside a control.
+      GOAL     'revise-goal' rewords a goal and keeps each replaced wording with its reason and date,
+               read from status -Json; tree prints the current wording and '(reworded <date>)'; each
+               refusal (90, 95, 98) leaves state.json's bytes unchanged beside a success on the same
+               goal; a project that never rewords a goal prints and stores what the older keel does;
+               in a shared project a goal file carries revisions only when held, and status, never
+               tree, warns when an older keel drops them. Controls run the older keel of -GoalOldRef.
       HOOK     scripts/keel-session-start.ps1 beside the wrapper prints nothing for a clean ordered
                project, and the unplaced warning when there is one.
 
@@ -50,7 +57,8 @@
     committed that compares the wrapper with itself, which the rows say, and every control also
     asserts today's line by its text. -OldRef <rev> (default v0.85.0) is a keel that predates the
     order, for the warning about a dropped key and for each fixture's first workstream; the suite refuses at
-    90 if it knows 'order'.
+    90 if it knows 'order'. -GoalOldRef <rev> (default v0.87.0) is a keel that predates 'revise-goal',
+    for GOAL's controls and its older writes; the suite refuses at 90 if it knows 'revise-goal'.
 
     Summary line, parsed by check-suite-docs.ps1 (a declared coupling):
       test-ordered-plan: <n> case(s), <n> failure(s)
@@ -62,6 +70,7 @@ param(
     [string]$AgainstWrapper = '',
     [string]$BaseRef = 'HEAD',
     [string]$OldRef = 'v0.85.0',
+    [string]$GoalOldRef = 'v0.87.0',
     [switch]$RealProjects,
     [switch]$Keep
 )
@@ -303,6 +312,9 @@ $baseNote = if ($baseSame) { ' (the baseline is this wrapper, so that half compa
 $oldWrapper = Get-RefWrapper $OldRef 'old'
 if ($null -eq $oldWrapper) { Stop-Suite 90 "-OldRef '$OldRef' could not be extracted." }
 if ([System.IO.File]::ReadAllText($oldWrapper) -match "(?m)^'order' \{") { Stop-Suite 90 "-OldRef '$OldRef' already knows 'order', so it cannot stand for an older keel." }
+$goalOldWrapper = Get-RefWrapper $GoalOldRef 'goalold'
+if ($null -eq $goalOldWrapper) { Stop-Suite 90 "-GoalOldRef '$GoalOldRef' could not be extracted." }
+if ([System.IO.File]::ReadAllText($goalOldWrapper) -match "(?m)^'revise-goal' \{") { Stop-Suite 90 "-GoalOldRef '$GoalOldRef' already knows 'revise-goal', so it cannot stand for an older keel." }
 
 
 # ================================================================ main ==
@@ -1067,6 +1079,169 @@ try {
     Add-Case $rows[16] ($kWsR.Code -eq 0 -and -not (Test-LineRe $kWs2 'held kind') -and (Test-Has $kN3b 'kind') -and [string]$kN3b.kind -eq 'planning') "revise-workstream -Id W3 -Kind planning on a workstream with no goal: exit $($kWsR.Code), the warning gone"
 } catch { Set-RowsFailed $rows $_ }
 
+# ================================================================ GOAL ==
+function Get-GoalLine {
+    # A goal's line in tree's output, or a marker when there is none.
+    param($GlRes, [string]$GlId)
+    foreach ($glL in @($GlRes.Lines)) { if ($glL -like "  $GlId  *") { return $glL } }
+    return '(no goal line)'
+}
+function Get-JsonGoal {
+    # A goal as 'status -Json' prints it: the state the wrapper read, from state.json or from
+    # progress/goals in a project that shares its progress.
+    param($JgFx, [string]$JgId)
+    $jgRes = Invoke-X $JgFx @('status', '-Json')
+    if ($jgRes.Code -ne 0) { return $null }
+    $jgAt = $jgRes.Out.IndexOf('{')
+    if ($jgAt -lt 0) { return $null }
+    $jgObj = $null
+    try { $jgObj = $jgRes.Out.Substring($jgAt) | ConvertFrom-Json } catch { $jgObj = $null }
+    if ($null -eq $jgObj -or $null -eq $jgObj.PSObject.Properties['goals']) { return $null }
+    foreach ($jgG in @($jgObj.goals)) { if ([string]$jgG.id -eq $JgId) { return $jgG } }
+    return $null
+}
+function Get-RevList {
+    param($RlGoal)
+    if ($null -eq $RlGoal -or $null -eq $RlGoal.PSObject.Properties['revisions']) { return @() }
+    return @(@($RlGoal.revisions) | Where-Object { $null -ne $_ })
+}
+$glToday = (Get-Date).ToString('yyyy-MM-dd')
+
+# ---- C1: revise-goal rewords a goal and keeps each replaced wording
+$rows = @('GOAL-c1-revise', 'GOAL-c1-stored', 'GOAL-c1-second', 'GOAL-c1-control')
+try {
+    $g1 = New-Fx 'gl' $hM
+    Invoke-X $g1 @('add-goal', '-Id', 'G2', '-Text', 'alpha wording') -XMust | Out-Null
+    $g1r = Invoke-X $g1 @('revise-goal', '-Id', 'G2', '-Text', 'beta wording', '-Detail', 'reason one')
+    $g1Days = @($glToday, (Get-Date).ToString('yyyy-MM-dd'))
+    $g1t = Invoke-X $g1 @('tree')
+    $g1Line = Get-GoalLine $g1t 'G2'
+    $g1LineOk = @($g1Days | Where-Object { $g1Line -ceq "  G2  beta wording  (reworded $_)" }).Count -gt 0
+    Add-Case $rows[0] ($g1r.Code -eq 0 -and $g1LineOk -and $g1t.Out -notmatch 'alpha wording') "revise-goal exit $($g1r.Code); tree's G2 line: $g1Line"
+    $g1j = Get-JsonGoal $g1 'G2'
+    $g1Revs = @(Get-RevList $g1j)
+    $g1Stored = ($null -ne $g1j) -and ([string]$g1j.text -ceq 'beta wording') -and ($g1Revs.Count -eq 1)
+    if ($g1Stored) { $g1Stored = ([string]$g1Revs[0].text -ceq 'alpha wording') -and ([string]$g1Revs[0].reason -ceq 'reason one') -and ([string]$g1Revs[0].at -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}') }
+    Add-Case $rows[1] $g1Stored "status -Json: G2 text '$(if ($null -ne $g1j) { $g1j.text })', $($g1Revs.Count) revision(s)"
+    $g1r2 = Invoke-X $g1 @('revise-goal', '-Id', 'G2', '-Text', 'gamma wording', '-Detail', 'reason two')
+    $g1Revs2 = @(Get-RevList (Get-JsonGoal $g1 'G2'))
+    $g1t2 = Invoke-X $g1 @('tree')
+    $g1Second = ($g1r2.Code -eq 0) -and ($g1Revs2.Count -eq 2) -and ((Get-GoalLine $g1t2 'G2') -like '  G2  gamma wording  (reworded *)')
+    if ($g1Second) { $g1Second = ([string]$g1Revs2[0].text -ceq 'alpha wording') -and ([string]$g1Revs2[1].text -ceq 'beta wording') -and ([string]$g1Revs2[1].reason -ceq 'reason two') }
+    Add-Case $rows[2] $g1Second "second revise-goal exit $($g1r2.Code); $($g1Revs2.Count) revision(s): $(@($g1Revs2 | ForEach-Object { $_.text }) -join ' then ')"
+    # Control: the older keel, which has no such verb, on a fixture of its own; then this wrapper on it.
+    $g1c = New-Fx 'glc' $hM
+    Invoke-X $g1c @('add-goal', '-Id', 'G2', '-Text', 'alpha wording') -XMust | Out-Null
+    $g1co = Invoke-X $g1c @('revise-goal', '-Id', 'G2', '-Text', 'beta wording', '-Detail', 'reason one') -XWrapper $goalOldWrapper
+    $g1ct = Get-GoalLine (Invoke-X $g1c @('tree') -XWrapper $goalOldWrapper) 'G2'
+    $g1cn = Invoke-X $g1c @('revise-goal', '-Id', 'G2', '-Text', 'beta wording', '-Detail', 'reason one')
+    $g1cnt = Get-GoalLine (Invoke-X $g1c @('tree')) 'G2'
+    Add-Case $rows[3] ($g1co.Code -eq 90 -and $g1ct -ceq '  G2  alpha wording' -and $g1cn.Code -eq 0 -and $g1cnt -like '  G2  beta wording  (reworded *)') "the older keel: exit $($g1co.Code), its tree '$g1ct'; this wrapper then: exit $($g1cn.Code), '$g1cnt'"
+} catch { Set-RowsFailed $rows $_ }
+
+# ---- C2: each refusal writes nothing, beside a success on the same store and goal
+$rows = @('GOAL-c2-no-text-90', 'GOAL-c2-no-detail-95', 'GOAL-c2-unknown-98', 'GOAL-c2-bad-id-90', 'GOAL-c2-same-text-90')
+try {
+    $g2 = New-Fx 'glr' $hM
+    Invoke-X $g2 @('add-goal', '-Id', 'G2', '-Text', 'wording 0') -XMust | Out-Null
+    # The last refusal's arguments are built at its turn, from the wording the pairs left.
+    $g2Cases = @(
+        , @(90, @('revise-goal', '-Id', 'G2', '-Detail', 'a reason'))
+        , @(95, @('revise-goal', '-Id', 'G2', '-Text', 'never written'))
+        , @(98, @('revise-goal', '-Id', 'G9', '-Text', 'never written', '-Detail', 'a reason'))
+        , @(90, @('revise-goal', '-Id', 'X1', '-Text', 'never written', '-Detail', 'a reason'))
+        , @(90, $null)
+    )
+    $g2N = 0
+    for ($g2I = 0; $g2I -lt $rows.Count; $g2I++) {
+        $g2Want = [int]$g2Cases[$g2I][0]
+        $g2Args = $g2Cases[$g2I][1]
+        if ($null -eq $g2Args) { $g2Args = @('revise-goal', '-Id', 'G2', '-Text', "wording $g2N", '-Detail', 'a reason') }
+        $g2Before = Get-StateSha $g2
+        $g2Ref = Invoke-X $g2 $g2Args
+        $g2Mid = Get-StateSha $g2
+        $g2N++
+        $g2Ok = Invoke-X $g2 @('revise-goal', '-Id', 'G2', '-Text', "wording $g2N", '-Detail', 'the pair')
+        $g2After = Get-StateSha $g2
+        Add-Case $rows[$g2I] ($g2Ref.Code -eq $g2Want -and $g2Mid -eq $g2Before -and $g2Ok.Code -eq 0 -and $g2After -ne $g2Mid) "refusal exit $($g2Ref.Code) (want $g2Want), state.json unchanged: $($g2Mid -eq $g2Before); the paired success exit $($g2Ok.Code), state.json moved: $($g2After -ne $g2Mid)"
+    }
+} catch { Set-RowsFailed $rows $_ }
+
+# ---- C3: a project that never rewords a goal prints and stores what it did
+$rows = @('GOAL-c3-unrevised', 'GOAL-c3-no-key')
+try {
+    $g3 = New-Fx 'glu' $hM
+    Invoke-X $g3 @('add-goal', '-Id', 'G2', '-Text', 'second goal') -XMust | Out-Null
+    Invoke-X $g3 @('set-goal-status', '-Id', 'G2', '-Status', 'UNADDRESSED', '-Detail', 'not yet') -XMust | Out-Null
+    Add-Ws $g3 'W1' 'Alpha'
+    Add-Ph $g3 'W1.1' 1
+    $g3Same = $true
+    $g3Notes = @()
+    foreach ($g3V in @('tree', 'goal-coverage', 'status')) {
+        $g3New = Invoke-X $g3 @($g3V)
+        $g3Old = Invoke-X $g3 @($g3V) -XWrapper $goalOldWrapper
+        $g3Eq = if ($g3V -eq 'status') { (Get-Comparable $g3New) -ceq (Get-Comparable $g3Old) } else { $g3New.Out -ceq $g3Old.Out }
+        if (-not $g3Eq -or $g3New.Code -ne $g3Old.Code) { $g3Same = $false; $g3Notes += $g3V }
+    }
+    $g3KeyBefore = [System.IO.File]::ReadAllText((Get-StateFile $g3)) -match '"revisions"'
+    $g3R = Invoke-X $g3 @('revise-goal', '-Id', 'G1', '-Text', 'the goal, reworded', '-Detail', 'suite')
+    $g3KeyAfter = [System.IO.File]::ReadAllText((Get-StateFile $g3)) -match '"revisions"'
+    $g3TNew = @((Invoke-X $g3 @('tree')).Lines)
+    $g3TOld = @((Invoke-X $g3 @('tree') -XWrapper $goalOldWrapper).Lines)
+    $g3Diff = @()
+    if ($g3TNew.Count -eq $g3TOld.Count) {
+        for ($g3I = 0; $g3I -lt $g3TNew.Count; $g3I++) { if ($g3TNew[$g3I] -cne $g3TOld[$g3I]) { $g3Diff += $g3TNew[$g3I] } }
+    } else { $g3Diff = @("line counts $($g3TNew.Count) and $($g3TOld.Count)", 'differ') }
+    $g3OnlyG1 = ($g3Diff.Count -eq 1) -and ($g3Diff[0] -like '  G1  the goal, reworded  (reworded *)')
+    Add-Case $rows[0] ($g3Same -and $g3R.Code -eq 0 -and $g3OnlyG1) "never reworded, tree, goal-coverage and status print what the older keel prints$(if ($g3Notes.Count -gt 0) { ' except ' + ($g3Notes -join ', ') }); after one revise-goal $($g3Diff.Count) tree line(s) differ: $($g3Diff -join ' | ')"
+    Add-Case $rows[1] ((-not $g3KeyBefore) -and $g3KeyAfter) "state.json holds a revisions key before the revise: $g3KeyBefore; after it: $g3KeyAfter"
+} catch { Set-RowsFailed $rows $_ }
+
+# ---- C4: a shared goal file carries revisions only when held, and an older keel's drop is warned of
+$rows = @('GOAL-c4-file', 'GOAL-c4-drop-control', 'GOAL-c4-drop', 'GOAL-c4-tree-silent')
+try {
+    $gRemote = Join-Path $scratch 'gremote.git'
+    New-Item -ItemType Directory -Path $gRemote -Force | Out-Null
+    Assert-G $gRemote @('init', '-q', '--bare', '-b', 'main') | Out-Null
+    $gHome = Join-Path $scratch 'homes\GA'
+    New-Item -ItemType Directory -Path $gHome -Force | Out-Null
+    $g4 = New-Fx 'gsh' $gHome 'KOG-A' -FxGit -FxUser 'Goal A'
+    Assert-G $g4.Dir @('remote', 'add', 'origin', $gRemote) | Out-Null
+    Invoke-X $g4 @('add-goal', '-Id', 'G2', '-Text', 'second goal') -XMust | Out-Null
+    Add-Ws $g4 'W1' 'One'
+    Save-Commit $g4.Dir 'project'
+    Invoke-X $g4 @('share-progress') -XMust | Out-Null
+    Save-Commit $g4.Dir 'shared'
+    Assert-G $g4.Dir @('push', '-q', '-u', 'origin', 'main') | Out-Null
+    $g4F1 = Join-Path $g4.Dir 'progress\goals\G1.json'
+    $g4F2 = Join-Path $g4.Dir 'progress\goals\G2.json'
+    $g4B2 = Get-Sha ([System.IO.File]::ReadAllBytes($g4F2))
+    $g4R = Invoke-X $g4 @('revise-goal', '-Id', 'G1', '-Text', 'the goal, reworded', '-Detail', 'suite')
+    $g4Revs = @(Get-RevList (Read-JsonOrNull $g4F1))
+    $g4JRevs = @(Get-RevList (Get-JsonGoal $g4 'G1'))
+    $g4Same2 = (Get-Sha ([System.IO.File]::ReadAllBytes($g4F2))) -eq $g4B2
+    $g4FileOk = ($g4R.Code -eq 0) -and ($g4Revs.Count -eq 1) -and ($g4JRevs.Count -eq 1) -and $g4Same2
+    if ($g4FileOk) { $g4FileOk = ([string]$g4Revs[0].text -ceq 'the goal') -and ([string]$g4JRevs[0].reason -ceq 'suite') }
+    Add-Case $rows[0] $g4FileOk "revise-goal exit $($g4R.Code); G1.json $($g4Revs.Count) revision(s), status -Json $($g4JRevs.Count); G2.json unchanged: $g4Same2"
+    Save-Commit $g4.Dir 'G1 reworded'
+    $g4TreeBefore = Get-GoalLine (Invoke-X $g4 @('tree')) 'G1'
+    # The older keel writes the goal never reworded: nothing to drop, and G1's file is left alone.
+    Invoke-X $g4 @('set-goal-status', '-Id', 'G2', '-Status', 'UNADDRESSED', '-Detail', 'not yet') -XWrapper $goalOldWrapper -XMust | Out-Null
+    Save-Commit $g4.Dir 'the older keel writes G2'
+    $g4SC = Invoke-X $g4 @('status')
+    $g4Keep1 = @(Get-RevList (Read-JsonOrNull $g4F1)).Count -eq 1
+    Add-Case $rows[1] ((-not (Test-LineRe $g4SC 'held revisions')) -and $g4Keep1) "the older keel set G2's status: a held-revisions line: $(Test-LineRe $g4SC 'held revisions'); G1.json still holds its revision: $g4Keep1"
+    # The older keel writes the reworded goal, and drops its list.
+    Invoke-X $g4 @('set-goal-status', '-Id', 'G1', '-Status', 'OPEN') -XWrapper $goalOldWrapper -XMust | Out-Null
+    Save-Commit $g4.Dir 'the older keel writes G1'
+    $g4SD = Invoke-X $g4 @('status')
+    $g4Want = 'KEEL:   WARNING: progress/goals/G1.json held revisions at an earlier commit and no longer does - a keel older than this one rewrote it. The earlier wordings are in: git log -p -- progress/goals/G1.json'
+    Add-Case $rows[2] (Test-Line $g4SD $g4Want) "after the older keel set G1's status, held-revisions lines: $(@(@($g4SD.Lines) | Where-Object { $_ -like '*held revisions*' }).Count)"
+    $g4T = Invoke-X $g4 @('tree')
+    $g4TreeAfter = Get-GoalLine $g4T 'G1'
+    Add-Case $rows[3] ((Test-Line $g4SD $g4Want) -and (-not (Test-LineRe $g4T 'held revisions')) -and ($g4TreeBefore -like '  G1  the goal, reworded  (reworded *)') -and ($g4TreeAfter -ceq '  G1  the goal, reworded')) "tree before the older write '$g4TreeBefore', after it '$g4TreeAfter'; tree prints no held-revisions line while status prints one"
+} catch { Set-RowsFailed $rows $_ }
+
 # ================================================================ HOOK ==
 function Invoke-Hook {
     # The session-start hook beside the wrapper under test, run in the fixture's folder.
@@ -1098,7 +1273,7 @@ Write-Output 'NOT RUN  -RealProjects - human-invoked, read only over the real st
 
 # ======================================================== -RealProjects ==
 if ($RealProjects) {
-    Write-Output 'NOT RUN  WALK, VERB, SHARED, HOOK - -RealProjects runs the comparison alone.'
+    Write-Output 'NOT RUN  WALK, VERB, SHARED, KIND, GOAL, HOOK - -RealProjects runs the comparison alone.'
     $rpAllowed = 'planned under keel|Check the CHANGELOG between them|COULD NOT REACH|have NOT reached|is NOT on the remote|STALE - written at|was NOT checked'
     function Compare-Wrappers {
         # status and tree with the baseline wrapper, then this one: exit codes, lines (the allowed

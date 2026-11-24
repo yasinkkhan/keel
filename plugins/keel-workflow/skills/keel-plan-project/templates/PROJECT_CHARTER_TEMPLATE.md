@@ -123,6 +123,9 @@ Three to five is usually right. One means this is a workstream. Ten means sectio
 
 These must match what is registered with `keel-state.ps1 add-goal`; state is the authority for
 which are claimed, this file is the authority for what they MEAN.
+
+When a goal's wording changes, change its row in this charter and run `keel-state.ps1 revise-goal`
+in the same act, with the reason, so the two copies never disagree.
 -->
 
 | ID | True when this project is done |

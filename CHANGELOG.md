@@ -4,6 +4,37 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.88.0 - 2026-11-23
+
+- **`keel-workflow` 0.80.0: a goal's wording can be changed, and the wording it replaces is kept.**
+  Before this, a goal's text was fixed once `add-goal` registered it. When a project decision
+  reworded a goal, the new wording went into the charter by hand, the state kept the old text, and
+  `tree`, the one command that prints a goal's wording, went on printing the superseded goal.
+  - **`revise-goal -Id G<n> -Text "<new wording>" -Detail "<why>"`** sets the goal's text and
+    appends `{ text, reason, at }` (the wording it replaced, the reason and the time) to a
+    `revisions` list on the goal. The goal's status and every workstream's link to it are
+    unchanged. It refuses a missing `-Id` or `-Text`, an id that is not `G<n>`, and a `-Text`
+    equal to the current wording at exit 90, a missing `-Detail` at exit 95, and a goal that does
+    not exist at exit 98, and writes nothing when it refuses.
+  - **`tree`** prints the current wording and, for a goal with at least one revision, appends
+    `  (reworded <yyyy-MM-dd>)`, the date of the last one. A goal never reworded prints exactly what
+    it printed before, and its stored record gains no key. `status -Json` shows the whole list.
+    `goal-coverage` and `status` print goal ids, not wording, and are unchanged.
+  - **Shared progress.** In a project that shares its progress, a goal file carries `revisions`
+    only when the goal holds it, so an unrevised goal's file keeps its bytes. When a keel older than
+    this one rewrites a reworded goal's file and drops the list, `status`, and only `status`,
+    warns: `<path> held revisions at an earlier commit and no longer does - a keel older than this
+    one rewrote it. The earlier wordings are in: git log -p -- <path>`. No command restores the
+    list; its history is in git.
+  - **The planning skills.** `keel-plan-project` Step 5, the goals comment in its charter template
+    and `keel-plan-workstream`'s amend mode each say that when a goal's wording changes, the
+    charter's row and `keel-state.ps1 revise-goal` change in the same act, with the reason.
+  - **Tests.** `scripts/test-ordered-plan.ps1` gains group GOAL and `-GoalOldRef` (default
+    `v0.87.0`), the older keel its controls compare with, refused at exit 90 if it already knows
+    `revise-goal`. `scripts/test-shared-progress.ps1`'s layout check allows a goal's `revisions`,
+    each element exactly `text`, `reason` and `at` with a UTC offset, and its two-person fixture
+    rewords a goal.
+
 ## marketplace 0.87.0 - 2026-11-22
 
 - **`keel-workflow` 0.79.0: planning a workstream, re-planning one and closing one are work `status`

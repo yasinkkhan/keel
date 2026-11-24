@@ -270,6 +270,17 @@ The reason is required (exit 95). `-Status OPEN` puts it back when a workstream 
 it, and the wrapper refuses `UNADDRESSED` on a goal a workstream already points at. What this is
 *not* for is a goal you have simply forgotten — the warning is doing its job in that case.
 
+**When a goal's wording changes later, change both copies in the same act.** The goal's row in
+`CHARTER.md` says what it means and state holds the same wording, which `tree` prints, so a decision
+that rewords a goal updates that row and runs `keel-state.ps1 revise-goal` together, with the reason:
+
+```
+keel-state.ps1 revise-goal -Id G2 -Text "<the new wording>" -Detail "<the decision that reworded it>"
+```
+
+The verb keeps the wording it replaces on the goal, with the reason and the date, and refuses
+without a reason (exit 95); `tree` then marks the goal `(reworded <date>)`.
+
 ## Step 6 — stop
 
 Say plainly what exists and what does not:
