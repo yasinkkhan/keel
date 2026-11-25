@@ -247,8 +247,18 @@ it - names no one and carries its `Proposed lines:` list beside it: see "Text th
 
 ### Actor `self` or `external`
 
-**The human or the third party acts. You do not.** Tell the human exactly what to do, in a form
-they can follow without you, and wait.
+**The human or the third party acts. You do not.** Tell the human exactly what to do, and wait.
+
+**The steps go in the conversation, never only in a file.** Write them in the conversation you are
+having with the operator; a file holding them is the record, never the way they receive them. Make
+each step one action, and say after it what the operator should see if it worked. Give the steps up
+to the next point where the session needs something back from the operator - a screenshot, pasted
+output, a yes - then stop and wait for it. A run of actions with nothing to report back between them
+goes together in one message. Before you send them, check them against one test: the operator can
+start without opening anything.
+
+Name any file in those steps by its full path, as **"A file is named by its full path, as text"**
+in `keel-orchestrator/SKILL.md` says.
 
 When it is done, write `act-log.md`:
 
@@ -353,6 +363,9 @@ Present, in one place:
 4. **Any `SUPERSEDED` line this phase wrote** - which check or control, and what was measured.
 5. **The proposed lines**, where the phase drafted text that leaves the project - its
    `Proposed lines:` list quoted word for word, `Proposed lines: none` included; see "Text that leaves the project names no one, and marks what the session proposed" in `keel-orchestrator/SKILL.md`.
+
+Name every file in that presentation by its full path, as **"A file is named by its full path, as
+text"** in `keel-orchestrator/SKILL.md` says.
 
 Run `keel-state.ps1 status` before presenting, and put any warning about this phase's verify binding
 in front of the human with the change set: the `human` gate's own

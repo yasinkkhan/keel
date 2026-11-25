@@ -316,6 +316,15 @@ tells a reader who has not been in the room:
    *Violation:* a question that opens on the options for a judgement over two documents the human
    has never seen, however carefully every identifier in them is expanded.
 
+   **The recap is short.** Its three things - what the project is for, what was tried, what came
+   back - take at most five short sentences together, saying what the thing is and what came back.
+   It holds no file names, version numbers, counts or process history: a measurement goes in the
+   Claims of `DECISION_BRIEF.md` section 5, inside the option it supports. The two cases below are
+   lines of their own and are not counted in the five.
+   *Why:* a question once met all five obligations and was still unanswerable because its recap was
+   too long; re-asked with its file names, version numbers, counts and process history taken out, it
+   was answered in one round.
+
    **Two cases the recap must cover when they apply.** Where the decision is about what a table,
    column, figure or file will hold, it works one or two real instances through - their own rows,
    not a description of the columns; in a project with quarantine on, those instances appear in the
@@ -396,6 +405,14 @@ better".
 control the operator answers by picking: the reply is still prose, the standing invitation to
 question an option instead of selecting one is untouched, and a question that is beautifully laid
 out and cannot be argued with is the failure this section was written for.
+
+**A file is named by its full path, as text.** This reaches beyond questions to everything a session
+writes to the operator: a question, a step, the presentation of a change set at the `human` gate,
+and a hand-back or report at the end of a session. Wherever one of those names a file, write the
+file's full path, as text, in plain characters, and never a link to a place outside the project
+folder. Such a link can fail silently: one to a file outside the root of the workspace it is shown
+in can open nothing, with no error, leaving the operator without the file while the session
+believes it handed it over.
 
 **Why this is prose and not an exit code, and what the next rung turned out to be.** Charter P13's
 ladder is nudge -> skill prose -> wrapper exit code -> hook, and a rule climbs one rung only after

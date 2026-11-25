@@ -4,6 +4,29 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.91.0 - 2026-11-24
+
+- **`keel-workflow` 0.83.0: what the operator is handed is in the conversation, names each file by
+  its full path, and keeps its recap short.** For a step only the operator could do, a session
+  could write the steps to a file and hand over a link that did not open. And a question could meet
+  every rule for how it is written and still go unanswered, because its recap was too long.
+  - **`keel-run-phase`** Gate 4, for a `self` or `external` phase: the steps go in the conversation,
+    and a file holding them is only the record. Each step is one action and says what the operator
+    should see if it worked. The session gives steps up to the next point where it needs something
+    back from the operator, then waits; actions with nothing to report between them go in one
+    message. The test is that the operator can start without opening anything.
+  - **`keel-orchestrator`** "Asking the human" gains a paragraph: a file named to the operator, in a
+    question, a step, the presentation of a change set or a hand-back, is written as its full path in
+    plain text and never as a link to a place outside the project folder, which can fail without
+    saying so. `keel-run-phase` points at it from Gate 4's `self` and `external` block and from Gate 6.
+  - **`keel-orchestrator`** obligation 5: the recap's three things, what the project is for, what was
+    tried and what came back, take at most five short sentences, with no file names, version numbers,
+    counts or process history; a measurement goes in the option it supports, in section 5 of
+    `DECISION_BRIEF.md`.
+  - **`DECISION_BRIEF.md`** section 3: what the project is for takes one sentence, what was tried and
+    what came back one or two each, and the last names section 5 as where its measurement goes. Its
+    comment says that obligation 5 bounds the three.
+
 ## marketplace 0.90.0 - 2026-11-24
 
 - **`keel-workflow` 0.82.0: a planning phase's checks have a point where a fresh reader stops,

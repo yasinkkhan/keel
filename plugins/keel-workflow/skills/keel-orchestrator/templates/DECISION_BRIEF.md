@@ -82,6 +82,9 @@ Three things, in plain language, in this order: what this project is FOR, what w
 and what came back. Written in the expansions from section 2, which is why this section sits after
 it. It goes BEFORE the options in section 6, never inside them.
 
+Together the three slots are bounded by obligation 5, which says how long they may be and what they
+leave out; read the bound there rather than here.
+
 Why: a question once satisfied all four of the other obligations, and the operator replied that
 they did not understand and asked to be assumed confused about what was currently happening. The
 second attempt supplied exactly the three things below and was answered in one round.
@@ -97,11 +100,11 @@ line is shaped by "An earlier decision is a tradeoff to show, not a rule to enfo
 keel-orchestrator/SKILL.md.
 -->
 
-{{what the project is for, in one or two sentences}}
+{{what the project is for, in one sentence}}
 
-{{what was tried, and by whom - the work this question is downstream of}}
+{{what was tried, and by whom - the work this question is downstream of, in one or two sentences}}
 
-{{what came back - the finding, the result, the thing that makes a decision necessary now}}
+{{what came back - the finding, the result, the thing that makes a decision necessary now, in one or two sentences; its measurement goes in section 5}}
 
 {{the earlier decision this touches - what was decided, who decided it, why, and what keeping it
 costs now - or `none`}}
