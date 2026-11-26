@@ -4,6 +4,49 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.93.0 - 2026-11-26
+
+- **`keel-workflow` 0.85.0: a meeting transcript can amend the plan, each thing said in it checked
+  against the code, the tickets and the project's own records.** A meeting can change a project's
+  scope, dates or budget, and nothing in keel said how to take its transcript, pull out what was
+  decided and check it before the plan is amended. A session doing it from a plain request checked
+  what was said against the code only, and missed that the project's own ticket contradicted a
+  statement of fact the meeting was told.
+  - **`keel-plan-workstream`** gains `### When the change comes from a meeting` under
+    `## Amend mode`. The transcript and its reading are kept in a `meeting\` folder of the re-plan's
+    machine-local phase folder, or in the quarantine store, never in a tracked folder. The sources
+    are listed before the reading is dispatched: the code, the tickets (the tracker `keel.json`
+    declares and any ticket system the operator points at, handed over as an export or a read-only
+    command) and the project's own records. Tickets are read as claims to check, never as the
+    plan's truth. Every cell the session acts on is re-taken, `says nothing` included. Each proposed
+    change is put to the operator; an approved one lands at the re-plan's own gates by an existing
+    route, or, where keel holds no field for it, such as a budget, as a dated Decision row.
+    Committed records cite the meeting by its date and the transcript's timestamp, never by who
+    attended or who said what.
+  - **`keel-run-phase/templates/TRANSCRIPT_BRIEF.md`**, a new brief beside the three dispatch
+    briefs: a fresh helper writes one row for every decision and every statement of fact said in
+    the meeting, with one cell per source, each beginning `agrees`, `contradicts: "<quote>" (<where>)`,
+    `says nothing` or `could not check: <why>`, each naming what was read or searched, none blank.
+    The speaker is named only in that machine-local reading.
+  - **`keel-orchestrator`** Step 3.5 says where such a re-plan is registered: in the workstream a
+    meeting plainly concerns; or, for a meeting that reaches several workstreams, a goal or the
+    order, or whose reach is not known until it is read, in a planning workstream, which in a
+    project that has placed its workstreams is moved first with
+    `order -Id <planning workstream> -First`. In a project with no order that command is not run,
+    since it would place that one workstream alone; the re-plan is named in the handoff instead.
+    The workstreams it reads about are not held.
+  - **`using-keel`** lists a meeting transcript among the asks that route into keel, and
+    **`keel-run-phase`** Gate 2 names the new brief.
+  - **Tried once each; nothing is claimed beyond one run.** A fresh helper given the filled brief
+    and a made-up transcript of five items, checked against a code file, a ticket export and a spec,
+    gave each item one row, filled every cell with one of the four values, marked the claim only the
+    ticket contradicts and the claim only the code contradicts as `contradicts`, each quoting its
+    source exactly, and named the plan item a decision touched. A second fresh helper, given only
+    the new guidance and a made-up project whose `keel.json` declares a Jira tracker and which holds
+    a ticket export, asked only to amend the plan from a transcript that mentions no ticket, listed
+    the tickets among its sources beside the code and the spec, and put the reading's path in a
+    `meeting\` folder of the machine-local phase folder.
+
 ## marketplace 0.92.0 - 2026-11-25
 
 - **`keel-workflow` 0.84.0: a helper told to read only is checked for what it wrote.** An advisor

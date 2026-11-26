@@ -106,6 +106,10 @@ single most common way this system has been wrong.
 output format, and the prohibition *do NOT load or invoke any keel-* skill*. It returns a summary
 and a path, never its whole investigation.
 
+**On a re-plan from a meeting, the reading is dispatched from `templates/TRANSCRIPT_BRIEF.md`**,
+bracketed like any other dispatch, as "When the change comes from a meeting" in
+`keel-plan-workstream/SKILL.md` says.
+
 **Bracket every dispatch.** Run `dispatch-open` before you hand the brief over, and `dispatch-close`
 with the same name when the helper returns:
 

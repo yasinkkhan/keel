@@ -91,6 +91,7 @@ Three cases:
 
 > "fix the importer" · "what should I work on" · "the accountant replied" · "add a recovery screen"
 > · "W4.2 is done" · "file it" · "start phase 2" · "this is blocked" · "close out W4"
+> · "here is the meeting transcript, amend the plan"
 
 Size never decides *whether* keel runs — only how much artifact it produces. A one-line change still
 gets grounding, a positive control, an independent verify, and a delivery record. Small changes are

@@ -513,6 +513,61 @@ halves are real. Be concrete about which this is:
 
 **Name the call and let the human correct it.** That is what the amended Decision row is for.
 
+### When the change comes from a meeting
+
+A meeting can change the plan: its scope, a date, a goal, the order, or something keel holds no
+field for, such as a budget. When the operator hands over a transcript and asks for the plan to be
+amended from it, read it in a re-plan phase by these steps: the reading at that phase's gate 2, and
+each approved change landed at the gates where amend mode lands any change. Where that re-plan is
+registered is in `keel-orchestrator` Step 3.5.
+
+1. **Keep the transcript and its reading on this machine.** Copy the transcript into a `meeting\`
+   folder of the re-plan's machine-local phase folder,
+   `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\meeting\`, never under a project's
+   `progress\` folder, and have the reading written there too. In a project with quarantine on, keep
+   both under `%USERPROFILE%\.keel\quarantine\<project>\` instead. Never put either in a tracked
+   folder: the transcript names everyone in the room, and the reading says who said what.
+2. **List the sources before the helper runs.** Check every meeting against three kinds:
+   - **the code** - the code the meeting is about: each repo `keel.json` registers, and the
+     project folder's own code;
+   - **the tickets** - the project's tracker, as `tracker` in `keel.json` declares it, and any ticket
+     system the operator points at for this meeting; ask the operator which ticket systems the
+     meeting concerns if they have not said. Hand the tickets to the helper as an export file put in
+     the `meeting\` folder, or as a read-only command it may run. List a ticket source that neither
+     reaches anyway, so its cells say `could not check` with the reason;
+   - **the project's own records** - the spec, the charter and goals, and the delivery records of
+     the work the meeting is about.
+
+   Write the list into the brief. The request will usually name only the transcript, and a source
+   left off the list is one the reading never checks.
+3. **Read tickets as claims to check, never as the plan's truth.** A ticket that contradicts what
+   the meeting was told is a finding to put to the operator; it does not amend the plan by itself,
+   and a ticket that agrees does not outrank the project's own records (charter P10).
+4. **Dispatch the reading.** Fill `keel-run-phase/templates/TRANSCRIPT_BRIEF.md` and hand it to a
+   fresh helper at the re-plan's gate 2, between `dispatch-open -Phase W<n>.<p> -Name "transcript
+   reader"` and `dispatch-close` with the same name. It returns one row for every decision and every
+   statement of fact said in the meeting, with one cell per source.
+5. **Re-take every cell you act on, of every value.** Re-read the quote of each `agrees` and
+   `contradicts` cell at its source; re-run the search a `says nothing` cell names, with a positive
+   control; try each `could not check` source yourself. A false `says nothing` passes any check that
+   reads only the `contradicts` cells - see "Material keel produced is re-measured before you act on
+   it" in `keel-orchestrator/SKILL.md`.
+6. **Put each proposed change to the operator, contradictions first**, as "Asking the human" in
+   `keel-orchestrator/SKILL.md` describes. Land each approved change by a route that exists, at the
+   re-plan's own gates as amend mode lands any change: the amended spec (scope, phases, checks, run
+   order) is its implement step; the state writes - `revise-goal`, `revise-phase -Due`, `order`,
+   `add-workstream` for new work - are its enact step, once the operator approves at its human gate,
+   never at gate 2. Record a change keel holds no field for, such as a budget, as a dated Decision
+   row in the spec or the charter. Label every row this route writes as any Decision row is
+   labelled: decided by the operator, who approved it when it was put to them, with the date of that
+   approval, and never by who proposed it in the meeting. Never register a second re-plan of the
+   workstream this re-plan belongs to: the wrapper refuses it, and the change belongs in this one.
+7. **Cite the meeting by its date and the transcript's timestamp, never by who attended or who said
+   what**, in every committed record: a Decision row, the spec, the delivery record, the handoff.
+   Who said what stays in the reading on this machine, and text that leaves the project names no
+   one - see "Text that leaves the project names no one, and marks what the session proposed" in
+   `keel-orchestrator/SKILL.md`.
+
 ## Must not
 
 - **Plan without grounding.** No spec ships whose §1 is recalled rather than measured.

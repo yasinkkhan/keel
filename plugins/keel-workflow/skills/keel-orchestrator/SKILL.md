@@ -898,6 +898,17 @@ are named again at the stages they were at, against the amended spec.
 session appends the dated row, with the amended checks it carries, and continues the phase - see "An
 earlier decision is a tradeoff to show, not a rule to enforce".
 
+**A re-plan from a meeting is registered by what the meeting reaches.** A meeting that plainly
+concerns one workstream is read in a re-plan of that workstream, which holds its other phases, as
+above. A meeting that reaches several workstreams, a goal or the order, or whose reach is not known
+until its transcript is read, is read in a re-plan registered in a planning workstream
+(`add-workstream -Kind planning`); the workstreams it reads about are not held. In a project that
+has placed its workstreams (`keel-state.ps1 order` prints them), move it first with `keel-state.ps1
+order -Id <planning workstream> -First`, so that `status` names it next. In a project with no order,
+do not run that command, since it would place that one workstream alone and leave the rest unplaced:
+register the re-plan and name it in the session's handoff. How the transcript is read is "When the
+change comes from a meeting" under `keel-plan-workstream`'s amend mode.
+
 **Run orders are unique per workstream and the wrapper enforces it (exit 92).** To insert between
 two phases, move the later one out of the way first. Two phases sharing an order *within* a
 workstream would make "what runs next" arbitrary, which is why the wrapper refuses it outright.
