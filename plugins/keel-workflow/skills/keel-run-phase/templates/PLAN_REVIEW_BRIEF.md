@@ -29,6 +29,9 @@ return what you found - not to decide whether it goes ahead. Someone else decide
 **Also written by the same session, for context:** `{{grounding.md and investigation.md paths}}`
 **Earlier decisions it may touch:** `{{absolute path to the project's CHARTER.md, and to the epic document if this workstream sits under an epic - or none}}`
 **The wrapper source, for question 7:** `{{absolute path to keel-state.ps1}}`
+**Scratch folder:** `{{%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\scratch\}}` - the one place a
+scratch file of yours may go, to re-take a figure or try a command. It is on this machine only, never
+under a project's `progress\` folder.
 
 Read the plan against the other three, and against the decisions named above. Where the plan and
 the spec disagree, **the spec is the authority** and the disagreement is a finding; question 4 says
@@ -144,8 +147,13 @@ one thing that could make the claim wrong" in `keel-orchestrator/SKILL.md`.}}
   one file for a session that is.
 - **Do NOT return a verdict.** Not `PASS`, not `APPROVED`, not "this is ready". The findings list is
   the whole of your output, and adding a verdict is the one failure this brief exists to prevent.
-- Do not edit, create or delete anything, the plan included. This is read-only.
-- Do not write to `%USERPROFILE%\.keel\` or run a `keel-state.ps1` verb that writes. These forms
+- Do not edit, create or delete anything, the plan included. This is read-only. The one exception
+  is a scratch file in the scratch folder named under "What you are reading".
+- The session that dispatched you compares the project folder, every repo it uses and the top
+  level of the phase folder before and after you run, and a file you write there, other than your
+  report, can be recorded against you by name.
+- Do not write to `%USERPROFILE%\.keel\`, except in that scratch folder, or run a `keel-state.ps1`
+  verb that writes. These forms
   of it write nothing and may be run to re-take a figure: `status` with no arguments, `tree`,
   `order` with no arguments, `signals` and `goal-coverage`. Not `status -Phase` or `status -Json`,
   which print the working session's own notes.

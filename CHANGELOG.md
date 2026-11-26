@@ -4,6 +4,48 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.92.0 - 2026-11-25
+
+- **`keel-workflow` 0.84.0: a helper told to read only is checked for what it wrote.** An advisor
+  and a plan reviewer were each told by their brief to edit nothing, and a plan reviewer could write
+  a simulation of the change it was reading into the project folder anyway, with nothing in keel
+  noticing: a brief is text, and no gate looked at what the helper then did.
+  - **`keel-state.ps1`** gains `dispatch-open -Phase <phase> -Name <helper>` and `dispatch-close`
+    with the same two arguments. Open stores a reading of the project folder (when `keel.json` has
+    `git: true`), every git repo `keel.json` registers and the top level of the phase folder, read
+    with the functions the verify fingerprint uses. Close re-takes it and, when it finds paths new,
+    changed or removed since open, prints one `WARNING` line, a line `<tree>: <path> (<how>)` for
+    each and a line of advice, and appends one friction entry of a new kind, `dispatch-write`,
+    naming the dispatch and its window. A clean close prints and records nothing,
+    and both exit 0 whatever they find: they detect, they do not block. The new suite checks that
+    close names a new file, an edit (a second edit to a file already modified at open included), a
+    deletion, a file committed while the helper was out, a file restored to its committed content,
+    and a rename through git under both names.
+    **Known limits, not a complete list.** These can go unnamed: a file git ignores in the project
+    folder or a registered repo; a change git or keel treats as no change, such as one only to line
+    endings or only to the letter case of a name; a file below the top level of the phase folder,
+    or one there that Windows marks hidden; and a commit of changes already in the folder. In a project
+    with no git tree only the phase folder is compared, and open says so. When more than 2000 paths
+    in one tree differ from its last commit at open, close can report only that the tree changed,
+    not which paths. The per-path list for the project folder leaves out `progress/`, which keel
+    writes itself, and the verifier's own report in the phase folder is not compared. A tree says
+    what changed while a helper was out, not who changed it, so a file the session writes in that
+    window is named too. Close with no open dispatch of that name, open of a name already
+    open, and either without `-Name` exit 90; an unknown phase exits 94. `status` prints
+    `WARNING: <phase> dispatch '<name>' opened <time> was never closed` for each dispatch left open.
+  - **`ADVISOR_BRIEF.md`**, **`PLAN_REVIEW_BRIEF.md`** and **`VERIFIER_BRIEF.md`** name one scratch
+    folder, `%USERPROFILE%\.keel\projects\<slug>\phases\<phase>\scratch\`, as the place a helper's
+    scratch file goes; the verifier's used to go to the top of the phase folder, which the close
+    compares. All three tell the helper that the project folder, every repo it uses and the top
+    level of the phase folder are compared before and after it runs, and that a file it writes
+    there other than its report can be recorded against it by name.
+  - **`keel-run-phase`** Gates 2, 3 and 5 run `dispatch-open` before a brief is handed over and
+    `dispatch-close` when the helper returns; a close that names paths has them named in that gate's
+    artifact, each file left in place until the operator says what to do with it. Gate 6 presents
+    any `dispatch-write` entries with the change set.
+  - **`scripts/test-dispatch-check.ps1`**, a new suite, checks the two commands against scratch
+    projects, each case beside a control; `check-suite-docs.ps1 -Strict` runs it as section 23.
+
 ## marketplace 0.91.0 - 2026-11-24
 
 - **`keel-workflow` 0.83.0: what the operator is handed is in the conversation, names each file by

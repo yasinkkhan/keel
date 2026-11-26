@@ -27,8 +27,8 @@ does.**
 
 **Phase directory:** `{{%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>}}` - or, in a project
 whose `keel.json` says `"progress": "repo"`, `{{<project folder>\progress\phases\W<n>.<p>\artifacts}}`,
-which is committed; put any scratch of yours in `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\`,
-never under `progress\`
+which is committed; put any scratch of yours in the scratch folder
+`%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\scratch\`, never under `progress\`
 **Project folder:** `{{absolute path to the project folder}}`
 **Changed:** {{patch files, or the act-log and what it points at. Name files by symbol, heading or
 unique string - never by line number.}}
@@ -155,7 +155,11 @@ The report file path, the overall verdict, and the failing rows. Not your whole 
 
 - **Do NOT load or invoke any `keel-*` skill.**
 - Do not fix anything. You verify; someone else repairs.
-- Do not write anywhere except your report file.
+- Do not write anywhere except your report file and the scratch folder named under "Where the
+  evidence is".
+- The session that dispatched you compares the project folder, every repo it uses and the top
+  level of the phase folder before and after you run, and a file you write there, other than your
+  report, can be recorded against you by name.
 - Do not run a `keel-state.ps1` verb that writes; the dispatching session records the verdict.
   These forms of it write nothing and may be run to re-take a figure: `status` with no arguments,
   `tree`, `order` with no arguments, `signals` and `goal-coverage`. Not `status -Phase` or

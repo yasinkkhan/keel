@@ -106,6 +106,21 @@ single most common way this system has been wrong.
 output format, and the prohibition *do NOT load or invoke any keel-* skill*. It returns a summary
 and a path, never its whole investigation.
 
+**Bracket every dispatch.** Run `dispatch-open` before you hand the brief over, and `dispatch-close`
+with the same name when the helper returns:
+
+```
+keel-state.ps1 dispatch-open  -Phase W<n>.<p> -Name "advisor <n>"
+keel-state.ps1 dispatch-close -Phase W<n>.<p> -Name "advisor <n>"
+```
+
+Fill the brief's scratch folder, `%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\scratch\`,
+which the close does not read. **When a close names paths, name each one in this gate's artifact, and
+leave each file in place until the operator says what to do with it**, because you did not make it.
+The close knows only that a path changed while the helper was out, so if you wrote one of those
+paths yourself in that window, say which. Gates 3 and 5 do the same around their helpers. A clean
+close prints nothing.
+
 **The dispatching session owes a control too, for any it proposes.** Before you hand a brief over —
 the advisor brief here, the verifier brief at gate 5 — run any positive control you suggest in it,
 or label it unmeasured in the brief's own words. A control that arrives inside a brief carries the
@@ -156,6 +171,11 @@ the case it is refused for.
 The plan is the one artifact in this pipeline that nothing independent reads. Dispatch a **fresh
 subagent** that did not write `plan.md`, briefed from `templates/PLAN_REVIEW_BRIEF.md`, to read it
 against the spec's checks and the phase prompt.
+
+**Run `dispatch-open -Phase W<n>.<p> -Name "plan reviewer round <n>"` before you hand the brief
+over, and `dispatch-close` with the same name when the reviewer returns.** A close that names paths
+is handled as Gate 2 says: name each in `plan.md`, and leave each file in place until the operator
+says what to do with it.
 
 **It returns findings, not a verdict** — an issues list. It does not decide whether the plan
 proceeds, and a review that returns a verdict is this gate's failure mode rather than its purpose:
@@ -280,6 +300,11 @@ hand back.
 `templates/VERIFIER_BRIEF.md`. The author's context is full of the reasoning that produced the
 change, including the rationalisations; a verifier that inherits them inherits the blind spot.
 
+**Run `dispatch-open -Phase W<n>.<p> -Name "verifier round <n>"` before you hand the brief over, and
+`dispatch-close` with the same name when the verifier returns.** Its own report is not compared. A
+close that names any other path is handled as Gate 2 says: name each in the gate's record, and leave
+each file in place until the operator says what to do with it.
+
 **Two classes of keel-produced material meet here.** The verifier's report **and the corrections it
 proposes**, which come back to you as the next iteration; and, separately, **your own repair between
 rounds**, which the next round's verifier does not read — it re-runs the check rows. Both are
@@ -363,6 +388,9 @@ Present, in one place:
 4. **Any `SUPERSEDED` line this phase wrote** - which check or control, and what was measured.
 5. **The proposed lines**, where the phase drafted text that leaves the project - its
    `Proposed lines:` list quoted word for word, `Proposed lines: none` included; see "Text that leaves the project names no one, and marks what the session proposed" in `keel-orchestrator/SKILL.md`.
+6. **Every `dispatch-write` friction entry on the phase**, presented with the change set: each path
+   a helper's dispatch found written while it was out, with the file still in place, so the operator
+   says what happens to it. `keel-state.ps1 status -Phase W<n>.<p>` prints the phase's friction.
 
 Name every file in that presentation by its full path, as **"A file is named by its full path, as
 text"** in `keel-orchestrator/SKILL.md` says.

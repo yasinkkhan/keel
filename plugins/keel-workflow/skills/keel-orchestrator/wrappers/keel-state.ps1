@@ -253,7 +253,8 @@ $BindProjectTree    = '(project)'
 
 $GoalStatuses   = @('OPEN', 'UNADDRESSED')
 $SignalKinds    = @('unsafe', 'refusal', 'wrong-doc', 'gap', 'friction')
-$FrictionKinds  = @('correction', 'rework', 'assertion', 'gap', 'stale-doc')
+# 'dispatch-write' is written by dispatch-close, for a path written while a helper was out.
+$FrictionKinds  = @('correction', 'rework', 'assertion', 'gap', 'stale-doc', 'dispatch-write')
 $TrackerKinds   = @('none', 'trello', 'jira', 'github')
 $AddressesVals  = @('defect', 'instance')
 $ReversibleVals = @('none', 'partial', 'full')
@@ -2429,8 +2430,14 @@ function Get-BindTreeFiles {
     # each hashed by 'git hash-object' with filters on, so a line-ending-only rewrite hashes the
     # same. A path that no longer exists is 'deleted'. Throws on any git failure; the
     # callers turn that into 'error'.
-    param([string]$BdDir, [string]$BdBase, [bool]$BdMask)
-    $bdDiff = Invoke-BindGit $BdDir @('diff', '--name-only', '--relative', '-z', $BdBase)
+    #
+    # -BdNoRenames, which the dispatch check passes: git diff reports a rename as the new name
+    # alone, so a file renamed in the window would never show its old name as removed. The verify
+    # binding does not pass it, so the fingerprints phases already hold are read as they were taken.
+    param([string]$BdDir, [string]$BdBase, [bool]$BdMask, [switch]$BdNoRenames)
+    $bdDiffArgs = @('diff', '--name-only', '--relative', '-z')
+    if ($BdNoRenames) { $bdDiffArgs += '--no-renames' }
+    $bdDiff = Invoke-BindGit $BdDir ($bdDiffArgs + @($BdBase))
     if ($bdDiff.Code -ne 0) { throw "git diff against $BdBase failed in '$BdDir' (exit $($bdDiff.Code))$(Get-BindGitMessage $bdDiff $BdMask @())" }
     $bdOth = Invoke-BindGit $BdDir @('ls-files', '-o', '--exclude-standard', '-z')
     if ($bdOth.Code -ne 0) { throw "git ls-files failed in '$BdDir' (exit $($bdOth.Code))$(Get-BindGitMessage $bdOth $BdMask @())" }
@@ -2721,6 +2728,188 @@ function Write-BindStatusLine {
     }
     catch {
         Say "  WARNING: $(Get-Prop $BdPhaseObj 'id' '?') verify binding could not be compared: $($_.Exception.Message)."
+    }
+}
+
+# ---------------------------------------------------------- dispatch check --
+# 'dispatch-open' and 'dispatch-close' bracket a helper's run: an advisor, a plan reviewer or a
+# verifier, each told by its brief that it reads and does not write. Open stores the same reading
+# the verify binding takes; close re-takes it and names every path written while the helper was
+# out, as WARNING lines and one 'dispatch-write' friction entry, so a close-out finds them by
+# kind. A clean close prints and records nothing (charter P16), and neither command refuses
+# because of what it finds: they detect, they do not block.
+#
+# What is read: the project root when keel.json has git: true, EVERY repo keel.json registers
+# that is a git work tree (a helper can write anywhere the session can, not only in the repos a
+# phase declares), and the phase folder's top-level files. Not read: a git-ignored file, a
+# project with no git tree (open says so in one line), anything outside those places. A tree
+# says what changed in a window, never who changed it, so a file the session itself writes
+# while a helper is out is named too.
+#
+# Exempt: 'progress/' in the project tree, which only this wrapper writes (charter P15); in the
+# phase folder, the verifier's own report. The snapshot lives in a 'dispatch' folder of this
+# machine's phase folder, which nothing compares (Get-BindFolderFiles reads top-level files
+# only) and which is never committed, even in a project that shares its progress. Its existence
+# is what "open" means; close deletes it only after any friction entry is written, so a refused
+# write leaves the dispatch open to re-run.
+#
+# Same two guarantees as the binding: these functions never throw, and every failure prints one
+# line. Every local and parameter carries a 'Dp' prefix, for the reason the binding gives.
+
+function Get-DispatchDir {
+    # Built from $ProjectsHome, never from Get-PhaseDir: in a project that shares its progress
+    # that function returns the committed artifacts folder.
+    param([string]$DpSlug, [string]$DpPhaseId)
+    return (Join-Path (Join-Path (Join-Path (Join-Path $ProjectsHome $DpSlug) 'phases') $DpPhaseId) 'dispatch')
+}
+
+function Get-DispatchFile {
+    # A readable stem and a hash of the exact name, so two names that clean to one stem still
+    # get two files.
+    param([string]$DpSlug, [string]$DpPhaseId, [string]$DpName)
+    $dpStem = $DpName -replace '[^A-Za-z0-9._-]', '-'
+    if ($dpStem.Length -gt 40) { $dpStem = $dpStem.Substring(0, 40) }
+    $dpHash = (Get-BindSha -BdBytes ([Text.Encoding]::UTF8.GetBytes($DpName))).Substring(0, 12)
+    return (Join-Path (Get-DispatchDir $DpSlug $DpPhaseId) "$dpStem-$dpHash.json")
+}
+
+function Get-DispatchTrees {
+    # Get-BindTrees reads the repos from the phase it is given, so it is given one that names
+    # every registered repo. Properties are enumerated, never read as '.Properties.Name', which
+    # throws under strict mode on an object with none.
+    param($DpProj, $DpCfg)
+    $dpReg = Get-Prop $DpCfg 'repos' $null
+    $dpNames = @()
+    if ($null -ne $dpReg) { $dpNames = @(@($dpReg.PSObject.Properties) | ForEach-Object { $_.Name }) }
+    return @(Get-BindTrees $DpProj $DpCfg ([pscustomobject]@{ repos = $dpNames }))
+}
+
+function New-DispatchSnapshot {
+    param($DpProj, $DpCfg, $DpPhaseObj, [string]$DpName)
+    $dpOut = [pscustomobject]@{ name = $DpName; phase = $DpPhaseObj.id; openedAt = (Now); folder = @{}; trees = @(); error = $null }
+    try {
+        $dpOut.folder = Get-BindFolderFiles (Get-PhaseDir $DpProj.Slug $DpPhaseObj.id) (Ws-Of-Phase $DpPhaseObj.id)
+        $dpStored = @()
+        foreach ($dpTr in @(Get-DispatchTrees $DpProj $DpCfg)) {
+            $dpHd = Invoke-BindGit $dpTr.dir @('rev-parse', '--verify', '-q', 'HEAD')
+            $dpBase = if ($dpHd.Code -eq 0 -and $dpHd.Text.Trim()) { $dpHd.Text.Trim() } else { $BindEmptyTree }
+            $dpFiles = Get-BindTreeFiles $dpTr.dir $dpBase (Test-Quarantine $DpCfg) -BdNoRenames
+            $dpStored += [pscustomobject]@{
+                name   = $dpTr.name
+                dir    = $dpTr.dir
+                base   = $dpBase
+                count  = $dpFiles.Count
+                digest = (Get-BindDigest $dpFiles)
+                files  = $(if ($dpFiles.Count -le $BindCap) { $dpFiles } else { $null })
+            }
+        }
+        $dpOut.trees = $dpStored
+    }
+    catch {
+        $dpOut.folder = @{}
+        $dpOut.trees  = @()
+        $dpOut.error  = $_.Exception.Message
+    }
+    return $dpOut
+}
+
+function Test-DispatchFolderExempt {
+    param([string]$DpFile)
+    return ($DpFile -eq 'verify-report.md' -or $DpFile -match '^verify-report-round\d+\.md$')
+}
+
+function Compare-DispatchSnapshot {
+    # Each stored tree against its STORED base, so a commit inside the window still shows its
+    # files. A path whose entry is the same at open and at close is skipped, so a file already
+    # deleted or already new at open and left alone is never named. A reading that failed at
+    # open comes back as 'error', never as an empty list.
+    param($DpOld, $DpProj, $DpPhaseObj)
+    $dpRes = [pscustomobject]@{ moved = @(); error = $null }
+    $dpErr = Get-Prop $DpOld 'error' $null
+    if ($dpErr) { $dpRes.error = "the reading at open failed ($dpErr)"; return $dpRes }
+    try {
+        $dpMoved = New-Object System.Collections.Generic.List[object]
+        $dpCfg = Read-ProjectConfig $DpProj.ConfigPath
+        # An unreadable config masks, as the binding does.
+        $dpMask = ($null -eq $dpCfg) -or (Test-Quarantine $dpCfg)
+
+        $dpOldF = Get-BindMap (Get-Prop $DpOld 'folder' $null)
+        $dpNowF = Get-BindFolderFiles (Get-PhaseDir $DpProj.Slug $DpPhaseObj.id) (Ws-Of-Phase $DpPhaseObj.id)
+        foreach ($dpK in @(@($dpOldF.Keys) + @($dpNowF.Keys) | Sort-Object -Unique)) {
+            if (Test-DispatchFolderExempt $dpK) { continue }
+            if (-not $dpOldF.ContainsKey($dpK)) { $dpMoved.Add((New-BindMove 'phase folder' $dpK 'new')) }
+            elseif (-not $dpNowF.ContainsKey($dpK)) { $dpMoved.Add((New-BindMove 'phase folder' $dpK 'removed')) }
+            elseif ($dpNowF[$dpK] -ne $dpOldF[$dpK]) { $dpMoved.Add((New-BindMove 'phase folder' $dpK 'changed')) }
+        }
+
+        foreach ($dpTr in @(Get-Prop $DpOld 'trees' @())) {
+            $dpTn = [string](Get-Prop $dpTr 'name' '')
+            $dpDir = [string](Get-Prop $dpTr 'dir' '')
+            $dpBase = [string](Get-Prop $dpTr 'base' '')
+            $dpNowT = Get-BindTreeFiles $dpDir $dpBase $dpMask -BdNoRenames
+            $dpOldFiles = Get-Prop $dpTr 'files' $null
+            if ($null -eq $dpOldFiles) {
+                # Over the cap at open: only the digest was stored.
+                if ((Get-BindDigest $dpNowT) -ne [string](Get-Prop $dpTr 'digest' '')) {
+                    $dpMoved.Add((New-BindMove $dpTn "($(Get-Prop $dpTr 'count' 0) paths read at open, over the $BindCap cap - not itemised)" 'changed'))
+                }
+                continue
+            }
+            $dpOldT = Get-BindMap $dpOldFiles
+            foreach ($dpK in @(@($dpOldT.Keys) + @($dpNowT.Keys) | Sort-Object -Unique)) {
+                if ($dpTn -eq $BindProjectTree -and ($dpK -replace '\\', '/') -like 'progress/*') { continue }
+                $dpO = $null; $dpN = $null
+                if ($dpOldT.ContainsKey($dpK)) { $dpO = [string]$dpOldT[$dpK] }
+                if ($dpNowT.ContainsKey($dpK)) { $dpN = [string]$dpNowT[$dpK] }
+                if ($dpO -eq $dpN) { continue }
+                # The label says whether the file existed at open and whether it exists now: new
+                # (not then, now), removed (then, not now), changed (both). The maps hold only paths
+                # that differ from the base, so a path missing from the open map existed then
+                # exactly when the base holds it (a clean tracked file), and 'deleted' there means
+                # it did not. At close the disk itself answers.
+                $dpWasThere = $true
+                if ($dpO -eq 'deleted') { $dpWasThere = $false }
+                elseif ($null -eq $dpO) {
+                    # './': a bare '<rev>:<path>' reads from the top of the work tree even under -C.
+                    $dpWasThere = ((Invoke-BindGit $dpDir @('cat-file', '-e', "${dpBase}:./$dpK")).Code -eq 0)
+                }
+                $dpIsThere = Test-Path -LiteralPath (Join-Path $dpDir $dpK) -PathType Leaf
+                $dpHow = 'changed'
+                if ($dpIsThere -and -not $dpWasThere) { $dpHow = 'new' }
+                elseif ($dpWasThere -and -not $dpIsThere) { $dpHow = 'removed' }
+                $dpMoved.Add((New-BindMove $dpTn $dpK $dpHow))
+            }
+        }
+        $dpRes.moved = $dpMoved.ToArray()
+    }
+    catch { $dpRes.error = $_.Exception.Message }
+    return $dpRes
+}
+
+function Write-DispatchStatusLines {
+    # One line per dispatch opened and never closed, in any phase: a check that never ran must
+    # not read like a clean one. Silent otherwise, and wholly inside a try/catch so a defect here
+    # cannot cut status short.
+    param($DpProj)
+    try {
+        $dpRoot = Join-Path (Join-Path $ProjectsHome $DpProj.Slug) 'phases'
+        if (-not (Test-Path -LiteralPath $dpRoot -PathType Container)) { return }
+        foreach ($dpPd in @(Get-ChildItem -LiteralPath $dpRoot -Directory | Sort-Object Name)) {
+            $dpDd = Join-Path $dpPd.FullName 'dispatch'
+            if (-not (Test-Path -LiteralPath $dpDd -PathType Container)) { continue }
+            foreach ($dpF in @(Get-ChildItem -LiteralPath $dpDd -File -Filter '*.json' | Sort-Object Name)) {
+                $dpS = $null
+                try { $dpS = Read-Json $dpF.FullName } catch { $dpS = $null }
+                if ($null -eq $dpS) {
+                    Say "  WARNING: $($dpPd.Name) dispatch record '$($dpF.Name)' could not be read, so a dispatch there may never have been closed."
+                    continue
+                }
+                Say "  WARNING: $(Get-Prop $dpS 'phase' $dpPd.Name) dispatch '$(Get-Prop $dpS 'name' '?')' opened $(Format-StateStamp (Get-Prop $dpS 'openedAt' $null)) was never closed: run dispatch-close with that name, or what the helper wrote is never compared."
+            }
+        }
+    }
+    catch {
+        Say "  WARNING: open dispatches could not be listed: $($_.Exception.Message)."
     }
 }
 
@@ -4893,7 +5082,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              revise-epic  revise-workstream  revise-phase  order"
     Write-Output "  Execution:  set-stage  set-waiting  clear-waiting  record-verdict"
     Write-Output "              new-iteration  lift-cap  note-friction  open-question  abandon  hand-over"
-    Write-Output "              close"
+    Write-Output "              close  dispatch-open  dispatch-close"
     Write-Output "  Signals:    signal  signals  signals-target  signals-push  adopt-signal  judge-signal"
     Write-Output "              resolve-signal  signals-relink"
     Write-Output ""
@@ -4925,6 +5114,11 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output ""
     Write-Output "  A verify PASS or INCONCLUSIVE records a fingerprint of what it verified. The human,"
     Write-Output "  enact and record gates, and 'status', WARN when it has moved - they never refuse."
+    Write-Output "  'dispatch-open -Phase X -Name <helper>' before a helper starts and 'dispatch-close' with the same"
+    Write-Output "  name when it returns: close names each path written meanwhile in the project folder, every"
+    Write-Output "  registered git repo and the top level of the phase folder, and records a dispatch-write"
+    Write-Output "  friction entry. Silent when nothing was written; status names a dispatch never closed. They"
+    Write-Output "  never refuse a write. Known limits, among them git-ignored files: see CHANGELOG.md."
     Write-Output ""
     Write-Output "  A signal is local until 'signals-push' (preview) and 'signals-push -Apply' (creates"
     Write-Output "  GitHub issues on the repo chosen with 'signals-target -Repo owner/name', stored in"
@@ -5841,6 +6035,9 @@ switch ($Command) {
     foreach ($bindPh in @($phases | Where-Object { @('delivered', 'abandoned', 'handed-over') -notcontains (Get-Prop $_ 'stage' '') })) {
         Write-BindStatusLine $proj $bindPh
     }
+
+    # ---- a helper dispatch opened and never closed: its check never ran
+    Write-DispatchStatusLines $proj
 
     # ---- time (P19)
     $today = (Get-Date).Date
@@ -7232,6 +7429,78 @@ switch ($Command) {
     Write-State $proj.Slug $state
     if ($Answer) { Say "Logged an auto-resolved question on $Phase. It will be re-surfaced at the human gate." }
     else { Say "Logged an open question on $Phase." }
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# A helper dispatch, bracketed; the helpers are under 'dispatch check'. Open before the brief is
+# handed over, close when the helper returns, with the same -Name.
+'dispatch-open' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
+    Require-Param $Name 'Name'
+
+    # Held until exit, so a second open of the same name waits and then meets this one's file.
+    Enter-WriteLock (Get-StatePath $proj.Slug) "project '$($proj.Slug)'"
+    $state = Read-State $proj.Slug
+    $p = Get-PhaseOrFail $state $Phase
+    $dpOpenFile = Get-DispatchFile $proj.Slug $Phase $Name
+    if (Test-Path -LiteralPath $dpOpenFile) {
+        $dpWhen = '?'
+        try { $dpWhen = Format-StateStamp (Get-Prop (Read-Json $dpOpenFile) 'openedAt' '?') } catch { $dpWhen = '?' }
+        Fail 90 "Dispatch '$Name' is already open on $Phase (opened $dpWhen). Close it with dispatch-close -Phase $Phase -Name '$Name' before opening it again, or give this dispatch another name. Nothing was written."
+    }
+    $cfg = Read-ProjectConfig $proj.ConfigPath
+    $dpSnap = New-DispatchSnapshot $proj $cfg $p $Name
+    Write-Json $dpOpenFile $dpSnap
+    if ($dpSnap.error) {
+        Say "WARNING: dispatch '$Name' on $Phase is open, but the trees could not be read at open: $($dpSnap.error). Its close will say that nothing can be compared."
+    }
+    elseif (@($dpSnap.trees).Count -eq 0) {
+        Say "dispatch '$Name' on ${Phase}: this project has no git tree, so the project folder and the repos it uses cannot be compared; only the phase folder is."
+    }
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+'dispatch-close' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $Phase 'Phase'; Assert-PhaseId $Phase
+    Require-Param $Name 'Name'
+
+    $state = Read-State $proj.Slug -ForWrite
+    $p = Get-PhaseOrFail $state $Phase
+    $dpCloseFile = Get-DispatchFile $proj.Slug $Phase $Name
+    if (-not (Test-Path -LiteralPath $dpCloseFile)) {
+        Fail 90 "No dispatch '$Name' is open on $Phase, so there is nothing to close. Run dispatch-open -Phase $Phase -Name '$Name' before the helper starts. Nothing was written."
+    }
+    $dpOld = $null
+    try { $dpOld = Read-Json $dpCloseFile } catch { $dpOld = $null }
+    $dpOpened = '?'
+    $dpCheck = $null
+    if ($null -eq $dpOld) { $dpCheck = [pscustomobject]@{ moved = @(); error = 'its reading at open could not be read back' } }
+    else {
+        $dpOpened = Format-StateStamp (Get-Prop $dpOld 'openedAt' '?')
+        $dpCheck = Compare-DispatchSnapshot $dpOld $proj $p
+    }
+    $dpClosed = Now
+    if ($dpCheck.error) {
+        Say "WARNING: dispatch '$Name' on $Phase (opened $dpOpened) could not be compared: $($dpCheck.error). What was written while it was out is not known."
+    }
+    else {
+        $dpMv = @($dpCheck.moved)
+        if ($dpMv.Count -gt 0) {
+            Say "WARNING: dispatch '$Name' on $Phase, out from $dpOpened to ${dpClosed}: $($dpMv.Count) path(s) written while it was out:"
+            foreach ($dpI in $dpMv) { Say "  $(Format-BindMoved $dpI)" }
+            Say "  Name each in this gate's artifact and leave each file in place until the operator says what to do with it. A path the session wrote itself in that window is named too."
+            $dpDetail = "dispatch '$Name', out from $dpOpened to ${dpClosed}: $($dpMv.Count) path(s) written while it was out: " + ((@($dpMv | ForEach-Object { Format-BindMoved $_ })) -join '; ')
+            $dpLog = @(Get-Prop $p 'friction' @())
+            $dpLog += [pscustomobject]@{ kind = 'dispatch-write'; detail = $dpDetail; at = $dpClosed }
+            Set-Prop $p 'friction' $dpLog
+            Write-State $proj.Slug $state
+        }
+    }
+    Remove-Item -LiteralPath $dpCloseFile -Force
     exit 0
 }
 

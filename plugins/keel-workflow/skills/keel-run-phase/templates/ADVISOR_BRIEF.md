@@ -28,6 +28,9 @@ You are answering one factual question about a project on this machine. Answer o
 - `{{absolute path into the project folder}}`
 - `{{...}}`
 
+**Scratch folder:** `{{%USERPROFILE%\.keel\projects\<slug>\phases\W<n>.<p>\scratch\}}` - the one place a
+scratch file of yours may go. It is on this machine only, never under a project's `progress\` folder.
+
 ## Commands you may run
 
 {{Exact commands. Read-only. If a command needs a working directory, say which.}}
@@ -69,8 +72,12 @@ UNKNOWN:   <anything you could not establish, and what would establish it>
 
 - **Do NOT load or invoke any `keel-*` skill.** You are not running the workflow; you are answering
   a question for a session that is.
-- Do not edit, create or delete anything. This is read-only.
-- Do not write to `%USERPROFILE%\.keel\` or run `keel-state.ps1`.
+- Do not edit, create or delete anything. This is read-only. The one exception is a scratch file in
+  the scratch folder named under "Where to look".
+- Do not write to `%USERPROFILE%\.keel\`, except in that scratch folder, or run `keel-state.ps1`.
+- The session that dispatched you compares the project folder, every repo it uses and the top
+  level of the phase folder before and after you run, and a file you write there, other than your
+  report, can be recorded against you by name.
 - Do not return your whole investigation. Return the format above.
 - Do not answer a question that was not asked, however interesting.
 - Do not guess. `UNKNOWN` is a real and useful answer.

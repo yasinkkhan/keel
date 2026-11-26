@@ -1784,5 +1784,64 @@ if ($Strict) {
     }
 }
 
+# --- 23. a helper's writes are still caught: run its committed suite -----------
+#
+# The tenth sibling of sections 9, 11, 14, 15, 17, 19, 20, 21 and 22. scripts/test-dispatch-check.ps1
+# builds scratch projects and checks that dispatch-close names what was written while a helper was
+# out - in the project folder, a registered repo the phase does not declare and the phase folder -
+# records it as one dispatch-write friction entry, stays silent when nothing was, skips progress/ and
+# the verifier's report, refuses as specified, and that status names a dispatch never closed. A
+# checker that is not wired to anything is a violation of charter P11.
+#
+# It makes about eighty wrapper calls, each in its own powershell.exe, so it costs two minutes or so.
+# -Strict ONLY, like the other suites, so the commit gate stays fast. Its -AgainstWrapper mode is
+# human-invoked and not run here.
+if ($Strict) {
+    $dcSuitePath = Join-Path $RepoRoot 'scripts\test-dispatch-check.ps1'
+    if (-not (Test-Path -LiteralPath $dcSuitePath)) {
+        Problem 'scripts/test-dispatch-check.ps1 is missing. The dispatch check ships with the suite that re-checks it (charter P11).'
+    }
+    else {
+        # Native call, so no bare 2>&1 and no reliance on $ErrorActionPreference.
+        # The EXIT CODE decides.
+        $dcSuitePrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $dcSuiteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $dcSuitePath
+        $dcSuiteCode   = $LASTEXITCODE
+        $ErrorActionPreference = $dcSuitePrior
+
+        if ($dcSuiteCode -ne 0) {
+            Problem "scripts/test-dispatch-check.ps1 reported failures (exit $dcSuiteCode). The dispatch check does not behave as specified."
+            foreach ($dcSuiteLine in @($dcSuiteOutput)) {
+                if (-not [string]::IsNullOrWhiteSpace($dcSuiteLine)) { Note $dcSuiteLine }
+            }
+        }
+        else {
+            # A DECLARED coupling to another script's output wording, taken openly as sections
+            # 9, 11, 14, 15, 17, 19, 20, 21 and 22 take theirs: the count is parsed from the suite's
+            # summary line, and an unparseable summary is a PROBLEM, never a zero and never a
+            # silent skip. Explicit loop, not a Where-Object, for the reason section 20 gives.
+            $dcSuiteCases = -1
+            $dcSuiteFails = -1
+            foreach ($dcSuiteLine in @($dcSuiteOutput)) {
+                if ($dcSuiteLine -match '^test-dispatch-check:\s+(\d+)\s+case\(s\),\s+(\d+)\s+failure\(s\)') {
+                    $dcSuiteCases = [int]$Matches[1]
+                    $dcSuiteFails = [int]$Matches[2]
+                }
+            }
+            if ($dcSuiteCases -lt 0) {
+                Problem ("scripts/test-dispatch-check.ps1 exited 0 but its summary line could not be parsed, so this gate cannot say how many cases actually ran. " +
+                         "Expected a line matching: test-dispatch-check: <n> case(s), <n> failure(s). If the suite's output format moved, move this pattern with it.")
+                foreach ($dcSuiteLine in @($dcSuiteOutput)) {
+                    if (-not [string]::IsNullOrWhiteSpace($dcSuiteLine)) { Note $dcSuiteLine }
+                }
+            }
+            else {
+                Ran ("dispatch check suite: {0} case(s), {1} failure(s) (scripts/test-dispatch-check.ps1)" -f $dcSuiteCases, $dcSuiteFails)
+            }
+        }
+    }
+}
+
 # --- verdict ----------------------------------------------------------------
 Write-Verdict
