@@ -4,6 +4,75 @@ All notable changes to the keel marketplace. Versions are per plugin; the market
 at the top of each entry is the one in `.claude-plugin/marketplace.json`. Each entry says what
 changed and why.
 
+## marketplace 0.94.0 - 2026-11-26
+
+- **`keel-workflow` 0.86.0: a project can send work to another project on this machine, and the
+  receiving project answers it.** A session writes only in the project it works in, and keel had no
+  way to hand a piece of work to another project. A follow-up written as prose into the other
+  project's spec showed nowhere in that project's `status`, and an edit the other project needed
+  was left for someone to make by hand.
+  - **`keel-state.ps1`** gains three verbs and one parameter, `-Into`.
+    `send -To <project> -Title <text> -Detail <text> [-Phase <phase>]`, run in the sending project,
+    writes one record, `I<nnnn>.json`, to a new item store under `%USERPROFILE%\.keel\items\`, and
+    prints its id. The record holds `id`, `from`, `fromPhase`, `to`, `title`, `detail`, `created`,
+    `keelVersion`, `state` (`SENT`, `ACCEPTED` or `DECLINED`), `answeredAt`, `into` and `reason`.
+    `send` writes nothing in either project's folder or state, and every write to the store takes a
+    write lock of its own. The sender is the project the working directory resolves to. `-To` must
+    name a project this machine knows: a folder of the projects home holding `state.json`, or the
+    `state.json.shared-*` that `share-progress` leaves, the same rule `list` now reads through one
+    function. It refuses a missing `-To`, `-Title` or `-Detail`, a title over 100 characters or
+    holding a line break, and `-To` naming the sending project (each exit 90); a `-To` this machine
+    does not know (91, naming `list`); and a `-Phase` the sending project has not declared (94).
+    From a project with quarantine on, `-Detail` must be one line of at most 240 characters, a
+    reference, or `send` exits 97, as a signal's evidence does.
+  - `answer-item -Id I<nnnn> -As accepted -Into <W<n>|W<n>.<p>>`, run in the receiving project,
+    records the workstream or phase there that now carries the item; `-As declined -Detail <why>`
+    records the reason. Accepting takes unfinished work, or delivered work for an item already
+    done, and creates nothing: the receiving project registers new work first with `add-workstream`
+    or `add-phase`. It refuses an unknown id (94), an item sent to another project or already
+    answered (90), an `-As` other than the two values (90), acceptance without `-Into`, with an
+    `-Into` that is not a workstream or phase id, or with `-Detail` (90), a declined answer with
+    `-Into` (90) or without `-Detail` (95), an `-Into` naming nothing in the project's state (94),
+    and an `-Into` naming an abandoned workstream, an abandoned phase, a phase under an abandoned
+    workstream, or a handed-over phase, whose refusal names the phase that continues it (90). An
+    item file that does not parse is refused at 96.
+  - `items` lists every item sent from or to the current project, newest first, with its state and
+    its answer; `items -Id I<nnnn>` prints one item in full, its detail included. Neither writes.
+  - **`status`** prints `N item(s) received and not yet answered:`, one line per item naming its
+    id, the sending project and its title, and a line pointing at `items -Id`, and
+    `N item(s) sent and not yet answered:`, one line per item. Each block prints only while an
+    item waits, after the open-signals lines, and also in a project with no phases yet.
+  - **`keel-orchestrator`** gains two rows in Step 0's status table and a subsection,
+    `### Work for another project is sent, never written there`: work found for another project is
+    sent with `send` and never written in that project's files; the receiving session reads the
+    item with `items -Id`, registers or picks the plan item and answers with
+    `answer-item -As accepted -Into`, or declines with a reason; replacement text an item carries is
+    applied through the receiving project's own gates; items stay on this machine, and a project
+    with quarantine on sends only a reference.
+  - **`scripts/test-items.ps1`**, a new suite, run by `check-suite-docs.ps1 -Strict` as section 24
+    and parsed by its summary line as the other suites are. Against scratch projects it checks the
+    record and its fields, that neither project's folder or per-machine state changes on a send,
+    both status blocks and their silence, each answer, every refusal above with its message and
+    with nothing written, the listing, a receiver that shares its progress, and the store's lock:
+    held past the wait, `send` exits 89 and writes nothing, and two writers sending together for
+    20 rounds get 40 distinct ids. A fake `gh` first on `PATH` is never called. Against the wrapper
+    of the previous release every case row fails, and against a copy with `send`'s lock removed the
+    held-lock row fails.
+  - **Tried once; nothing is claimed beyond one run.** A fresh helper, given only the new
+    subsection, the wrapper's help text and a command that runs the wrapper against a scratch home,
+    was asked to hand a follow-up recorded in one scratch project's spec over to another. It sent
+    one item naming the follow-up, wrote nothing in the receiving project's folder, and left the
+    machine's real item store untouched.
+  - **Known limits, and this is not a complete list:**
+    - Items stay on this machine. A person working on a project that shares its progress from
+      another machine does not see an item sent here, and a clone of such a project that never
+      exported from this machine cannot be sent to (91).
+    - The session-start nudge does not show the new lines; `status` does.
+    - Nothing applies an item's replacement text, and accepting an item creates no work.
+    - Under quarantine only `-Detail` is held to a reference; `-Title` is checked for its length
+      and its line breaks, not its content.
+    - An item stays `SENT` until the receiving project answers it; no verb withdraws one.
+
 ## marketplace 0.93.0 - 2026-11-26
 
 - **`keel-workflow` 0.85.0: a meeting transcript can amend the plan, each thing said in it checked

@@ -1843,5 +1843,65 @@ if ($Strict) {
     }
 }
 
+# --- 24. work sent between projects still behaves: run its committed suite ------
+#
+# The eleventh sibling of sections 9, 11, 14, 15, 17, 19, 20, 21, 22 and 23. scripts/test-items.ps1
+# builds scratch projects and checks that 'send' writes one record to the item store and nothing in
+# either project, that the receiving and the sending project's status print their blocks only while
+# an item waits, that 'answer-item' accepts into unfinished or delivered work and declines with a
+# reason, that 'items' lists both directions, that every refusal of the two verbs is refused as
+# specified, and that the store's lock holds. A checker that is not wired to anything is a violation
+# of charter P11.
+#
+# It makes about a hundred wrapper calls and holds the store's lock past the wrapper's wait once, so
+# it costs two minutes or so. -Strict ONLY, like the other suites, so the commit gate stays fast. Its
+# -AgainstWrapper mode is human-invoked and not run here.
+if ($Strict) {
+    $itSuitePath = Join-Path $RepoRoot 'scripts\test-items.ps1'
+    if (-not (Test-Path -LiteralPath $itSuitePath)) {
+        Problem 'scripts/test-items.ps1 is missing. The item store ships with the suite that re-checks it (charter P11).'
+    }
+    else {
+        # Native call, so no bare 2>&1 and no reliance on $ErrorActionPreference.
+        # The EXIT CODE decides.
+        $itSuitePrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $itSuiteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $itSuitePath
+        $itSuiteCode   = $LASTEXITCODE
+        $ErrorActionPreference = $itSuitePrior
+
+        if ($itSuiteCode -ne 0) {
+            Problem "scripts/test-items.ps1 reported failures (exit $itSuiteCode). The item store does not behave as specified."
+            foreach ($itSuiteLine in @($itSuiteOutput)) {
+                if (-not [string]::IsNullOrWhiteSpace($itSuiteLine)) { Note $itSuiteLine }
+            }
+        }
+        else {
+            # A DECLARED coupling to another script's output wording, taken openly as sections
+            # 9, 11, 14, 15, 17, 19, 20, 21, 22 and 23 take theirs: the count is parsed from the
+            # suite's summary line, and an unparseable summary is a PROBLEM, never a zero and never a
+            # silent skip. Explicit loop, not a Where-Object, for the reason section 20 gives.
+            $itSuiteCases = -1
+            $itSuiteFails = -1
+            foreach ($itSuiteLine in @($itSuiteOutput)) {
+                if ($itSuiteLine -match '^test-items:\s+(\d+)\s+case\(s\),\s+(\d+)\s+failure\(s\)') {
+                    $itSuiteCases = [int]$Matches[1]
+                    $itSuiteFails = [int]$Matches[2]
+                }
+            }
+            if ($itSuiteCases -lt 0) {
+                Problem ("scripts/test-items.ps1 exited 0 but its summary line could not be parsed, so this gate cannot say how many cases actually ran. " +
+                         "Expected a line matching: test-items: <n> case(s), <n> failure(s). If the suite's output format moved, move this pattern with it.")
+                foreach ($itSuiteLine in @($itSuiteOutput)) {
+                    if (-not [string]::IsNullOrWhiteSpace($itSuiteLine)) { Note $itSuiteLine }
+                }
+            }
+            else {
+                Ran ("item store suite: {0} case(s), {1} failure(s) (scripts/test-items.ps1)" -f $itSuiteCases, $itSuiteFails)
+            }
+        }
+    }
+}
+
 # --- verdict ----------------------------------------------------------------
 Write-Verdict

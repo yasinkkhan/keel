@@ -40,6 +40,8 @@ keel-state.ps1 status
 | `OVERDUE:` / `CHASE:` | A deadline passed, or a wait is due for review. Often the most useful thing in the session. |
 | `N/A census: N gate(s) waived` | How much has been skipped. A rising number is the workflow decaying. |
 | `N open signal(s)` | Filed from this project, not yet triaged in keel. The same line states how many are **not yet pushed** — those exist only on this machine — and `signals` shows each signal's issue number. Do not infer push state from the open count; the two are independent. |
+| `N item(s) received and not yet answered:` | Another project on this machine sent this one work with `send`. Each line names the item, the project it came from and its title. Read each with `keel-state.ps1 items -Id <id>` and answer it as "Work for another project is sent, never written there" below says. The block prints until every item is answered. |
+| `N item(s) sent and not yet answered:` | This project sent work to another with `send`, and the receiving project has not answered it yet. Nothing to do here: `keel-state.ps1 items` shows each answer once it is given. |
 | `N commit(s) on '<branch>' have NOT reached the remote 'origin'` | Work that exists only on this machine, with the range so a push preview can be exact. Read live from `git ls-remote` and **never** from the `origin/*` tracking ref, which is a cache reporting whatever the last fetch saw, so reading it lets unpushed commits sit unnoticed across sessions. Push them, or say in the handoff why not. A sister line reports a branch that is not on the remote at all. |
 | `COULD NOT REACH the remote 'origin'` | The reading did **not** happen. This is not "nothing to report": `status` fails open so it stays usable offline, and says so rather than reading clean. Silence means the remote was reached and there is nothing to say — or that the project has no `origin`, is not a repo, has no commits, or is on a detached HEAD, none of which can strand work. |
 | `WARNING: the remote 'origin' holds work this copy has not pulled` / `WARNING: this copy is N commit(s) behind 'origin'` | A project that shares its progress, only. Someone else's work is on the remote and not in this copy, so every other line may be out of date. **Pull, then run `status` again, before acting on anything.** A sister line says when this reading could not be taken. See "Resuming a project that shares its progress" below. |
@@ -211,6 +213,47 @@ can clear is one the reader learns to skip, and this is the last one you want sk
 
 **Do not re-run a stage whose verdict is already recorded.** When the state file and the
 conversation disagree, the state file is right.
+
+### Work for another project is sent, never written there
+
+A session works in one project and writes only there. Work it finds that belongs to another project
+on this machine, such as a follow-up the other project must plan or a line in its spec that is now
+out of date, travels as an **item**: one record in a store keel keeps on this machine, which the
+receiving project's `status` shows until that project answers it.
+
+- **Send work found for another project with `keel-state.ps1 send`, and never write it in that
+  project's files**, not its spec, its open questions, its handoff or its state:
+
+  ```
+  keel-state.ps1 send -To <project> -Title "<one line>" -Detail "<what is needed and why>" [-Phase W<n>.<p>]
+  ```
+
+  Run it in the sending project; the sender is the project the working directory resolves to.
+  `-To` is the receiving project's name as `keel-state.ps1 list` prints it, and `-Phase` names the
+  phase here that found the work. It prints the item's id. Where the receiver should change a text,
+  put the exact replacement text in `-Detail`.
+- **In the receiving project, read each item with `keel-state.ps1 items -Id <id>`, register or pick
+  the plan item that will carry it, and accept it into that plan item:**
+
+  ```
+  keel-state.ps1 answer-item -Id I<nnnn> -As accepted -Into <W<n>|W<n>.<p>>
+  ```
+
+  Register new work first with `add-workstream` or `add-phase`, as for any other work, so the item
+  lands in the project's order through them; `answer-item` creates nothing. `-Into` names unfinished
+  work, or delivered work for an item that turns out to be already done; abandoned work is refused.
+- **To decline an item, answer it with the reason:**
+  `keel-state.ps1 answer-item -Id I<nnnn> -As declined -Detail "<why>"`. The reason is required,
+  and the sending project reads it with `keel-state.ps1 items`.
+- **Apply any replacement text an item carries through the receiving project's own gates**, as a
+  change planned, grounded and verified like any other. Nothing applies it automatically, and
+  accepting an item is not approving its text.
+- **Items stay on this machine.** The store is under `%USERPROFILE%\.keel\items\`, never under a
+  project folder, and nothing commits or pushes it: a person working on a project that shares its
+  progress from another machine does not see an item sent here, and a clone that never exported
+  from this machine cannot be sent to. **From a project with quarantine on, send only a reference**:
+  `-Detail` on one line of at most 240 characters, a local path plus a short description, as for a
+  signal's evidence; anything else is refused at exit 97.
 
 ## Step 0.4 — what SIZE of thing is this?
 

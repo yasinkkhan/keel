@@ -122,6 +122,9 @@ param(
     # string and not a switch, because it carries the reason. NOT -Clear, a switch on two verbs that
     # carries no text, and NOT -Detail, which is resolve-signal's resolution.
     [string]$Clearance,
+    # The plan item an accepted item lands in, for 'answer-item -As accepted': a workstream (W<n>) or
+    # a phase (W<n>.<p>) in the receiving project's state.
+    [string]$Into,
     [string]$Name,
     [string]$RepoPath,
     [string]$Branch,
@@ -146,6 +149,11 @@ Set-StrictMode -Version 2.0
 $KeelHome     = Join-Path $env:USERPROFILE '.keel'
 $ProjectsHome = Join-Path $KeelHome 'projects'
 $SignalsHome  = Join-Path $KeelHome 'signals'
+# The item store: work one project sends another on this machine, one I<nnnn>.json per item, written
+# only by 'send' and 'answer-item'. It is this machine's alone, like the signal store: never under a
+# project folder, never committed and never pushed, so nothing about an item leaves the machine.
+$ItemsHome    = Join-Path $KeelHome 'items'
+$ItemTitleMaxChars = 100
 # Where this machine's signals are sent: one line, owner/name, written only by 'signals-target'.
 # Under the state home on purpose: a fixture that overrides USERPROFILE loses it.
 $SignalsTargetFile = Join-Path $KeelHome 'signals-target.txt'
@@ -5070,6 +5078,103 @@ function Save-NewSignal {
     Fail 89 "Fifty signal ids in a row were taken by other filings while this one was being written. $(Get-WrittenNote) Re-run the command."
 }
 
+# ------------------------------------------------------------------- items --
+# Work one project sends another on this machine. A session writes only in the project it works in,
+# so a follow-up that belongs to another project is SENT: 'send' writes one record to the item store,
+# never into the receiving project's folder or state, the receiving project's 'status' shows it until
+# 'answer-item' accepts it into a plan item there or declines it with a reason, and 'items' shows
+# both directions with their answers. One home per item (charter P10); the signal store's layout
+# and lock, so no new mechanism (P12).
+
+# WHICH PROJECTS THIS MACHINE KNOWS, the one rule 'list' and 'send' share: a folder of the projects
+# home holding state.json, or, for a project that shares its progress, the newest state.json.shared-*
+# that share-progress left, kept only if it parses. A clone of a shared project that never exported
+# from this machine has no such file: nothing here records it, so it is not known. Returns
+# { Shared; State } or $null.
+function Read-KnownProject {
+    param([string]$KpDir)
+    $kpSp = Join-Path $KpDir 'state.json'
+    if (Test-Path -LiteralPath $kpSp) {
+        return [pscustomobject]@{ Shared = $false; State = (Read-Json $kpSp) }
+    }
+    $kpShared = @(Get-ChildItem -LiteralPath $KpDir -Filter 'state.json.shared-*' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc)
+    if ($kpShared.Count -eq 0) { return $null }
+    $kpState = $null
+    try { $kpState = Read-Json $kpShared[$kpShared.Count - 1].FullName } catch { $kpState = $null }
+    if ($null -eq $kpState) { return $null }
+    return [pscustomobject]@{ Shared = $true; State = $kpState }
+}
+
+# The projects-home folder whose name equals $KnName, ignoring case, if it is a known project; else
+# $null. Each folder's name is compared with the argument, so no path is ever built from it and a
+# name holding a separator or '..' matches nothing.
+function Get-KnownProjectName {
+    param([string]$KnName)
+    if (-not (Test-Path -LiteralPath $ProjectsHome)) { return $null }
+    foreach ($knDir in @(Get-ChildItem -LiteralPath $ProjectsHome -Directory -ErrorAction SilentlyContinue)) {
+        if ($knDir.Name -ne $KnName) { continue }
+        if ($null -ne (Read-KnownProject $knDir.FullName)) { return $knDir.Name }
+    }
+    return $null
+}
+
+# Every item in the store, sorted by id. A file that does not parse is skipped here, so a damaged
+# record cannot take out 'status'; 'items -Id' and 'answer-item' name it.
+function Get-Items {
+    if (-not (Test-Path -LiteralPath $ItemsHome)) { return @() }
+    $giOut = @()
+    foreach ($giFile in @(Get-ChildItem -LiteralPath $ItemsHome -Filter 'I*.json' -File -ErrorAction SilentlyContinue)) {
+        if ($giFile.BaseName -notmatch '^I\d{4}$') { continue }
+        $giItem = $null
+        try { $giItem = Read-Json $giFile.FullName } catch { $giItem = $null }
+        if ($null -eq $giItem) { continue }
+        $giOut += $giItem
+    }
+    return @($giOut | Sort-Object -Property id)
+}
+
+# One more than the highest id present. Called only under the item store's lock, so two sends cannot
+# take one id.
+function Next-ItemId {
+    $niMax = 0
+    if (Test-Path -LiteralPath $ItemsHome) {
+        foreach ($niFile in @(Get-ChildItem -LiteralPath $ItemsHome -Filter 'I*.json' -File -ErrorAction SilentlyContinue)) {
+            if ($niFile.BaseName -match '^I(\d{4})$') { $niVal = [int]$Matches[1]; if ($niVal -gt $niMax) { $niMax = $niVal } }
+        }
+    }
+    return ('I{0:D4}' -f ($niMax + 1))
+}
+
+# One item file, read for 'items -Id' and 'answer-item': absent is 94, unparseable 96.
+function Read-ItemOrFail {
+    param([string]$RiId)
+    $riPath = Join-Path $ItemsHome "$RiId.json"
+    if (-not (Test-Path -LiteralPath $riPath)) { Fail 94 "Item '$RiId' does not exist on this machine. 'keel-state.ps1 items' lists the items sent from or to this project. Nothing was written." }
+    $riItem = $null
+    try { $riItem = Read-Json $riPath } catch { $riItem = $null }
+    if ($null -eq $riItem) { Fail 96 "Item '$RiId' did not parse to an object. The file at '$riPath' is empty, truncated or not JSON. Nothing was written." }
+    return $riItem
+}
+
+# status's two item blocks for one project, each printed only when non-zero (charter P16). An item is
+# not yet answered while its state is SENT.
+function Write-ItemLines {
+    param([string]$IlSlug)
+    $ilAll = @(Get-Items)
+    if ($ilAll.Count -eq 0) { return }
+    $ilIn  = @($ilAll | Where-Object { [string](Get-Prop $_ 'state' '') -eq 'SENT' -and [string](Get-Prop $_ 'to' '') -eq $IlSlug })
+    $ilOut = @($ilAll | Where-Object { [string](Get-Prop $_ 'state' '') -eq 'SENT' -and [string](Get-Prop $_ 'from' '') -eq $IlSlug })
+    if ($ilIn.Count -gt 0) {
+        Say "  $($ilIn.Count) item(s) received and not yet answered:"
+        foreach ($ilItem in $ilIn) { Say "    $($ilItem.id) from $(Get-Prop $ilItem 'from' '?'): $(Get-Prop $ilItem 'title' '')" }
+        Say '    Read: keel-state.ps1 items -Id <id>'
+    }
+    if ($ilOut.Count -gt 0) {
+        Say "  $($ilOut.Count) item(s) sent and not yet answered:"
+        foreach ($ilItem in $ilOut) { Say "    $($ilItem.id) to $(Get-Prop $ilItem 'to' '?'): $(Get-Prop $ilItem 'title' '')" }
+    }
+}
+
 # ===================================================================== main ==
 
 if ([string]::IsNullOrWhiteSpace($Command)) {
@@ -5085,6 +5190,7 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "              close  dispatch-open  dispatch-close"
     Write-Output "  Signals:    signal  signals  signals-target  signals-push  adopt-signal  judge-signal"
     Write-Output "              resolve-signal  signals-relink"
+    Write-Output "  Items:      send  answer-item  items"
     Write-Output ""
     Write-Output "  'revise-phase -Correction' appends a dated note to a DELIVERED phase; its scope stays."
     Write-Output "  'revise-goal -Id G<n> -Text <new wording> -Detail <why>' rewords a goal and keeps the wording"
@@ -5158,6 +5264,16 @@ if ([string]::IsNullOrWhiteSpace($Command)) {
     Write-Output "  There every phase has one owner (add-phase -Owner, default you; revise-phase -Owner while"
     Write-Output "  planned), and anyone else's work on it exits 88. 'hand-over -Phase X -To <person id>"
     Write-Output "  -Detail <why>' ends a started phase and creates its successor (Xb) for that person."
+    Write-Output ""
+    Write-Output "  Work for another project on this machine is SENT, never written in that project's files."
+    Write-Output "  'send -To <project> -Title <one line> -Detail <what and why> [-Phase X]', run in the sending"
+    Write-Output "  project, writes one item to ~/.keel/items/ and prints its id; -To is a project 'list' shows."
+    Write-Output "  The receiving project's status shows each item until it is answered there with"
+    Write-Output "  'answer-item -Id I<nnnn> -As accepted -Into <W<n>|W<n>.<p>>' (unfinished work, or delivered"
+    Write-Output "  work for an item already done; never abandoned work) or '-As declined -Detail <why>'."
+    Write-Output "  'items' lists the items sent from and to this project with their answers; 'items -Id' prints"
+    Write-Output "  one in full. Items stay on this machine: nothing commits or pushes them. A project with"
+    Write-Output "  quarantine on sends a REFERENCE only: -Detail on one line of at most $EvidenceRefMaxChars characters."
     exit 0
 }
 
@@ -5535,17 +5651,11 @@ switch ($Command) {
     $lsTotal   = 0
     $lsMissing = 0
     foreach ($d in $dirs) {
-        $sp = Join-Path $d.FullName 'state.json'
-        if (-not (Test-Path -LiteralPath $sp)) {
-            # A project that shares its progress keeps only scratch here, and the state.json it
-            # had, renamed by share-progress; that file still records where the project lives. A
-            # clone of a shared project that never exported from this machine has no such file
-            # and is not listed: nothing on this machine records it.
-            $lsShared = @(Get-ChildItem -LiteralPath $d.FullName -Filter 'state.json.shared-*' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc)
-            if ($lsShared.Count -eq 0) { continue }
-            $s = $null
-            try { $s = Read-Json $lsShared[$lsShared.Count - 1].FullName } catch { $s = $null }
-            if ($null -eq $s) { continue }
+        # Which folders are projects is Read-KnownProject's rule, the one 'send' uses too.
+        $lsKnown = Read-KnownProject $d.FullName
+        if ($null -eq $lsKnown) { continue }
+        if ($lsKnown.Shared) {
+            $s = $lsKnown.State
             $lsRoot = Get-Prop $s 'root' ''
             $lsTotal++
             $lsMark = ''
@@ -5556,7 +5666,7 @@ switch ($Command) {
             Write-Output ("{0,-22} shared: its progress is in its repo   {1}{2}" -f $s.project, $lsRoot, $lsMark)
             continue
         }
-        $s = Read-Json $sp
+        $s = $lsKnown.State
         $ph = @(Get-Phases $s)
         $delivered = @($ph | Where-Object { $_.stage -eq 'delivered' }).Count
         $lsRoot = Get-Prop $s 'root' ''
@@ -5764,7 +5874,8 @@ switch ($Command) {
     # A project with goals but nothing decomposed is a real session boundary - it is
     # where keel-plan-project ends - so the handoff reports here too, before the exit.
     # An ordered project goes on to its walk, which names 'plan W<n>' for a workstream with no phases.
-    if ($phases.Count -eq 0 -and -not $stOrdered) { Say '  No phases declared yet.'; Write-HandoffLine $proj $state; Write-UnpushedCommitsLine $proj $cfg; exit 0 }
+    # The item lines print here too: a project with no phases yet can still have been sent work.
+    if ($phases.Count -eq 0 -and -not $stOrdered) { Say '  No phases declared yet.'; Write-HandoffLine $proj $state; Write-UnpushedCommitsLine $proj $cfg; Write-ItemLines $proj.Slug; exit 0 }
 
     # The re-plan hold, in any project: the phases an open re-plan holds, and the later of two open
     # re-plans of one workstream, which only a merge makes. Neither is named as next.
@@ -6098,6 +6209,10 @@ switch ($Command) {
             Say "  $($open.Count) open signal(s) filed from this project and not yet triaged in keel; all pushed as GitHub issues."
         }
     }
+
+    # ---- items sent to and from this project and not yet answered (P16: only when non-zero)
+    # Beside the signal lines, the other store this machine keeps for every project.
+    Write-ItemLines $proj.Slug
 
     # ---- the advisor question ledger in full, scoped to one phase
     #
@@ -9175,6 +9290,206 @@ switch ($Command) {
         else {
             Say "  Issue #$issueNum is still OPEN on GitHub. Re-run with -CloseIssue to close it, or close it by hand."
         }
+    }
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+# Items - work one project sends another on this machine (see 'items' above main).
+'send' {
+    # The sender is the project the working directory resolves to (charter P20); the receiver is named,
+    # because nothing could derive it.
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $To 'To'
+    Require-Param $Title 'Title'
+    Require-Param $Detail 'Detail'
+    if ($Title -match "[`r`n]" -or $Title.Trim().Length -gt $ItemTitleMaxChars) {
+        Fail 90 "-Title must be one line of 1 to $ItemTitleMaxChars characters: it is what the receiving project's status shows. The whole of the work goes in -Detail. Nothing was written."
+    }
+    $snTitle = $Title.Trim()
+    $snTo = $To.Trim()
+    if ($snTo -eq $proj.Slug) {
+        Fail 90 "-To '$snTo' is this project. An item carries work from one project to another; work for this project is planned here, with add-workstream or add-phase. Nothing was written."
+    }
+    $snReceiver = Get-KnownProjectName $snTo
+    if ($null -eq $snReceiver) {
+        Fail 91 "No project '$snTo' is known on this machine: the projects home holds no state.json and no state.json.shared-* for it. 'keel-state.ps1 list' prints the projects this machine knows, and -To takes one of their names. Nothing was written."
+    }
+    $snPhase = $null
+    if (-not [string]::IsNullOrWhiteSpace($Phase)) {
+        Assert-PhaseId $Phase
+        $snState = Read-State $proj.Slug
+        [void](Get-PhaseOrFail $snState $Phase)
+        $snPhase = $Phase
+    }
+
+    # A quarantined project sends a REFERENCE, as its signal evidence is: the receiving project may
+    # copy an item's text into its tracked files (charter P23).
+    $snCfg = Read-ProjectConfig $proj.ConfigPath
+    if (Test-Quarantine $snCfg) {
+        $snMulti = ($Detail -match "`n") -or ($Detail -match "`r")
+        if ($snMulti -or $Detail.Length -gt $EvidenceRefMaxChars) {
+            Fail 97 ("Project '$($proj.Slug)' has quarantine on, so an item's detail must be a REFERENCE, not content: a local path plus a short description, on one line, at most $EvidenceRefMaxChars characters. You supplied $($Detail.Length) characters" + $(if ($snMulti) { ' across multiple lines' } else { '' }) + ". The receiving project may copy an item's text into its tracked files (charter P23). Nothing was written.")
+        }
+    }
+
+    # Under the store's lock from the id to the write, so two sends at once cannot take one id. The
+    # record is written to a temporary name the listing never reads, then moved onto its id, so no
+    # reader meets a half-written item.
+    Enter-WriteLock $ItemsHome 'the item store'
+    Ensure-Dir $ItemsHome | Out-Null
+    $snId = Next-ItemId
+    $snItem = [pscustomobject]@{
+        id          = $snId
+        from        = $proj.Slug
+        fromPhase   = $snPhase
+        to          = $snReceiver
+        title       = $snTitle
+        detail      = $Detail
+        created     = (Now)
+        keelVersion = (Get-KeelVersion)
+        state       = 'SENT'
+        answeredAt  = $null
+        into        = $null
+        reason      = $null
+    }
+    $snPath = Join-Path $ItemsHome "$snId.json"
+    $snTmp = Join-Path $ItemsHome ('.new-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    Write-Json $snTmp $snItem
+    try { [System.IO.File]::Move($snTmp, $snPath) }
+    catch [System.IO.IOException] {
+        Remove-Item -LiteralPath $snTmp -Force -ErrorAction SilentlyContinue
+        Fail 89 "Item id $snId was taken by another command while this one held the item store's lock, which a copy of keel without that lock can do. $(Get-WrittenNote) Re-run the command."
+    }
+    $script:WrittenList.Add("$snId.json")
+    Say "Sent item $snId to '$snReceiver': $snTitle"
+    Say "  It is in this machine's item store; nothing was written in either project. '$snReceiver' sees it in its status until it answers it there with answer-item, and 'items' here shows the answer."
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+'answer-item' {
+    # Run in the receiving project. Accepting names the plan item that now carries the work, which the
+    # receiver registers with the verbs that exist first, so the item lands in its order through them;
+    # nothing is created here. Declining needs the reason the sender will read.
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    Require-Param $Id 'Id'
+    if ($Id -notmatch '^I\d{4}$') { Fail 90 "-Id '$Id' is not an item id. Expected I<nnnn>, e.g. I0001. Nothing was written." }
+    Require-Param $As 'As'
+    Assert-Enum $As @('accepted', 'declined') 'As'
+    $aiAs = $As.ToLowerInvariant()
+    $aiInto = $null
+    if ($aiAs -eq 'accepted') {
+        if ([string]::IsNullOrWhiteSpace($Into)) {
+            Fail 90 "-Into is required to accept an item: the workstream (W<n>) or phase (W<n>.<p>) in this project that now carries it. Register new work with add-workstream or add-phase first. Nothing was written."
+        }
+        $aiInto = $Into.Trim()
+        if ($aiInto -notmatch '^W\d+$' -and $aiInto -notmatch '^W\d+\.\d+[a-z]?$') {
+            Fail 90 "-Into '$aiInto' is not a workstream or phase id. Expected W<n> or W<n>.<p>, e.g. W4 or W4.2. Nothing was written."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Detail)) {
+            Fail 90 "-Detail is the reason an item is declined. An accepted item records where it landed, with -Into: drop -Detail. Nothing was written."
+        }
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($Into)) {
+            Fail 90 "-Into names where an accepted item lands; a declined item lands nowhere. Drop -Into. Nothing was written."
+        }
+        if ([string]::IsNullOrWhiteSpace($Detail)) {
+            Fail 95 "-Detail is required to decline an item: the reason is what the sending project reads in 'items'. Nothing was written."
+        }
+    }
+
+    Enter-WriteLock $ItemsHome 'the item store'
+    $aiItem = Read-ItemOrFail $Id
+    $aiPath = Join-Path $ItemsHome "$Id.json"
+    Save-ReadSha $aiPath
+    $aiTo = [string](Get-Prop $aiItem 'to' '')
+    if ($aiTo -ne $proj.Slug) {
+        Fail 90 "Item '$Id' was sent to '$aiTo', not to this project '$($proj.Slug)'. It is answered in '$aiTo', from that project's folder. Nothing was written."
+    }
+    $aiState = [string](Get-Prop $aiItem 'state' '')
+    if ($aiState -ne 'SENT') {
+        $aiWas = if ($aiState -eq 'ACCEPTED') { "into $(Get-Prop $aiItem 'into' '?')" } else { "with the reason: $(Get-Prop $aiItem 'reason' '')" }
+        Fail 90 "Item '$Id' is already $aiState $aiWas, on $(Get-Prop $aiItem 'answeredAt' '?'). An item is answered once. Nothing was written."
+    }
+
+    if ($aiAs -eq 'accepted') {
+        # D13: unfinished work, so the item is in the order, or delivered work, for an item that turns
+        # out to be already done. Abandoned work, and a phase handed over, land in no order.
+        $aiStateObj = Read-State $proj.Slug
+        if ($aiInto -match '^W\d+$') {
+            $aiNode = Find-Node $aiStateObj $aiInto
+            if ($null -eq $aiNode -or $aiNode.role -ne 'workstream') {
+                Fail 94 "-Into '$aiInto' names no workstream in this project's state. Register it with add-workstream first, or name one that exists. Nothing was written."
+            }
+            if ([string](Get-Prop $aiNode 'status' '') -eq 'ABANDONED') {
+                Fail 90 "-Into '$aiInto' is ABANDONED, so an item accepted into it would land in no order. Accept it into unfinished work, or decline it. Nothing was written."
+            }
+        }
+        else {
+            $aiPh = Find-Phase $aiStateObj $aiInto
+            if ($null -eq $aiPh) {
+                Fail 94 "-Into '$aiInto' names no phase in this project's state. Register it with add-phase first, or name one that exists. Nothing was written."
+            }
+            $aiStage = [string](Get-Prop $aiPh 'stage' '')
+            $aiWsNode = Find-Node $aiStateObj ([string](Get-Prop $aiPh 'ws' ''))
+            $aiWsAbandoned = ($null -ne $aiWsNode -and [string](Get-Prop $aiWsNode 'status' '') -eq 'ABANDONED')
+            if ($aiStage -eq 'abandoned' -or $aiWsAbandoned) {
+                Fail 90 "-Into '$aiInto' is abandoned$(if ($aiWsAbandoned) { ', under the ABANDONED workstream ' + $aiWsNode.id } else { '' }), so an item accepted into it would land in no order. Accept it into unfinished work, or decline it. Nothing was written."
+            }
+            if ($aiStage -eq 'handed-over') {
+                $aiSucc = [string](Get-Prop $aiPh 'handedOverTo' '?')
+                Fail 90 "-Into '$aiInto' was handed over and is finished: $aiSucc continues it. Accept the item into $aiSucc. Nothing was written."
+            }
+        }
+        Set-Prop $aiItem 'state' 'ACCEPTED'
+        Set-Prop $aiItem 'into' $aiInto
+    }
+    else {
+        Set-Prop $aiItem 'state' 'DECLINED'
+        Set-Prop $aiItem 'reason' $Detail
+    }
+    Set-Prop $aiItem 'answeredAt' (Now)
+    Write-GuardedJson $aiPath $aiItem
+    $aiFrom = [string](Get-Prop $aiItem 'from' '?')
+    if ($aiAs -eq 'accepted') { Say "Item $Id from '$aiFrom' ACCEPTED into $aiInto." }
+    else { Say "Item $Id from '$aiFrom' DECLINED." }
+    Say "  '$aiFrom' reads the answer with 'items'; its status stops showing the item."
+    exit 0
+}
+
+# --------------------------------------------------------------------------- #
+'items' {
+    $proj = Resolve-ProjectOrFail -StartPath $Path
+    if (-not [string]::IsNullOrWhiteSpace($Id)) {
+        if ($Id -notmatch '^I\d{4}$') { Fail 90 "-Id '$Id' is not an item id. Expected I<nnnn>, e.g. I0001." }
+        $itItem = Read-ItemOrFail $Id
+        $itPhaseText = ''
+        if ($null -ne (Get-Prop $itItem 'fromPhase' $null)) { $itPhaseText = " (phase $(Get-Prop $itItem 'fromPhase' ''))" }
+        Say "$($itItem.id)  $(Get-Prop $itItem 'state' '?')"
+        Say "  from:     $(Get-Prop $itItem 'from' '?')$itPhaseText"
+        Say "  to:       $(Get-Prop $itItem 'to' '?')"
+        Say "  title:    $(Get-Prop $itItem 'title' '')"
+        Say "  sent:     $(Get-Prop $itItem 'created' '?') under keel $(Get-Prop $itItem 'keelVersion' '?')"
+        $itStateText = [string](Get-Prop $itItem 'state' '')
+        if ($itStateText -eq 'ACCEPTED') { Say "  answered: $(Get-Prop $itItem 'answeredAt' '?'), accepted into $(Get-Prop $itItem 'into' '?')" }
+        elseif ($itStateText -eq 'DECLINED') { Say "  answered: $(Get-Prop $itItem 'answeredAt' '?'), declined: $(Get-Prop $itItem 'reason' '')" }
+        else { Say "  answered: not yet - answer it in '$(Get-Prop $itItem 'to' '?')' with answer-item" }
+        Say '  detail:'
+        foreach ($itLine in @(([string](Get-Prop $itItem 'detail' '')) -split "`r?`n")) { Write-Output "    $itLine" }
+        exit 0
+    }
+    $itMine = @(@(Get-Items) | Where-Object { [string](Get-Prop $_ 'from' '') -eq $proj.Slug -or [string](Get-Prop $_ 'to' '') -eq $proj.Slug } | Sort-Object -Property id -Descending)
+    if ($itMine.Count -eq 0) { Say "No items sent from or to '$($proj.Slug)' on this machine."; exit 0 }
+    Say "Items sent from or to '$($proj.Slug)', newest first:"
+    foreach ($itItem in $itMine) {
+        $itWay = if ([string](Get-Prop $itItem 'from' '') -eq $proj.Slug) { "to $(Get-Prop $itItem 'to' '?')" } else { "from $(Get-Prop $itItem 'from' '?')" }
+        $itAnswer = ''
+        $itSt = [string](Get-Prop $itItem 'state' '')
+        if ($itSt -eq 'ACCEPTED') { $itAnswer = "  into $(Get-Prop $itItem 'into' '?')" }
+        elseif ($itSt -eq 'DECLINED') { $itAnswer = '  reason: ' + (([string](Get-Prop $itItem 'reason' '')) -replace '\s+', ' ').Trim() }
+        Say ("  {0}  {1,-24} {2,-9} {3}{4}" -f $itItem.id, $itWay, $itSt, (Get-Prop $itItem 'title' ''), $itAnswer)
     }
     exit 0
 }
