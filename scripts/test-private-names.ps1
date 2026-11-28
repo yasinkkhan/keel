@@ -23,13 +23,34 @@
         entry matches anywhere, any case
       - a binary file is skipped; the same bytes without the NUL are not
       - an entry the check cannot pass to git is a problem, never a silent skip
+      - a records path is still read: an entry in plan/ refuses with keel.json in the index
+        as it does with none, at both gates; the same file clean passes
+      - a file whose own name holds an accented letter is read: an entry in it refuses and
+        the same file clean passes
+
+    It also covers section 25, the user-path check, which shares this scratch repository
+    and its bare remote. Every USERPATH row, controls and harness included, also fails if
+    its joined output holds any of the fixture names:
+
+      - a user folder path naming the fixture user refuses, naming file and line, in a
+        records file, a script, a progress file and a patch kept byte for byte, at both
+        gates; the same file without it passes
+      - the JSON-escaped, POSIX-drive and folder-name spellings each refuse, and so do a
+        path straight after a JSON line-break escape and a POSIX path inside a longer one
+      - the placeholder the documents use, its escaped elided form and %USERPROFILE% pass
+      - a path holding one refuses at both gates, printed masked; a clean name passes; a
+        name holding a space, or an accented letter, is masked whole
+      - a user name beginning with an accented letter refuses, and a file whose own name
+        holds an accented letter is read
+      - at push, an unpushed commit message holding one refuses; amended away it passes
 
     HOW IT REACHES THE CHECK ALONE. Every other validator section fails in a scratch
     repository, so the suite copies the validator into <scratch>\repo\scripts\ (untracked,
     so neither scan reads it) and runs that copy with -PrivateNamesOnly, which runs section
-    16 and the verdict only. -AgainstValidator <path> runs the same cases against another
-    copy - the way to show the suite can fail: point it at a copy whose matcher never
-    matches and the case rows must fail.
+    16 and the verdict only, or with -UserPathsOnly, which runs section 25 and the verdict
+    only. -AgainstValidator <path> runs the same cases against another copy - the way to
+    show the suite can fail: point it at a copy whose matcher never matches and the case
+    rows must fail.
 
     ISOLATION, VERIFIED BEFORE ANYTHING IS WRITTEN. The scratch root must resolve inside
     the system temp directory. USERPROFILE is overridden for each child only, so the child
@@ -96,7 +117,7 @@ function Invoke-PnGit {
 }
 
 function Invoke-PnCheck {
-    param([string]$PnMode)
+    param([string]$PnMode, [string]$PnOnly = '-PrivateNamesOnly')
     $PnPrevProfile = $env:USERPROFILE
     $env:USERPROFILE = $script:PnHome
     $PnPrev = $ErrorActionPreference
@@ -104,7 +125,7 @@ function Invoke-PnCheck {
     $PnLines = @()
     $PnCode = 0
     try {
-        $PnLines = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:PnCopy $PnMode -PrivateNamesOnly 2>&1 |
+        $PnLines = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:PnCopy $PnMode $PnOnly 2>&1 |
                    ForEach-Object { $_.ToString() }
         $PnCode = $LASTEXITCODE
     }
@@ -128,7 +149,10 @@ function Set-PnList {
 
 function Set-PnFile {
     param([string]$PnName, [string]$PnContent)
-    [System.IO.File]::WriteAllText((Join-Path $script:PnRepo $PnName), $PnContent, (New-Object System.Text.UTF8Encoding($false)))
+    $PnFull = Join-Path $script:PnRepo $PnName
+    $PnDir = Split-Path -Parent $PnFull
+    if (-not (Test-Path -LiteralPath $PnDir)) { New-Item -ItemType Directory -Path $PnDir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($PnFull, $PnContent, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Test-PnHas {
@@ -349,6 +373,262 @@ function Invoke-Cases {
     Set-PnList @('# usable', ('bad' + 'entry'))
     $PnR = Invoke-PnCheck '-CommitGate'
     Add-Result 'UNUSABLE-control-same-entry-without-quote-passes' ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+
+    Invoke-RecordsReadCases $PnMixed $PnTerm $PnMain
+    Invoke-UserPathCases
+}
+
+# ---------------------------------------------------------------------------
+# RECORDS: section 16 still reads the records paths while the index holds keel.json
+# ---------------------------------------------------------------------------
+function Invoke-RecordsReadCases {
+    param([string]$PnHit, [string]$PnPlain, [string[]]$PnListLines)
+    Set-PnList $PnListLines
+    $PnKeel = "{`n}`n"
+    $PnDirty = "line one`nhas $PnHit here`n"
+    $PnClean = "line one`nclean here`n"
+
+    Set-PnFile 'keel.json' $PnKeel
+    Set-PnFile 'plan/x.md' $PnDirty
+    Invoke-PnGit @('add', '--', 'keel.json', 'plan/x.md')
+    $PnR = Invoke-PnCheck '-CommitGate'
+    $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match 'plan/x\.md line 2 ') -and (-not (Test-PnHas $PnR.Text $PnPlain))
+    Add-Result 'RECORDS-staged-plan-entry-refused-with-keel-json' $PnOk `
+               "exit $($PnR.Code) - wanted non-zero naming plan/x.md line 2, keel.json staged, and the entry absent"
+
+    Invoke-PnGit @('rm', '-q', '--cached', '--', 'keel.json')
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo 'keel.json') -Force
+    $PnR = Invoke-PnCheck '-CommitGate'
+    Add-Result 'RECORDS-staged-plan-entry-refused-without-keel-json' (($PnR.Code -ne 0) -and ($PnR.Text -match 'plan/x\.md line 2 ')) `
+               "exit $($PnR.Code) - wanted non-zero naming plan/x.md line 2, no keel.json"
+
+    Set-PnFile 'keel.json' $PnKeel
+    Set-PnFile 'plan/x.md' $PnClean
+    Invoke-PnGit @('add', '--', 'keel.json', 'plan/x.md')
+    $PnR = Invoke-PnCheck '-CommitGate'
+    Add-Result 'RECORDS-control-staged-plan-clean-passes' ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0 with keel.json and a clean plan/x.md staged"
+
+    Invoke-PnGit @('commit', '-q', '-m', 'records')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+    Set-PnFile 'plan/x.md' $PnDirty
+    $PnR = Invoke-PnCheck '-Strict'
+    Add-Result 'RECORDS-strict-plan-entry-refused-with-keel-json' (($PnR.Code -ne 0) -and ($PnR.Text -match 'plan/x\.md line 2 ')) `
+               "exit $($PnR.Code) - wanted non-zero naming plan/x.md line 2, keel.json tracked"
+    Invoke-PnGit @('checkout', '-q', '--', 'plan/x.md')
+    $PnR = Invoke-PnCheck '-Strict'
+    Add-Result 'RECORDS-control-strict-plan-reverted-passes' ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+
+    Invoke-PnGit @('rm', '-q', '--', 'keel.json')
+    Invoke-PnGit @('commit', '-q', '-m', 'no keel.json')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+    Set-PnFile 'plan/x.md' $PnDirty
+    $PnR = Invoke-PnCheck '-Strict'
+    Add-Result 'RECORDS-strict-plan-entry-refused-without-keel-json' (($PnR.Code -ne 0) -and ($PnR.Text -match 'plan/x\.md line 2 ')) `
+               "exit $($PnR.Code) - wanted non-zero naming plan/x.md line 2, no keel.json tracked"
+    Invoke-PnGit @('checkout', '-q', '--', 'plan/x.md')
+
+    # --- a file whose own name holds an accented letter is read, not skipped -----------
+    # git quotes such a path by default, and a quoted name given back to git grep reads
+    # nothing. Assembled so this file stays ASCII.
+    $PnAccent = 'caf' + [string][char]0xE9 + '-notes.txt'
+    Set-PnFile $PnAccent $PnDirty
+    Invoke-PnGit @('add', '--', $PnAccent)
+    $PnR = Invoke-PnCheck '-CommitGate'
+    Add-Result 'ACCENT-staged-entry-in-accented-name-refused' (($PnR.Code -ne 0) -and ($PnR.Text -match 'line 2 holds the entry on list line') -and
+                                                              ($PnR.Text -match '1 staged path\(s\), 1 read as text')) `
+               "exit $($PnR.Code) - wanted non-zero, the file read as text and its line 2 refused"
+    Set-PnFile $PnAccent $PnClean
+    Invoke-PnGit @('add', '--', $PnAccent)
+    $PnR = Invoke-PnCheck '-CommitGate'
+    Add-Result 'ACCENT-control-same-file-clean-passes' (($PnR.Code -eq 0) -and ($PnR.Text -match '1 staged path\(s\), 1 read as text')) `
+               "exit $($PnR.Code) - wanted 0 with the file read as text"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', $PnAccent)
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo $PnAccent) -Force
+}
+
+# ---------------------------------------------------------------------------
+# USERPATH: section 25, run alone with -UserPathsOnly
+# ---------------------------------------------------------------------------
+# The fixture names are assembled here, and so is every refused form, so that this file's
+# own text holds none: the check reads every tracked file.
+#
+# EVERY USERPATH ROW, CONTROLS AND HARNESS INCLUDED, also requires that its joined output
+# holds no fixture name nor either part of the spaced one: Add-UpRow adds that to the row's
+# own condition, so a row cannot be written without it.
+$script:UpNames = @()
+function Add-UpRow {
+    param([object]$UpResult, [string]$UpRow, [bool]$UpOk, [string]$UpWhy)
+    $UpClean = $true
+    foreach ($UpN in $script:UpNames) { if (Test-PnHas $UpResult.Text $UpN) { $UpClean = $false } }
+    Add-Result $UpRow ($UpOk -and $UpClean) ($UpWhy + '; and no fixture name in the output')
+}
+
+function Invoke-UserPathCases {
+    $UpName   = 'qz' + 'vperson'
+    $UpFirst  = 'qz' + 'jane'
+    $UpLast   = 'qz' + 'doe'
+    $UpTail   = 'qz' + 'lise'
+    $UpAccented = [string][char]0xC9 + $UpTail
+    $script:UpNames = @($UpName, $UpFirst, $UpLast, $UpTail)
+    $UpDrive  = 'C:\Users\' + $UpName + '\work'
+    $UpJson   = 'C:\\Users\\' + $UpName + '\\work'
+    $UpPosix  = '/c/Users/' + $UpName + '/work'
+    $UpFolder = 'c--Users-' + $UpName + '-Projects'
+    $UpOnly   = '-UserPathsOnly'
+
+    # A base the remote holds: patches kept byte for byte, and keel.json, so the records
+    # paths below are records paths.
+    Set-PnFile '.gitattributes' "*.patch -text`n"
+    Set-PnFile 'keel.json' "{`n}`n"
+    Invoke-PnGit @('add', '--', '.gitattributes', 'keel.json')
+    Invoke-PnGit @('commit', '-q', '-m', 'user path base')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+
+    # --- harness: the mode runs and prints its ran line ---
+    Set-PnFile 'up-harness.txt' "clean`n"
+    Invoke-PnGit @('add', '--', 'up-harness.txt')
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-HARNESS-mode-runs' (($PnR.Code -eq 0) -and ($PnR.Text -match 'user paths: 1 staged path')) `
+               "exit $($PnR.Code), wanted 0 and the user-path ran line for 1 staged path"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', 'up-harness.txt')
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo 'up-harness.txt') -Force
+
+    # --- contents, at both gates, in records and product files and a patch ---
+    foreach ($UpCase in @(@{ Row = 'plan';     Path = 'plan/x.md';       Nl = "`n";   Records = 1 },
+                          @{ Row = 'script';   Path = 'scripts/x.ps1';   Nl = "`r`n"; Records = 0 },
+                          @{ Row = 'progress'; Path = 'progress/x.json'; Nl = "`n";   Records = 1 },
+                          @{ Row = 'patch';    Path = 'progress/phases/W1.1/artifacts/changes-keel.patch'; Nl = "`r`n"; Records = 1 })) {
+        $UpAt = '(^|\s)' + [regex]::Escape($UpCase.Path) + ' line 2 '
+        $UpDirty = "line one$($UpCase.Nl)+see $UpDrive here$($UpCase.Nl)"
+        $UpClean = "line one$($UpCase.Nl)+see no folder here$($UpCase.Nl)"
+
+        Set-PnFile $UpCase.Path $UpDirty
+        Invoke-PnGit @('add', '--', $UpCase.Path)
+        $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+        $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match $UpAt) -and (-not (Test-PnHas $PnR.Text $UpName)) -and
+                ($PnR.Text -match ", $($UpCase.Records) records path\(s\) read, 1 line\(s\) or path\(s\) refused")
+        Add-UpRow $PnR "USERPATH-staged-$($UpCase.Row)-refused" $PnOk `
+                   "exit $($PnR.Code) - wanted non-zero naming $($UpCase.Path) line 2, $($UpCase.Records) records path(s) read, 1 refused, and the name absent"
+
+        Set-PnFile $UpCase.Path $UpClean
+        Invoke-PnGit @('add', '--', $UpCase.Path)
+        $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+        Add-UpRow $PnR "USERPATH-control-staged-$($UpCase.Row)-clean-passes" ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+
+        Invoke-PnGit @('commit', '-q', '-m', 'clean file')
+        Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+        Set-PnFile $UpCase.Path $UpDirty
+        $PnR = Invoke-PnCheck '-Strict' $UpOnly
+        $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match $UpAt) -and (-not (Test-PnHas $PnR.Text $UpName))
+        Add-UpRow $PnR "USERPATH-strict-$($UpCase.Row)-refused" $PnOk `
+                   "exit $($PnR.Code) - wanted non-zero naming $($UpCase.Path) line 2 and the name absent"
+        Invoke-PnGit @('checkout', '-q', '--', $UpCase.Path)
+        $PnR = Invoke-PnCheck '-Strict' $UpOnly
+        Add-UpRow $PnR "USERPATH-control-strict-$($UpCase.Row)-reverted-passes" ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+    }
+
+    # --- the other spellings, each on its own ---
+    # The last two are glued to what comes before them: a path that starts a line inside a
+    # JSON string follows the line-break escape, and a POSIX path can sit inside a longer one.
+    foreach ($UpForm in @(@{ Row = 'json-escaped';             Text = $UpJson },
+                          @{ Row = 'posix-drive';              Text = $UpPosix },
+                          @{ Row = 'folder-name';              Text = $UpFolder },
+                          @{ Row = 'json-after-line-break';    Text = ('"line\nC:\\Users\\' + $UpName + '\\work"') },
+                          @{ Row = 'posix-inside-longer-path'; Text = ('/mnt/c/Users/' + $UpName + '/work') },
+                          @{ Row = 'name-with-accented-first-letter'; Text = ('C:\Users\' + $UpAccented + '\work') })) {
+        Set-PnFile 'forms.txt' "see $($UpForm.Text) here`n"
+        Invoke-PnGit @('add', '--', 'forms.txt')
+        $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+        $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match 'forms\.txt line 1 ') -and (-not (Test-PnHas $PnR.Text $UpName))
+        Add-UpRow $PnR "USERPATH-staged-$($UpForm.Row)-refused" $PnOk "exit $($PnR.Code) - wanted non-zero naming forms.txt line 1 and the name absent"
+        Invoke-PnGit @('rm', '-q', '--cached', '--', 'forms.txt')
+        Remove-Item -LiteralPath (Join-Path $script:PnRepo 'forms.txt') -Force
+    }
+
+    # --- the placeholders the documents use pass, at both gates ---
+    $UpPlaceholders = 'usually C:\Users\<your user name>, escaped as C:\\Users\\..., or %USERPROFILE%'
+    Set-PnFile 'placeholders.md' "# where things are`n$UpPlaceholders`n"
+    Invoke-PnGit @('add', '--', 'placeholders.md')
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-control-staged-placeholders-pass' (($PnR.Code -eq 0) -and ($PnR.Text -match ', 0 line\(s\) or path\(s\) refused')) `
+               "exit $($PnR.Code), wanted 0 and 0 refused"
+    Invoke-PnGit @('commit', '-q', '-m', 'placeholders')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+    $PnR = Invoke-PnCheck '-Strict' $UpOnly
+    Add-UpRow $PnR 'USERPATH-control-strict-placeholders-pass' (($PnR.Code -eq 0) -and ($PnR.Text -match ', 0 line\(s\) or path\(s\) refused')) `
+               "exit $($PnR.Code), wanted 0 and 0 refused"
+
+    # --- a path holding one, at both gates, printed masked ---
+    $UpBadPath = "keep/$UpFolder.md"
+    Set-PnFile $UpBadPath "clean content`n"
+    Invoke-PnGit @('add', '--', $UpBadPath)
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match 'a staged path holds a user folder path: keep/\*+\.?\*') -and (-not (Test-PnHas $PnR.Text $UpName))
+    Add-UpRow $PnR 'USERPATH-staged-path-refused-masked' $PnOk "exit $($PnR.Code) - wanted non-zero, the staged path refusal masked, and the name absent"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', $UpBadPath)
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo $UpBadPath) -Force
+
+    # A name holding a space is masked whole, both parts of it.
+    $UpSpacedPath = 'keep/c--Users-' + $UpFirst + ' ' + $UpLast + '-Projects.md'
+    Set-PnFile $UpSpacedPath "clean content`n"
+    Invoke-PnGit @('add', '--', $UpSpacedPath)
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-staged-path-with-a-space-masked-whole' (($PnR.Code -ne 0) -and ($PnR.Text -match 'a staged path holds a user folder path: keep/\*+\. The path is shown masked')) `
+              "exit $($PnR.Code) - wanted non-zero and the staged path refusal with the whole file name masked"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', $UpSpacedPath)
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo $UpSpacedPath) -Force
+
+    # A name holding an accented letter is masked whole too: git would quote it by default,
+    # and a mask over the quoted form stops at the first escape.
+    $UpAccentPath = 'keep/c--Users-' + $UpFirst + [string][char]0xEB + ' ' + $UpLast + '-Projects.md'
+    Set-PnFile $UpAccentPath "clean content`n"
+    Invoke-PnGit @('add', '--', $UpAccentPath)
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-staged-path-with-an-accent-masked-whole' (($PnR.Code -ne 0) -and ($PnR.Text -match 'a staged path holds a user folder path: keep/\*+\. The path is shown masked')) `
+              "exit $($PnR.Code) - wanted non-zero and the staged path refusal with the whole file name masked"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', $UpAccentPath)
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo $UpAccentPath) -Force
+
+    # A file whose own name holds an accented letter is read.
+    $UpAccentFile = 'keep/caf' + [string][char]0xE9 + '-notes.md'
+    Set-PnFile $UpAccentFile "line one`nsee $UpDrive here`n"
+    Invoke-PnGit @('add', '--', $UpAccentFile)
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-staged-content-of-accented-name-refused' (($PnR.Code -ne 0) -and ($PnR.Text -match '1 staged path\(s\), 1 read as text') -and
+                                                                       ($PnR.Text -match ', 1 line\(s\) or path\(s\) refused')) `
+              "exit $($PnR.Code) - wanted non-zero, the file read as text and 1 line refused"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', $UpAccentFile)
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo $UpAccentFile) -Force
+
+    Set-PnFile 'keep/clean.md' "clean content`n"
+    Invoke-PnGit @('add', '--', 'keep/clean.md')
+    $PnR = Invoke-PnCheck '-CommitGate' $UpOnly
+    Add-UpRow $PnR 'USERPATH-control-staged-clean-name-passes' ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+    Invoke-PnGit @('rm', '-q', '--cached', '--', 'keep/clean.md')
+    Remove-Item -LiteralPath (Join-Path $script:PnRepo 'keep/clean.md') -Force
+
+    Set-PnFile $UpBadPath "clean content`n"
+    Invoke-PnGit @('add', '--', $UpBadPath)
+    Invoke-PnGit @('commit', '-q', '-m', 'add a file')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+    $PnR = Invoke-PnCheck '-Strict' $UpOnly
+    $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match 'a tracked path holds a user folder path: keep/\*+') -and (-not (Test-PnHas $PnR.Text $UpName))
+    Add-UpRow $PnR 'USERPATH-strict-path-refused-masked' $PnOk "exit $($PnR.Code) - wanted non-zero, the tracked path refusal masked, and the name absent"
+    Invoke-PnGit @('mv', '--', $UpBadPath, 'keep/renamed.md')
+    Invoke-PnGit @('commit', '-q', '-m', 'rename a file')
+    Invoke-PnGit @('push', '-q', 'origin', 'HEAD:refs/heads/main')
+    $PnR = Invoke-PnCheck '-Strict' $UpOnly
+    Add-UpRow $PnR 'USERPATH-control-strict-path-renamed-passes' ($PnR.Code -eq 0) "exit $($PnR.Code), wanted 0"
+
+    # --- an unpushed commit message, at push ---
+    Invoke-PnGit @('commit', '-q', '--allow-empty', '-m', "copied from $UpDrive")
+    $PnR = Invoke-PnCheck '-Strict' $UpOnly
+    $PnOk = ($PnR.Code -ne 0) -and ($PnR.Text -match 'unpushed commit [0-9a-f]{7} holds a user folder path') -and (-not (Test-PnHas $PnR.Text $UpName))
+    Add-UpRow $PnR 'USERPATH-strict-unpushed-message-refused' $PnOk "exit $($PnR.Code) - wanted non-zero naming the unpushed commit and the name absent"
+    Invoke-PnGit @('commit', '-q', '--amend', '--allow-empty', '-m', 'copied from the user folder')
+    $PnR = Invoke-PnCheck '-Strict' $UpOnly
+    Add-UpRow $PnR 'USERPATH-control-strict-message-amended-passes' (($PnR.Code -eq 0) -and ($PnR.Text -match 'and 1 unpushed commit message')) `
+               "exit $($PnR.Code), wanted 0 with 1 unpushed commit message read"
 }
 
 # ---------------------------------------------------------------------------

@@ -17,3 +17,8 @@
 # cannot match the CR never reaches $, and every row would stop matching. Pin it, as the
 # other data formats above already are.
 *.txt  text eol=lf
+
+# A patch is a byte record of a diff and must keep its bytes. Under text=auto git strips
+# the carriage returns from a patch's blob, so a committed patch of a CRLF file no longer
+# matches the change it records. -text stores it exactly as written.
+*.patch -text

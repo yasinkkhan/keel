@@ -30,6 +30,17 @@
       - a single-digit workstream id passes and a two-digit one refuses; a letter right
         before a signal id stops the match and a space does not
       - a binary file is skipped; the same bytes without the NUL are not
+      - while the index holds a keel.json at the root, each records path (keel.json,
+        CHARTER.md, plan/, record/, reference/, progress/ and a declared docs root) holding
+        an id is left alone, staged and tracked; the same file refuses with no keel.json and
+        with one in the working tree only, and keel.json's own text refuses below the root
+      - with keel.json in the index, an id in a skill file, in the lookalikes plan.md,
+        planning/ and progress.md, and in a docs folder keel.json does not declare refuses
+      - a docs root that is a product folder, the repo root, empty, outside the repo or
+        inside plugins/ is a problem naming it, and an id in scripts/ still refuses; a
+        docs root of its own folder is no problem
+      - a file whose name holds an accented letter is matched by its own name: as a
+        record it is left alone, and as product it is read and its id refused
 
     A row's result carries the exit code and, where the check printed it, the number of
     lines or paths it refused. -List prints every row with that result, passing rows too.
@@ -440,6 +451,193 @@ function Invoke-Cases {
     Invoke-HiGit @('commit', '-q', '-m', 'rename a file')
     $HiR = Invoke-HiCheck '-Strict'
     Add-Result 'PATH-control-strict-renamed-passes' ($HiR.Code -eq 0) "exit $($HiR.Code), wanted 0"
+
+    Invoke-RecordsCases $HiPhase
+}
+
+# The fixture paths the records rows may leave untracked; git reset --hard keeps them.
+$script:HiRecordLeftovers = @('keel.json', 'CHARTER.md', 'plan', 'record', 'reference', 'progress', 'notes', 'sub',
+                              'plan.md', 'planning', 'progress.md', 'plugins/x', 'scripts/x.md')
+
+function Clear-HiRecords {
+    Invoke-HiGit @('reset', '-q', '--hard', 'records-base')
+    foreach ($HiLeft in $script:HiRecordLeftovers) {
+        $HiFull = Join-Path $script:HiRepo $HiLeft
+        if (Test-Path -LiteralPath $HiFull) { Remove-Item -LiteralPath $HiFull -Recurse -Force }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# RECORDS: while the index holds a keel.json, the records paths are left alone
+# ---------------------------------------------------------------------------
+# Every records path holding an id passes with keel.json staged or tracked, and refuses
+# with no keel.json or with one in the working tree only. keel.json itself is the one
+# exception to those two controls: it is the switch, so unstaged it is in neither gate's
+# file list; its control is the same text at sub/keel.json, which is not a records path.
+function Invoke-RecordsCases {
+    param([string]$HiId)
+    Invoke-HiGit @('tag', '-f', 'records-base')
+
+    $HiKeelNotes = "{`n  `"docs`": `"notes`"`n}`n"
+    $HiKeelPlain = "{`n}`n"
+    $HiKeelWithId = "{`n  `"note`": `"has $HiId here`",`n  `"docs`": `"notes`"`n}`n"
+    $HiRecText = "# record`nhas $HiId here`n"
+    $HiRecs = @(
+        @{ Row = 'keel-json'; Path = 'keel.json' },
+        @{ Row = 'charter';   Path = 'CHARTER.md' },
+        @{ Row = 'plan';      Path = 'plan/x.md' },
+        @{ Row = 'record';    Path = 'record/x.md' },
+        @{ Row = 'reference'; Path = 'reference/x.md' },
+        @{ Row = 'progress';  Path = 'progress/x.json' },
+        @{ Row = 'docs-root'; Path = 'notes/x.md' }
+    )
+
+    foreach ($HiRec in $HiRecs) {
+        $HiIsKeel = ($HiRec.Path -eq 'keel.json')
+        $HiAt = '(^|\s)' + [regex]::Escape($HiRec.Path) + ' line 2 '
+        $HiAside = if ($HiIsKeel) { 1 } else { 2 }
+
+        # --- commit gate: the case ---
+        Clear-HiRecords
+        if ($HiIsKeel) { Set-HiFile 'keel.json' $HiKeelWithId; Invoke-HiGit @('add', '--', 'keel.json') }
+        else {
+            Set-HiFile 'keel.json' $HiKeelNotes
+            Set-HiFile $HiRec.Path $HiRecText
+            Invoke-HiGit @('add', '--', 'keel.json', $HiRec.Path)
+        }
+        $HiR = Invoke-HiCheck '-CommitGate'
+        Add-Result "RECORDS-staged-$($HiRec.Row)-left-alone" (($HiR.Code -eq 0) -and ($HiR.Text -match "history ids: 0 staged path\(s\) to read, $HiAside records path\(s\) left alone")) `
+                   "exit $($HiR.Code), wanted 0 and $HiAside records path(s) left alone"
+
+        if ($HiIsKeel) {
+            # --- the one control for keel.json: the same text below the root ---
+            Clear-HiRecords
+            Set-HiFile 'keel.json' $HiKeelNotes
+            Set-HiFile 'sub/keel.json' $HiKeelWithId
+            Invoke-HiGit @('add', '--', 'keel.json', 'sub/keel.json')
+            $HiR = Invoke-HiCheck '-CommitGate'
+            Add-Result 'RECORDS-control-staged-keel-json-below-root-refused' (($HiR.Code -ne 0) -and ($HiR.Text -match 'sub/keel\.json line 2 ')) `
+                       "exit $($HiR.Code), wanted non-zero naming sub/keel.json line 2"
+        }
+        else {
+            # --- control A: no keel.json at all ---
+            Clear-HiRecords
+            Set-HiFile $HiRec.Path $HiRecText
+            Invoke-HiGit @('add', '--', $HiRec.Path)
+            $HiR = Invoke-HiCheck '-CommitGate'
+            Add-Result "RECORDS-control-staged-$($HiRec.Row)-no-keel-json-refused" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiAt)) `
+                       "exit $($HiR.Code), wanted non-zero naming $($HiRec.Path) line 2"
+
+            # --- control B: keel.json in the working tree only ---
+            Clear-HiRecords
+            Set-HiFile 'keel.json' $HiKeelNotes
+            Set-HiFile $HiRec.Path $HiRecText
+            Invoke-HiGit @('add', '--', $HiRec.Path)
+            $HiR = Invoke-HiCheck '-CommitGate'
+            Add-Result "RECORDS-control-staged-$($HiRec.Row)-keel-json-unstaged-refused" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiAt)) `
+                       "exit $($HiR.Code), wanted non-zero naming $($HiRec.Path) line 2"
+        }
+
+        # --- push gate: the case ---
+        Clear-HiRecords
+        if ($HiIsKeel) { Set-HiFile 'keel.json' $HiKeelWithId; Invoke-HiGit @('add', '--', 'keel.json') }
+        else {
+            Set-HiFile 'keel.json' $HiKeelNotes
+            Set-HiFile $HiRec.Path $HiRecText
+            Invoke-HiGit @('add', '--', 'keel.json', $HiRec.Path)
+        }
+        Invoke-HiGit @('commit', '-q', '-m', 'records')
+        $HiR = Invoke-HiCheck '-Strict'
+        Add-Result "RECORDS-tracked-$($HiRec.Row)-left-alone" (($HiR.Code -eq 0) -and ($HiR.Text -match ", $HiAside records path\(s\) left alone")) `
+                   "exit $($HiR.Code), wanted 0 and $HiAside records path(s) left alone"
+
+        if ($HiIsKeel) {
+            Set-HiFile 'sub/keel.json' $HiKeelWithId
+            Invoke-HiGit @('add', '--', 'sub/keel.json')
+            Invoke-HiGit @('commit', '-q', '-m', 'below the root')
+            $HiR = Invoke-HiCheck '-Strict'
+            Add-Result 'RECORDS-control-tracked-keel-json-below-root-refused' (($HiR.Code -ne 0) -and ($HiR.Text -match 'sub/keel\.json line 2 ') -and
+                                                                               (-not ($HiR.Text -match '(^|\s)keel\.json line 2 '))) `
+                       "exit $($HiR.Code), wanted non-zero naming sub/keel.json line 2 and not the root keel.json"
+        }
+        else {
+            # --- control 1: keel.json out of the index, kept in the working tree ---
+            Invoke-HiGit @('rm', '-q', '--cached', '--', 'keel.json')
+            $HiR = Invoke-HiCheck '-Strict'
+            Add-Result "RECORDS-control-tracked-$($HiRec.Row)-keel-json-untracked-refused" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiAt)) `
+                       "exit $($HiR.Code), wanted non-zero naming $($HiRec.Path) line 2"
+
+            # --- control 2: no keel.json at all ---
+            Remove-HiFile 'keel.json'
+            $HiR = Invoke-HiCheck '-Strict'
+            Add-Result "RECORDS-control-tracked-$($HiRec.Row)-no-keel-json-refused" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiAt)) `
+                       "exit $($HiR.Code), wanted non-zero naming $($HiRec.Path) line 2"
+        }
+    }
+
+    # --- lookalikes, and a docs folder no keel.json declares, are product -------------
+    foreach ($HiLook in @(@{ Row = 'skill-file';           Path = 'plugins/x/SKILL.md'; Keel = $HiKeelNotes },
+                          @{ Row = 'plan-md';              Path = 'plan.md';            Keel = $HiKeelNotes },
+                          @{ Row = 'planning-folder';      Path = 'planning/x.md';      Keel = $HiKeelNotes },
+                          @{ Row = 'progress-md';          Path = 'progress.md';        Keel = $HiKeelNotes },
+                          @{ Row = 'docs-undeclared';      Path = 'docs/notes.md';      Keel = $HiKeelPlain },
+                          @{ Row = 'notes-undeclared';     Path = 'notes/x.md';         Keel = $HiKeelPlain })) {
+        Clear-HiRecords
+        Set-HiFile 'keel.json' $HiLook.Keel
+        Set-HiFile $HiLook.Path $HiRecText
+        Invoke-HiGit @('add', '--', 'keel.json', $HiLook.Path)
+        $HiR = Invoke-HiCheck '-CommitGate'
+        $HiAt = '(^|\s)' + [regex]::Escape($HiLook.Path) + ' line 2 '
+        Add-Result "RECORDS-product-$($HiLook.Row)-refused" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiAt) -and
+                                                              ($HiR.Text -match 'set aside from sections 4, 5, 6 and 18')) `
+                   "exit $($HiR.Code), wanted non-zero naming $($HiLook.Path) line 2, with keel.json in the index"
+    }
+
+    # --- a docs root that would set product code aside is a problem -------------------
+    foreach ($HiBar in @(@{ Row = 'scripts';      Docs = 'scripts' },
+                         @{ Row = 'repo-root';    Docs = '.' },
+                         @{ Row = 'empty';        Docs = '' },
+                         @{ Row = 'outside';      Docs = '../out' },
+                         @{ Row = 'inside-plugins'; Docs = 'plugins/x' })) {
+        Clear-HiRecords
+        Set-HiFile 'keel.json' "{`n  `"docs`": `"$($HiBar.Docs)`"`n}`n"
+        Set-HiFile 'scripts/x.md' $HiRecText
+        Invoke-HiGit @('add', '--', 'keel.json', 'scripts/x.md')
+        $HiR = Invoke-HiCheck '-CommitGate'
+        $HiNamed = "declares the docs root '" + [regex]::Escape($HiBar.Docs) + "'"
+        Add-Result "RECORDS-docs-root-$($HiBar.Row)-is-a-problem" (($HiR.Code -ne 0) -and ($HiR.Text -match $HiNamed) -and
+                                                                    ($HiR.Text -match 'scripts/x\.md line 2 ')) `
+                   "exit $($HiR.Code), wanted non-zero, the docs-root problem naming '$($HiBar.Docs)', and scripts/x.md line 2 refused"
+    }
+    Clear-HiRecords
+    Set-HiFile 'keel.json' $HiKeelNotes
+    Set-HiFile 'scripts/x.md' $HiRecText
+    Invoke-HiGit @('add', '--', 'keel.json', 'scripts/x.md')
+    $HiR = Invoke-HiCheck '-CommitGate'
+    Add-Result 'RECORDS-control-docs-root-notes-no-problem' (($HiR.Code -ne 0) -and ($HiR.Text -match 'scripts/x\.md line 2 ') -and
+                                                            (-not ($HiR.Text -match 'declares the docs root'))) `
+               "exit $($HiR.Code), wanted non-zero for the id in scripts/x.md and no docs-root problem"
+
+    # --- a name outside ASCII is the file's own name, not git's quoted form of it ------
+    # git quotes such a path by default; the check must still set it aside as a record,
+    # and still read it as product. Assembled so this file stays ASCII.
+    $HiAccent = 'caf' + [string][char]0xE9 + '.md'
+    Clear-HiRecords
+    Set-HiFile 'keel.json' $HiKeelNotes
+    Set-HiFile "record/$HiAccent" $HiRecText
+    Invoke-HiGit @('add', '--', 'keel.json', "record/$HiAccent")
+    $HiR = Invoke-HiCheck '-CommitGate'
+    Add-Result 'RECORDS-staged-accented-name-left-alone' (($HiR.Code -eq 0) -and ($HiR.Text -match 'history ids: 0 staged path\(s\) to read, 2 records path\(s\) left alone')) `
+               "exit $($HiR.Code), wanted 0 and 2 records path(s) left alone for a record whose name holds an accented letter"
+    Clear-HiRecords
+    Set-HiFile "scripts/$HiAccent" $HiRecText
+    Invoke-HiGit @('add', '--', "scripts/$HiAccent")
+    $HiR = Invoke-HiCheck '-CommitGate'
+    $HiN = Get-HiRefusedCount $HiR.Text
+    Add-Result 'RECORDS-control-staged-accented-product-name-read-and-refused' (($HiR.Code -ne 0) -and ($HiN -eq 1) -and ($HiR.Text -match 'history ids: 1 staged path\(s\) in the repository, 1 read as text')) `
+               "exit $($HiR.Code), refused $HiN - wanted non-zero, the file read as text and its id refused"
+    Clear-HiRecords
+    Remove-HiFile "scripts/$HiAccent"
 }
 
 # ---------------------------------------------------------------------------

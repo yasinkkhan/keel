@@ -15,9 +15,11 @@
                          against a scratch repository. The hooks never pass it.
       -HistoryOnly       run section 18 and the verdict only; used by scripts/test-history-ids.ps1
                          against a scratch repository. The hooks never pass it.
+      -UserPathsOnly     run section 25 and the verdict only; used by scripts/test-private-names.ps1
+                         against a scratch repository. The hooks never pass it.
 #>
 
-param([switch]$CommitGate, [switch]$Strict, [switch]$PrivateNamesOnly, [switch]$HistoryOnly)
+param([switch]$CommitGate, [switch]$Strict, [switch]$PrivateNamesOnly, [switch]$HistoryOnly, [switch]$UserPathsOnly)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -139,6 +141,147 @@ function Get-IgnoredPathSet {
     return $set
 }
 
+# One git call, its output read as UTF-8 with paths written as they are. The records helper
+# and sections 16, 18 and 25 list, search and match paths through it.
+#
+# WHY. By default git prints a path holding a character outside ASCII in quotes, with that
+# character as octal escapes, and Windows PowerShell 5.1 decodes a native command's output
+# in the console's code page. Either way a check holds a name that is not the file's: git
+# grep given it back reads nothing, a pattern matched against it sees escapes, and a mask
+# applied to it stops at the first one. core.quotePath=false makes git print the name as
+# UTF-8 bytes, and the output encoding below decodes them as UTF-8, so the name a check
+# holds is the file's own and can be given back to git.
+#
+# The exit code goes to $script:GitTextCode rather than being returned, because a function
+# returns everything it emits. The caller re-wraps the lines in @(). The console encoding is
+# restored afterwards, and the try/catch around setting it keeps a host where that throws
+# running on its own code page rather than failing the check.
+$script:GitTextCode = 0
+function Invoke-GitText {
+    param([string[]]$GtArgs)
+    $gtPrior = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $gtEnc = $null
+    try { $gtEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { $gtEnc = $null }
+    $gtOut = @()
+    $gtCode = 128
+    try {
+        $gtOut = @(& git -C $RepoRoot -c core.quotePath=false @GtArgs 2>$null)
+        $gtCode = $LASTEXITCODE
+    }
+    catch { $gtCode = 128 }
+    finally {
+        if ($null -ne $gtEnc) { try { [Console]::OutputEncoding = $gtEnc } catch { } }
+        $ErrorActionPreference = $gtPrior
+    }
+    $script:GitTextCode = $gtCode
+    return $gtOut
+}
+
+# --- the records paths: a keel project kept at the top of this repo ---------
+#
+# A keel project keeps its records at the top of the folder holding its keel.json:
+# keel.json itself, CHARTER.md, plan/, record/, reference/, progress/ and the docs root
+# keel.json declares. When this repo holds such a project, those paths hold its plans,
+# delivery records and measurements, and the scripts a measurement was taken with. A
+# record is evidence, so the rules written for product code - ASCII-only scripts, no
+# direct writer of state, no variable named after a parameter, no record id - do not
+# apply to it: repairing a record to satisfy one of them would edit the evidence. So
+# sections 4, 5, 6 and 18 leave these paths alone. The checks that keep a private detail
+# out of what the repo publishes (16 and 25) read them, because those matter in every file
+# that is published; the line-terminator check (13) does not consult this list at all.
+#
+# ONLY GIT'S INDEX SWITCHES THIS ON. The records paths exist only while the index holds a
+# keel.json at the repo root, read with git show :keel.json. A keel.json that is only in
+# the working tree is in no commit, so it must not change what a commit is checked for. At
+# the push gate the index holds what is tracked, so one reading serves both gates.
+#
+# A DOCS ROOT THAT WOULD SET PRODUCT CODE ASIDE IS A PROBLEM, and is not set aside: one that
+# is empty, is the repo root, lies outside the repo, or is or sits inside plugins, scripts,
+# .claude, .claude-plugin or .githooks. The first folder of the declared root is compared
+# in any case, so a differently spelled product folder is barred too.
+#
+# A DECLARED COUPLING. The folders repeat the always-indexed roots of the project index
+# builder ($BaseRoots in plugins/keel-project/skills/keel-project-context/wrappers/keel-index.ps1:
+# CHARTER.md, plan, record and reference) and the folder the state wrapper keeps a shared
+# project's progress in (Get-ProgressDir in keel-state.ps1: progress). Change one, change
+# this list with it.
+#
+# A path is compared case-sensitively, so one spelled differently from the list is checked
+# rather than set aside, which is the safe direction. Neither function prints: each adds to
+# the $script: lists, and Test-RecordsPath returns only a bool.
+$script:RecordsReady   = $false
+$script:RecordsActive  = $false
+$script:RecordsDocs    = ''
+$script:RecordsFiles   = @('keel.json', 'CHARTER.md')
+$script:RecordsFolders = @('plan', 'record', 'reference', 'progress')
+$script:RecordsBarred  = @('plugins', 'scripts', '.claude', '.claude-plugin', '.githooks')
+
+function Initialize-RecordsPaths {
+    if ($script:RecordsReady) { return }
+    $script:RecordsReady = $true
+
+    $rpPrior = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $rpText = @()
+    $rpCode = 1
+    try {
+        $rpText = @(Invoke-GitText @('show', ':keel.json'))
+        $rpCode = $script:GitTextCode
+    }
+    catch { $rpCode = 1 }
+    $ErrorActionPreference = $rpPrior
+    if ($rpCode -ne 0) {
+        Ran 'records paths: none set aside - the index holds no keel.json'
+        return
+    }
+    $script:RecordsActive = $true
+
+    # An empty file parses to $null without throwing, so the null test is not redundant.
+    $rpJson = $null
+    try { $rpJson = ($rpText -join "`n") | ConvertFrom-Json } catch { $rpJson = $null }
+    $rpDocsNote = 'no docs root declared'
+    if ($null -eq $rpJson) {
+        Problem 'records paths: the keel.json in the index is empty or is not valid JSON, so no docs root was read. The other records paths are still set aside.'
+        $rpDocsNote = 'no docs root read'
+    }
+    elseif ($null -ne $rpJson.PSObject.Properties['docs'] -and $null -ne $rpJson.docs) {
+        $rpDeclared = [string]$rpJson.docs
+        $rpDocs = $rpDeclared.Trim().Replace([char]92, '/')
+        while ($rpDocs.StartsWith('./')) { $rpDocs = $rpDocs.Substring(2) }
+        $rpDocs = $rpDocs.TrimEnd('/')
+        $rpWhy = ''
+        if ($rpDeclared.Trim() -eq '') { $rpWhy = 'is empty' }
+        elseif ($rpDocs -eq '' -or $rpDocs -eq '.') { $rpWhy = 'is the repo root' }
+        elseif ($rpDocs.StartsWith('/') -or $rpDocs -match '^[A-Za-z]:' -or (@($rpDocs.Split('/')) -contains '..')) { $rpWhy = 'lies outside the repo' }
+        elseif ($script:RecordsBarred -contains $rpDocs.Split('/')[0]) { $rpWhy = 'is or sits inside a product folder' }
+        if ($rpWhy -ne '') {
+            Problem ("records paths: the keel.json in the index declares the docs root '{0}', which {1}, so it is not set aside. A docs root may not be empty, the repo root, outside the repo, or inside {2}." -f $rpDeclared, $rpWhy, ($script:RecordsBarred -join ', '))
+            $rpDocsNote = "the declared docs root '$rpDeclared' refused"
+        }
+        else {
+            $script:RecordsDocs = $rpDocs
+            $rpDocsNote = "the docs root $rpDocs/"
+        }
+    }
+    Ran ("records paths: keel.json, CHARTER.md, plan/, record/, reference/ and progress/, and {0} - set aside from sections 4, 5, 6 and 18 (the index holds keel.json)" -f $rpDocsNote)
+}
+
+function Test-RecordsPath {
+    param([string]$RpPath)
+    Initialize-RecordsPaths
+    if (-not $script:RecordsActive) { return $false }
+    $rpRel = $RpPath.Replace([char]92, '/')
+    foreach ($rpFile in $script:RecordsFiles) {
+        if ([string]::Equals($rpRel, $rpFile, [System.StringComparison]::Ordinal)) { return $true }
+    }
+    foreach ($rpDir in $script:RecordsFolders) {
+        if ($rpRel.StartsWith("$rpDir/", [System.StringComparison]::Ordinal)) { return $true }
+    }
+    if ($script:RecordsDocs -ne '' -and $rpRel.StartsWith("$($script:RecordsDocs)/", [System.StringComparison]::Ordinal)) { return $true }
+    return $false
+}
+
 Write-Output 'check-suite-docs'
 
 # --- 16. no private name in anything this repo carries ----------------------
@@ -242,12 +385,12 @@ function Invoke-PrivateNameCheck {
     $ErrorActionPreference = 'Continue'
     if ($CommitGate) {
         $pnScope = 'staged'
-        $pnPaths = @(& git -C $RepoRoot diff --cached --name-only --diff-filter=d 2>$null)
+        $pnPaths = @(Invoke-GitText @('diff', '--cached', '--name-only', '--diff-filter=d'))
     }
     else {
-        $pnPaths = @(& git -C $RepoRoot ls-files 2>$null)
+        $pnPaths = @(Invoke-GitText @('ls-files'))
     }
-    $pnListCode = $LASTEXITCODE
+    $pnListCode = $script:GitTextCode
     $ErrorActionPreference = $pnPrior
     if ($pnListCode -ne 0) {
         Problem "private names: git could not list the $pnScope files (exit $pnListCode), so no file was checked. Not a clean run."
@@ -271,27 +414,27 @@ function Invoke-PrivateNameCheck {
 
         # How many of these git reads as text: '^' matches any line, so a file is listed
         # unless it is binary or empty.
-        $pnCountArgs = @('-C', $RepoRoot, 'grep', '-I', '-l', '--no-color')
+        $pnCountArgs = @('grep', '-I', '-l', '--no-color')
         if ($CommitGate) { $pnCountArgs += '--cached' }
         $pnCountArgs += @('-e', '^', '--') + $pnBatch
         $pnPrior = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $pnListed = @(& git @pnCountArgs 2>$null)
-        $pnCountCode = $LASTEXITCODE
+        $pnListed = @(Invoke-GitText $pnCountArgs)
+        $pnCountCode = $script:GitTextCode
         $ErrorActionPreference = $pnPrior
         if ($pnCountCode -eq 0) { $pnTextFiles += $pnListed.Count }
         elseif ($pnCountCode -ne 1) { Problem "private names: git grep could not count the text files (exit $pnCountCode). Not a clean run." }
 
         foreach ($pnEntry in $pnEntries) {
-            $pnArgs = @('-C', $RepoRoot, 'grep', '-I', '-n', '--no-color')
+            $pnArgs = @('grep', '-I', '-n', '--no-color')
             if ($CommitGate) { $pnArgs += '--cached' }
             if ($pnEntry.Word) { $pnArgs += '-w' } else { $pnArgs += '-i' }
             $pnArgs += @('-F', '-e', $pnEntry.Text, '--') + $pnBatch
 
             $pnPrior = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
-            $pnHits = @(& git @pnArgs 2>$null)
-            $pnCode = $LASTEXITCODE
+            $pnHits = @(Invoke-GitText $pnArgs)
+            $pnCode = $script:GitTextCode
             $ErrorActionPreference = $pnPrior
 
             if ($pnCode -eq 1) { continue }
@@ -313,8 +456,8 @@ function Invoke-PrivateNameCheck {
         $pnSep = [string][char]0x1e
         $pnPrior = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $pnLog = @(& git -C $RepoRoot log --branches --not --remotes '--format=%x1e%H%n%B' 2>$null)
-        $pnLogCode = $LASTEXITCODE
+        $pnLog = @(Invoke-GitText @('log', '--branches', '--not', '--remotes', '--format=%x1e%H%n%B'))
+        $pnLogCode = $script:GitTextCode
         $ErrorActionPreference = $pnPrior
         if ($pnLogCode -ne 0) {
             Problem "private names: git log could not list the unpushed commits (exit $pnLogCode), so no commit message was checked. Not a clean run."
@@ -385,9 +528,12 @@ function Invoke-PrivateNameCheck {
 # runs here on what it returns. git grep is still what reads the files: --cached gives the
 # staged blob at the commit gate, exactly as section 16 reads it, and -I skips binaries.
 #
-# EVERY PATH, AT BOTH GATES. There is no folder filter: the commit gate reads every staged
-# path and the push gate every tracked one, so a document, a root file and a file added
-# later are all read without anyone having to name them here.
+# EVERY PATH BUT THE RECORDS, AT BOTH GATES. The commit gate reads every staged path and
+# the push gate every tracked one, so a document, a root file and a file added later are
+# all read without anyone having to name them here. The one exception is the records
+# paths, set aside while the index holds a keel.json (see "the records paths" above
+# section 16): a record names the work it records, which is the history this section keeps
+# out of the product, and it is not product. The ran line says how many were set aside.
 #
 # Defined here, ahead of section 1, so -HistoryOnly can run it alone; on an ordinary run
 # it is called after section 17.
@@ -423,27 +569,33 @@ function Get-HistoryHits {
 }
 
 function Invoke-HistoryIdCheck {
+    Initialize-RecordsPaths
     $script:HistoryAllowSeen = 0
     $hiScope = 'tracked'
     $hiPrior = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     if ($CommitGate) {
         $hiScope = 'staged'
-        $hiAll = @(& git -C $RepoRoot diff --cached --name-only --diff-filter=d 2>$null)
+        $hiAll = @(Invoke-GitText @('diff', '--cached', '--name-only', '--diff-filter=d'))
     }
     else {
-        $hiAll = @(& git -C $RepoRoot ls-files 2>$null)
+        $hiAll = @(Invoke-GitText @('ls-files'))
     }
-    $hiListCode = $LASTEXITCODE
+    $hiListCode = $script:GitTextCode
     $ErrorActionPreference = $hiPrior
     if ($hiListCode -ne 0) {
         Problem "history ids: git could not list the $hiScope files (exit $hiListCode), so no file was checked. Not a clean run."
         $hiAll = @()
     }
-    $hiPaths = @($hiAll | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    $hiPaths = @()
+    $hiSetAside = 0
+    foreach ($hiEach in @($hiAll | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })) {
+        if (Test-RecordsPath ([string]$hiEach)) { $hiSetAside++; continue }
+        $hiPaths += [string]$hiEach
+    }
 
     if ($hiPaths.Count -eq 0) {
-        Ran "history ids: 0 $hiScope path(s), nothing to read"
+        Ran "history ids: 0 $hiScope path(s) to read, $hiSetAside records path(s) left alone"
         return
     }
 
@@ -468,24 +620,24 @@ function Invoke-HistoryIdCheck {
 
         # How many of these git reads as text: '^' matches any line, so a file is listed
         # unless it is binary or empty.
-        $hiCountArgs = @('-C', $RepoRoot, 'grep', '-I', '-l', '--no-color')
+        $hiCountArgs = @('grep', '-I', '-l', '--no-color')
         if ($CommitGate) { $hiCountArgs += '--cached' }
         $hiCountArgs += @('-e', '^', '--') + $hiBatch
         $hiPrior = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $hiListed = @(& git @hiCountArgs 2>$null)
-        $hiCountCode = $LASTEXITCODE
+        $hiListed = @(Invoke-GitText $hiCountArgs)
+        $hiCountCode = $script:GitTextCode
         $ErrorActionPreference = $hiPrior
         if ($hiCountCode -eq 0) { $hiTextFiles += $hiListed.Count }
         elseif ($hiCountCode -ne 1) { Problem "history ids: git grep could not count the text files (exit $hiCountCode). Not a clean run." }
 
-        $hiArgs = @('-C', $RepoRoot, 'grep', '-I', '-n', '--no-color')
+        $hiArgs = @('grep', '-I', '-n', '--no-color')
         if ($CommitGate) { $hiArgs += '--cached' }
         $hiArgs += @('-e', '[0-9]', '--') + $hiBatch
         $hiPrior = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $hiLines = @(& git @hiArgs 2>$null)
-        $hiCode = $LASTEXITCODE
+        $hiLines = @(Invoke-GitText $hiArgs)
+        $hiCode = $script:GitTextCode
         $ErrorActionPreference = $hiPrior
         if ($hiCode -eq 1) { continue }
         if ($hiCode -ne 0) {
@@ -505,7 +657,186 @@ function Invoke-HistoryIdCheck {
     }
 
     $hiSkipped = $hiPaths.Count - $hiTextFiles
-    Ran ("history ids: {0} {1} path(s) in the repository, {2} read as text, {3} skipped as binary or empty, {4} line(s) or path(s) refused, {5} allowlisted example(s) seen" -f $hiPaths.Count, $hiScope, $hiTextFiles, $hiSkipped, $hiRefused, $script:HistoryAllowSeen)
+    Ran ("history ids: {0} {1} path(s) in the repository, {2} read as text, {3} skipped as binary or empty, {4} line(s) or path(s) refused, {5} allowlisted example(s) seen, {6} records path(s) left alone" -f $hiPaths.Count, $hiScope, $hiTextFiles, $hiSkipped, $hiRefused, $script:HistoryAllowSeen, $hiSetAside)
+}
+
+# --- 25. no user folder path in anything this repo carries ------------------
+#
+# A path into a person's own user folder names that person: the folder is called after
+# their account. Tools print such paths freely - an error message, a log line, a session
+# transcript - so one pasted into a record, a script or a commit message publishes a name.
+# This section refuses one in file contents, file paths and commit messages. At the commit
+# gate it reads the staged content and path of each staged file. At the push gate it reads
+# every tracked path, each file's content as it stands in the working tree, and the message
+# of every commit on a local branch that no remote-tracking ref contains. Unlike section 16
+# it needs no list, because the shape of the path is what it looks for.
+#
+# WHAT IT REFUSES. The Users folder followed by a name, in three spellings: after a drive
+# letter, a colon and any run of slashes or backslashes (so the form escaped inside a JSON
+# string too); after a drive written the POSIX way, a slash, a letter and a slash; and the
+# folder-name form a tool makes by turning every separator into a hyphen, a drive letter,
+# two hyphens and Users-. In each, what follows must be a letter or a number (any
+# Unicode letter or number character, a digit or a fraction among them), which is what
+# makes it a name. So the placeholder C:\Users\<your user name>, the elided C:\\Users\\...
+# and %USERPROFILE% all pass, and the documents use those.
+#
+# WHEREVER IT APPEARS. Nothing is asked of the character before a form, because the forms a
+# tool writes are often glued to one: a path that starts a line inside a JSON string follows
+# the escape for the line break, and a POSIX path such as /mnt/c/Users/... sits inside a
+# longer one. So text that merely ends in a drive letter before such a path is refused too,
+# which is the safe direction.
+#
+# TWO LIMITS, STATED.
+#   - The folder must be spelled Users with that case, so a lower-case spelling is not
+#     refused.
+#   - The letter or number is tested as one UTF-16 character, so a name whose first
+#     character is stored as a surrogate pair (one outside the basic multilingual plane,
+#     such as a letter of a supplementary script) is not refused. A letter or number of the
+#     basic plane, in any script, is.
+#
+# NAMES OUTSIDE ASCII. Paths are listed and searched through Invoke-GitText, so a file
+# whose own name holds an accented letter is read like any other, and its name is matched
+# and masked as the file's own, not as git's quoted form of it.
+#
+# READ EVERYWHERE, RECORDS INCLUDED. The records paths (above section 16) are read like any
+# other file, because a record is published with the repo; the ran line counts them.
+#
+# A REFUSAL NEVER PRINTS THE PATH IT FOUND. A refusal names the file and line, or the
+# commit; any file path it prints has each match masked with asterisks, together with
+# everything after it up to the next slash or backslash, so a name holding a space or any
+# other character is masked whole. git's stderr is discarded rather than relayed.
+#
+# HOW IT READS. As section 18 does: git grep lists the lines holding the literal word Users,
+# which every refused form contains, so the prefilter cannot fall out of step with the
+# pattern; --cached gives the staged blob at the commit gate; -I skips binaries; and the
+# pattern runs here, in .NET, so the masking below uses the same engine. Commit messages
+# are read as section 16 reads them. A git exit other than 0 (lines found) or 1 (none) is a
+# problem.
+#
+# Defined here, ahead of section 1, so -UserPathsOnly can run it alone; on an ordinary run
+# it is called after section 24.
+$script:UserPathRegex = [regex]::new(
+    '(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users[\\/]+[\p{L}\p{N}]' +
+    '|[A-Za-z]--Users-[\p{L}\p{N}]')
+# The same, extended up to the next separator, for masking a path that is printed.
+$script:UserPathMask = [regex]::new(
+    '(?:[A-Za-z]:[\\/]+|/[A-Za-z]/)Users[\\/]+[\p{L}\p{N}][^\\/]*' +
+    '|[A-Za-z]--Users-[\p{L}\p{N}][^\\/]*')
+
+function Format-UpPath {
+    param([string]$UpPath)
+    $upStars = [System.Text.RegularExpressions.MatchEvaluator] { param($upM) '*' * $upM.Value.Length }
+    return $script:UserPathMask.Replace($UpPath, $upStars)
+}
+
+function Invoke-UserPathCheck {
+    Initialize-RecordsPaths
+    $upScope = 'tracked'
+    $upPrior = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    if ($CommitGate) {
+        $upScope = 'staged'
+        $upAll = @(Invoke-GitText @('diff', '--cached', '--name-only', '--diff-filter=d'))
+    }
+    else {
+        $upAll = @(Invoke-GitText @('ls-files'))
+    }
+    $upListCode = $script:GitTextCode
+    $ErrorActionPreference = $upPrior
+    if ($upListCode -ne 0) {
+        Problem "user paths: git could not list the $upScope files (exit $upListCode), so no file was checked. Not a clean run."
+        $upAll = @()
+    }
+    $upPaths = @($upAll | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    $upAdvice = 'Write the folder as %USERPROFILE%, or as a placeholder such as C:\Users\<your user name>.'
+    $upRefused = 0
+    $upRecords = 0
+
+    # The paths themselves.
+    foreach ($upPath in $upPaths) {
+        if (Test-RecordsPath ([string]$upPath)) { $upRecords++ }
+        if ($script:UserPathRegex.IsMatch([string]$upPath)) {
+            $upRefused++
+            Problem ("user paths: a {0} path holds a user folder path: {1}. The path is shown masked. {2}" -f $upScope, (Format-UpPath ([string]$upPath)), $upAdvice)
+        }
+    }
+
+    # The contents, one git grep for the lines holding Users per batch of paths.
+    $upTextFiles = 0
+    for ($upB = 0; $upB -lt $upPaths.Count; $upB += 200) {
+        $upEnd = [Math]::Min($upB + 199, $upPaths.Count - 1)
+        $upBatch = @($upPaths[$upB..$upEnd])
+
+        # How many of these git reads as text: '^' matches any line, so a file is listed
+        # unless it is binary or empty.
+        $upCountArgs = @('grep', '-I', '-l', '--no-color')
+        if ($CommitGate) { $upCountArgs += '--cached' }
+        $upCountArgs += @('-e', '^', '--') + $upBatch
+        $upPrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $upListed = @(Invoke-GitText $upCountArgs)
+        $upCountCode = $script:GitTextCode
+        $ErrorActionPreference = $upPrior
+        if ($upCountCode -eq 0) { $upTextFiles += $upListed.Count }
+        elseif ($upCountCode -ne 1) { Problem "user paths: git grep could not count the text files (exit $upCountCode). Not a clean run." }
+
+        $upArgs = @('grep', '-I', '-n', '--no-color')
+        if ($CommitGate) { $upArgs += '--cached' }
+        $upArgs += @('-F', '-e', 'Users', '--') + $upBatch
+        $upPrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $upLines = @(Invoke-GitText $upArgs)
+        $upCode = $script:GitTextCode
+        $ErrorActionPreference = $upPrior
+        if ($upCode -eq 1) { continue }
+        if ($upCode -ne 0) {
+            Problem "user paths: git grep failed (exit $upCode), so a batch of $($upBatch.Count) $upScope file(s) was NOT CHECKED."
+            continue
+        }
+        foreach ($upLine in $upLines) {
+            if ([string]$upLine -notmatch '^(.+?):(\d+):(.*)$') { continue }
+            $upFile = $Matches[1]
+            $upNum  = $Matches[2]
+            if (-not $script:UserPathRegex.IsMatch($Matches[3])) { continue }
+            $upRefused++
+            Problem ("user paths: {0} line {1} holds a user folder path. The path is not printed; open the file at that line. {2}" -f (Format-UpPath $upFile), $upNum, $upAdvice)
+        }
+    }
+
+    # Commit messages, at push only: every local branch's commits no remote holds yet.
+    $upMsgCount = 0
+    if (-not $CommitGate) {
+        $upSep = [string][char]0x1e
+        $upPrior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $upLog = @(Invoke-GitText @('log', '--branches', '--not', '--remotes', '--format=%x1e%H%n%B'))
+        $upLogCode = $script:GitTextCode
+        $ErrorActionPreference = $upPrior
+        if ($upLogCode -ne 0) {
+            Problem "user paths: git log could not list the unpushed commits (exit $upLogCode), so no commit message was checked. Not a clean run."
+        }
+        else {
+            foreach ($upChunk in (($upLog -join "`n") -split $upSep)) {
+                if ($upChunk.Trim() -eq '') { continue }
+                $upMsgCount++
+                $upNl  = $upChunk.IndexOf("`n")
+                $upSha = $upChunk
+                $upMsg = ''
+                if ($upNl -ge 0) { $upSha = $upChunk.Substring(0, $upNl); $upMsg = $upChunk.Substring($upNl + 1) }
+                $upShort = $upSha.Trim()
+                if ($upShort.Length -gt 7) { $upShort = $upShort.Substring(0, 7) }
+                if ($script:UserPathRegex.IsMatch($upMsg)) {
+                    Problem ("user paths: the message of unpushed commit {0} holds a user folder path. The path is not printed. {1}" -f $upShort, $upAdvice)
+                }
+            }
+        }
+    }
+
+    $upSkipped = $upPaths.Count - $upTextFiles
+    $upLedger = "user paths: {0} {1} path(s), {2} read as text, {3} not read as text, {4} records path(s) read, {5} line(s) or path(s) refused" -f $upPaths.Count, $upScope, $upTextFiles, $upSkipped, $upRecords, $upRefused
+    if (-not $CommitGate) { $upLedger += (", and {0} unpushed commit message(s)" -f $upMsgCount) }
+    Ran $upLedger
 }
 
 # The ran ledger prints on EVERY run, before the verdict and whether or not anything
@@ -533,6 +864,11 @@ if ($PrivateNamesOnly) {
 
 if ($HistoryOnly) {
     Invoke-HistoryIdCheck
+    Write-Verdict
+}
+
+if ($UserPathsOnly) {
+    Invoke-UserPathCheck
     Write-Verdict
 }
 
@@ -602,18 +938,24 @@ else { Problem 'scripts/gen-suite-docs.ps1 is missing, so the inventory cannot b
 # --- 4. every script is ASCII-only ------------------------------------------
 # They run under powershell.exe -NoProfile (5.1). A stray smart quote or em dash
 # becomes mojibake there and can break parsing outright.
+#
+# The records paths (above section 16) are left alone: a script kept as a record is the
+# evidence of a measurement, not a script this repo runs. The walk reads the folder, so the
+# test is on each file's path relative to the repo root.
 $asciiScanned = 0
+$asciiSetAside = 0
 foreach ($f in @(Get-ChildItem -LiteralPath $RepoRoot -Filter '*.ps1' -Recurse -File -ErrorAction SilentlyContinue)) {
+    $rel = $f.FullName.Substring($RepoRoot.Length + 1)
+    if (Test-RecordsPath $rel) { $asciiSetAside++; continue }
     $asciiScanned++
     $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
     $bad = 0
     for ($i = 0; $i -lt $bytes.Length; $i++) { if ($bytes[$i] -gt 127) { $bad++ } }
     if ($bad -gt 0) {
-        $rel = $f.FullName.Substring($RepoRoot.Length + 1)
         Problem "$rel contains $bad non-ASCII byte(s). Scripts must be ASCII-only - they run under Windows PowerShell 5.1."
     }
 }
-Ran ("ascii: {0} .ps1 file(s) scanned for non-ASCII bytes" -f $asciiScanned)
+Ran ("ascii: {0} .ps1 file(s) scanned for non-ASCII bytes, {1} records path(s) left alone" -f $asciiScanned, $asciiSetAside)
 
 # --- 5. the wrapper is the only writer of state -----------------------------
 # Anything else touching state.json directly would make the state file stop
@@ -639,9 +981,13 @@ Ran ("ascii: {0} .ps1 file(s) scanned for non-ASCII bytes" -f $asciiScanned)
 # with the extension filter and WITHOUT the ignore limb, this rule still reports
 # .remember/now.md and still blocks every commit. The ignore limb is the only
 # thing that lifts that block.
+#
+# The records paths (above section 16) are left alone too: a plan or a record may quote
+# the very command this rule refuses, as the evidence of why the rule exists.
 $wrapperName = 'keel-state.ps1'
 $stateScanned = 0
 $stateSkipped = 0
+$stateSetAside = 0
 $stateFiles = @(Get-ChildItem -LiteralPath $RepoRoot -Recurse -File -ErrorAction SilentlyContinue |
                 Where-Object { $_.Extension -eq '.ps1' -or $_.Extension -eq '.md' })
 $stateIgnored = Get-IgnoredPathSet -RelPaths @($stateFiles | ForEach-Object { $_.FullName.Substring($RepoRoot.Length + 1).Replace([char]92, '/') })
@@ -653,6 +999,7 @@ foreach ($f in $stateFiles) {
         $stateSkipped++
         continue
     }
+    if (Test-RecordsPath $rel) { $stateSetAside++; continue }
     $stateScanned++
     $c = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8
     if ($c -match 'Set-Content[^\r\n]*state\.json' -or $c -match 'Out-File[^\r\n]*state\.json') {
@@ -660,10 +1007,10 @@ foreach ($f in $stateFiles) {
     }
 }
 if ($null -eq $stateIgnored) {
-    Ran ("state writer: {0} .ps1/.md file(s) scanned, git could not report ignored paths so none were skipped; only {1} may write state.json" -f $stateScanned, $wrapperName)
+    Ran ("state writer: {0} .ps1/.md file(s) scanned, git could not report ignored paths so none were skipped, {1} records path(s) left alone; only {2} may write state.json" -f $stateScanned, $stateSetAside, $wrapperName)
 }
 else {
-    Ran ("state writer: {0} .ps1/.md file(s) scanned, {1} skipped as git-ignored; only {2} may write state.json" -f $stateScanned, $stateSkipped, $wrapperName)
+    Ran ("state writer: {0} .ps1/.md file(s) scanned, {1} skipped as git-ignored, {2} records path(s) left alone; only {3} may write state.json" -f $stateScanned, $stateSkipped, $stateSetAside, $wrapperName)
 }
 
 # --- 6. no variable is named after a parameter ------------------------------
@@ -677,8 +1024,13 @@ else {
 #
 # Zero tolerance, including function-scope shadowing, which is legal but is the
 # only rule a checker can enforce without parsing scope.
+#
+# The records paths (above section 16) are left alone, as in section 4: a record script is
+# kept as it ran, and renaming its locals would edit the evidence.
 $shadowScanned = 0
+$shadowSetAside = 0
 foreach ($f in @(Get-ChildItem -LiteralPath $RepoRoot -Filter '*.ps1' -Recurse -File -ErrorAction SilentlyContinue)) {
+    if (Test-RecordsPath ($f.FullName.Substring($RepoRoot.Length + 1))) { $shadowSetAside++; continue }
     $lines = @(Get-Content -LiteralPath $f.FullName -Encoding UTF8)
     $joined = ($lines -join "`n")
     if ($joined -notmatch '(?ms)^param\((.*?)^\)') { continue }
@@ -700,7 +1052,7 @@ foreach ($f in @(Get-ChildItem -LiteralPath $RepoRoot -Filter '*.ps1' -Recurse -
         }
     }
 }
-Ran ("param shadowing: {0} .ps1 file(s) with a param() block scanned" -f $shadowScanned)
+Ran ("param shadowing: {0} .ps1 file(s) with a param() block scanned, {1} records path(s) left alone" -f $shadowScanned, $shadowSetAside)
 
 # --- 7. docs move with the change (staged only) -----------------------------
 if ($CommitGate) {
@@ -1482,9 +1834,12 @@ Invoke-PrivateNameCheck
 # --- 17. the private-names check still behaves: run its committed suite ------
 #
 # The fifth sibling of sections 9, 11, 14 and 15, and a sibling for the same reason:
-# scripts/test-private-names.ps1's subject is section 16 alone, which shares no
-# machinery with the charter gate, quarantine, the outward guard or the signal record.
-# A checker that is not wired to anything is a violation of charter P11.
+# scripts/test-private-names.ps1's subject is the two checks that keep a private detail
+# out of what this repo carries, section 16 and section 25, which share no machinery with
+# the charter gate, quarantine, the outward guard or the signal record. They share one
+# suite because both read the same three things, contents, paths and unpushed messages,
+# and both need the scratch repository with a bare remote that the suite builds. A checker
+# that is not wired to anything is a violation of charter P11.
 #
 # The suite builds one scratch repository with a local bare remote under the temp
 # directory and runs a copy of this script in it once per case, so it costs one
@@ -1902,6 +2257,12 @@ if ($Strict) {
         }
     }
 }
+
+# --- 25. no user folder path in anything this repo carries ------------------
+#
+# Defined above section 1, where its reasoning is written; called here, at both gates. Its
+# suite rows are in scripts/test-private-names.ps1, which section 17 runs.
+Invoke-UserPathCheck
 
 # --- verdict ----------------------------------------------------------------
 Write-Verdict
